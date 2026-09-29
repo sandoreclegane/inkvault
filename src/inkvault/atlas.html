@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memory Atlas</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js"></script>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface-1: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10); --series-1: #2a78d6;
+  --empty: #f0efec;
+  --seq: #cde2fb,#9ec5f4,#6da7ec,#3987e5,#256abf,#184f95,#0d366b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface-1: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10); --series-1: #3987e5;
+    --empty: #232322;
+    --seq: #104281,#184f95,#1c5cab,#2a78d6,#5598e7,#86b6ef,#b7d3f6;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface-1: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10); --series-1: #3987e5;
+  --empty: #232322;
+  --seq: #104281,#184f95,#1c5cab,#2a78d6,#5598e7,#86b6ef,#b7d3f6;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1180px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 22px; font-weight: 600; margin: 0 0 2px; }
+.sub { color: var(--ink-2); margin: 0 0 20px; }
+.filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 20px; }
+.filters button, .filters input { font: inherit; color: var(--ink); background: var(--surface-1);
+  border: 1px solid var(--ring); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+.filters button[aria-pressed="true"] { font-weight: 600; border-color: var(--series-1); }
+.filters button[aria-pressed="true"]::before { content: "✓ "; }
+.filters .custom { display: flex; gap: 6px; align-items: center; color: var(--ink-2); margin-left: 8px; }
+.tiles { display: grid; grid-template-columns: 1.4fr repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+.tile, .card { background: var(--surface-1); border: 1px solid var(--ring); border-radius: 12px; padding: 16px; }
+.tile .label { color: var(--ink-2); font-size: 13px; }
+.tile .value { font-size: 26px; font-weight: 600; margin-top: 4px; }
+.tile.hero .value { font-size: 48px; line-height: 1.1; }
+.tile .note { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.card { margin-bottom: 16px; min-width: 0; }
+.card h2 { font-size: 15px; font-weight: 600; margin: 0; }
+.card .desc { color: var(--ink-2); font-size: 13px; margin: 2px 0 10px; }
+.head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.head button { font: inherit; font-size: 12px; color: var(--ink-2); background: none; border: 1px solid var(--ring);
+  border-radius: 6px; padding: 3px 8px; cursor: pointer; white-space: nowrap; }
+.chart { width: 100%; }
+.multiples { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.multiples .mini h3 { font-size: 13px; font-weight: 600; margin: 0; }
+.multiples .mini .total { color: var(--ink-2); font-size: 12px; }
+.tablewrap { max-height: 320px; overflow: auto; margin-top: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--grid); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.empty { color: var(--muted); padding: 24px 0; text-align: center; }
+footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
+@media (max-width: 820px) { .grid2 { grid-template-columns: 1fr; } .tiles { grid-template-columns: 1fr 1fr; } .tile.hero { grid-column: 1 / -1; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Memory Atlas</h1>
+  <p class="sub" id="sub"></p>
+
+  <div class="filters" role="group" aria-label="Date range">
+    <button data-range="all">All time</button>
+    <button data-range="30">Last 30 days</button>
+    <button data-range="90">Last 90 days</button>
+    <button data-range="365">Last year</button>
+    <span class="custom">from <input type="date" id="from"> to <input type="date" id="to"></span>
+  </div>
+
+  <div class="tiles" id="tiles"></div>
+
+  <section class="card" data-table="calendar">
+    <div class="head"><div><h2>Active hours per day</h2>
+      <p class="desc">How many different hours of each day you were on the computer (screen captures, session summaries, chats). Hover a day for what it was about.</p></div>
+      <button class="tbl">Show table</button></div>
+    <div class="chart" id="calendar" style="height:200px"></div>
+  </section>
+
+  <div class="grid2">
+    <section class="card" data-table="rhythm">
+      <div class="head"><div><h2>When you work</h2>
+        <p class="desc">Share of days you were active in each hour, by weekday (local time).</p></div>
+        <button class="tbl">Show table</button></div>
+      <div class="chart" id="rhythm" style="height:360px"></div>
+    </section>
+    <section class="card" data-table="graph">
+      <div class="head"><div><h2>How projects connect</h2>
+        <p class="desc">Projects that come up in the same session. Bigger dot = more sessions; thicker line = more shared sessions.</p></div>
+        <button class="tbl">Show table</button></div>
+      <div class="chart" id="graph" style="height:360px"></div>
+    </section>
+  </div>
+
+  <section class="card" data-table="themes">
+    <div class="head"><div><h2>Projects over time</h2>
+      <p class="desc">Sessions per week that mention each project, found automatically in your session and chat titles. To choose your own, write <code>Name = pattern</code> lines in <code>themes.txt</code> in your Inkvault folder.</p></div>
+      <button class="tbl">Show table</button></div>
+    <div class="chart" id="themes" style="height:460px"></div>
+  </section>
+
+  <section class="card" data-table="sources">
+    <div class="head"><div><h2>Activity by source</h2>
+      <p class="desc">Records per week from each source. Each panel has its own scale — compare shapes, not heights.</p></div>
+      <button class="tbl">Show table</button></div>
+    <div class="multiples" id="sources"></div>
+  </section>
+
+  <div class="grid2">
+    <section class="card" data-table="apps">
+      <div class="head"><div><h2>Top apps</h2><p class="desc">Screen captures per app.</p></div>
+        <button class="tbl">Show table</button></div>
+      <div class="chart" id="apps" style="height:380px"></div>
+    </section>
+    <section class="card" data-table="sites">
+      <div class="head"><div><h2>Top sites</h2><p class="desc">Screen captures per website (from Pieces' browser captures).</p></div>
+        <button class="tbl">Show table</button></div>
+      <div class="chart" id="sites" style="height:380px"></div>
+    </section>
+  </div>
+
+  <footer id="foot"></footer>
+</main>
+
+<script>
+const DATA = /*DATA*/null;
+const SOURCES = [["captures", "Screen captures"], ["sessions", "Session summaries"], ["chats", "Chat messages"]];
+const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const allDays = Object.keys(DATA.days);
+const FIRST = allDays[0], LAST = allDays[allDays.length - 1];
+
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const fmt = n => n.toLocaleString();
+const compact = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? Math.round(n / 1e3) + "K" : n.toLocaleString();
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const addDays = (iso, n) => { const d = new Date(iso + "T12:00:00"); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+const weekOf = iso => { const d = new Date(iso + "T12:00:00"); d.setDate(d.getDate() - (d.getDay() + 6) % 7); return d.toISOString().slice(0, 10); };
+const bits = m => { let n = 0; for (; m; m &= m - 1) n++; return n; };
+const weeksBetween = (a, b) => { const out = []; for (let w = weekOf(a); w <= b; w = addDays(w, 7)) out.push(w); return out; };
+
+let range = {from: FIRST, to: LAST};
+const charts = {};
+const tables = {};  // chart id -> {head: [...], rows: [[...]]}
+
+function theme() {
+  return {ink: css("--ink"), ink2: css("--ink-2"), muted: css("--muted"), grid: css("--grid"), axis: css("--axis"),
+          surface: css("--surface-1"), s1: css("--series-1"), empty: css("--empty"), seq: css("--seq").split(",").map(s => s.trim())};
+}
+function tooltipBase(t) {
+  return {backgroundColor: t.surface, borderColor: t.grid, textStyle: {color: t.ink, fontSize: 12},
+          extraCssText: "border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);"};
+}
+// Charts follow their own container, not the window: panes and layout reflows resize without a window event.
+const resizer = new ResizeObserver(entries => {
+  for (const e of entries) {
+    if (e.target.id === "calendar") renderCalendar(theme());  // cell size depends on width
+    else charts[e.target.id]?.resize();
+  }
+});
+function chart(id) {
+  const el = document.getElementById(id);
+  if (!charts[id]) { charts[id] = echarts.init(el, null, {renderer: "canvas"}); resizer.observe(el); }
+  return charts[id];
+}
+function inRange(day) { return day >= range.from && day <= range.to; }
+// A day's digest from the local model, or its session titles when there is none yet.
+function dayStory(day) { return DATA.digests[day] || (DATA.highlights[day] || []).join("; "); }
+
+function renderTiles() {
+  let active = 0, captures = 0, sessions = 0, chats = 0;
+  for (const [day, d] of Object.entries(DATA.days)) {
+    if (!inRange(day)) continue;
+    if (d.hours) active++;
+    captures += d.captures; sessions += d.sessions; chats += d.chats;
+  }
+  const tiles = [
+    ["Days remembered", fmt(active), `${range.from} → ${range.to}`, true],
+    ["Screen captures", compact(captures), "what Pieces saw"],
+    ["Session summaries", fmt(sessions), "written by Pieces"],
+    ["Chat messages", compact(chats), "Pieces chats"],
+    ["Saved snippets", fmt(DATA.snippets), "all time"],
+  ];
+  const box = document.getElementById("tiles");
+  box.replaceChildren(...tiles.map(([label, value, note, hero]) => {
+    const el = document.createElement("div");
+    el.className = "tile" + (hero ? " hero" : "");
+    for (const [cls, txt] of [["label", label], ["value", value], ["note", note]]) {
+      const s = document.createElement("div"); s.className = cls; s.textContent = txt; el.append(s);
+    }
+    return el;
+  }));
+}
+
+function renderCalendar(t) {
+  const pts = [], rows = [];
+  let max = 1;
+  for (const [day, d] of Object.entries(DATA.days)) {
+    if (!inRange(day)) continue;
+    const h = bits(d.hours);
+    pts.push([day, h]); rows.push([day, h, dayStory(day)]); max = Math.max(max, h);
+  }
+  tables.calendar = {head: ["Day", "Active hours", "What the day was about"], rows};
+  const el = document.getElementById("calendar");
+  const weeks = weeksBetween(range.from, range.to).length;
+  const cell = Math.max(8, Math.min(18, Math.floor((el.clientWidth - 70) / Math.max(weeks, 1))));
+  el.style.height = (cell * 7 + 60) + "px";
+  chart("calendar").resize();
+  chart("calendar").setOption({
+    tooltip: {...tooltipBase(t), extraCssText: tooltipBase(t).extraCssText + "max-width:340px;white-space:normal;",
+              formatter: p => {
+                const day = p.value[0], digest = DATA.digests[day], hl = DATA.highlights[day] || [];
+                const when = new Date(day + "T12:00:00").toLocaleDateString(undefined, {weekday: "long", month: "long", day: "numeric", year: "numeric"});
+                const story = digest ? `<div style="margin-top:6px;line-height:1.45">${esc(digest)}</div>`
+                  : hl.length ? `<div style="margin-top:6px;color:${t.ink2}">${hl.map(esc).join("<br>")}</div>` : "";
+                return `<b>${p.value[1]} active hours</b> <span style="color:${t.ink2}">· ${esc(when)}</span>${story}`;
+              }},
+    visualMap: {min: 0, max, calculable: false, orient: "horizontal", right: 0, bottom: 0, itemWidth: 10, itemHeight: 100,
+                inRange: {color: t.seq}, textStyle: {color: t.muted, fontSize: 11}, text: [String(max) + " h", "0"]},
+    calendar: {range: [range.from, range.to], top: 24, left: 36, right: 8, cellSize: [cell, cell],
+               splitLine: {show: false}, itemStyle: {color: t.empty, borderColor: t.surface, borderWidth: 2},
+               dayLabel: {firstDay: 1, nameMap: ["S", "M", "T", "W", "T", "F", "S"], color: t.muted, fontSize: 10},
+               monthLabel: {color: t.ink2, fontSize: 11}, yearLabel: {show: false}},
+    series: [{type: "heatmap", coordinateSystem: "calendar", data: pts,
+              emphasis: {itemStyle: {borderColor: t.ink, borderWidth: 1}}}],
+  }, true);
+}
+
+function renderRhythm(t) {
+  const hits = Array.from({length: 7}, () => new Array(24).fill(0));
+  const daysPer = new Array(7).fill(0);
+  for (const [day, d] of Object.entries(DATA.days)) {
+    if (!inRange(day) || !d.hours) continue;
+    const wd = (new Date(day + "T12:00:00").getDay() + 6) % 7;
+    daysPer[wd]++;
+    for (let h = 0; h < 24; h++) if (d.hours & (1 << h)) hits[wd][h]++;
+  }
+  const pts = [], rows = [];
+  for (let w = 0; w < 7; w++) for (let h = 0; h < 24; h++) {
+    const pct = daysPer[w] ? Math.round(100 * hits[w][h] / daysPer[w]) : 0;
+    pts.push([h, w, pct]); rows.push([WEEKDAYS[w], `${String(h).padStart(2, "0")}:00`, pct + "%"]);
+  }
+  tables.rhythm = {head: ["Weekday", "Hour", "Days active"], rows};
+  const hourName = h => h === 0 ? "12a" : h < 12 ? h + "a" : h === 12 ? "12p" : (h - 12) + "p";
+  chart("rhythm").setOption({
+    tooltip: {...tooltipBase(t), formatter: p => `<b>${p.value[2]}% of ${esc(WEEKDAYS[p.value[1]])}s</b><br>` +
+              `<span style="color:${t.ink2}">active at ${hourName(p.value[0])}</span>`},
+    grid: {top: 8, left: 40, right: 8, bottom: 56},
+    xAxis: {type: "category", data: [...Array(24).keys()].map(hourName), axisTick: {show: false},
+            axisLine: {lineStyle: {color: t.axis}}, axisLabel: {color: t.muted, fontSize: 10, interval: 2}},
+    yAxis: {type: "category", data: WEEKDAYS, inverse: true, axisTick: {show: false}, axisLine: {show: false},
+            axisLabel: {color: t.muted, fontSize: 11}},
+    visualMap: {min: 0, max: 100, orient: "horizontal", left: "center", bottom: 0, itemWidth: 10, itemHeight: 120,
+                inRange: {color: t.seq}, textStyle: {color: t.muted, fontSize: 11}, text: ["100%", "0%"]},
+    series: [{type: "heatmap", data: pts, itemStyle: {borderColor: t.surface, borderWidth: 2, borderRadius: 3},
+              emphasis: {itemStyle: {borderColor: t.ink, borderWidth: 1}}}],
+  }, true);
+}
+
+function themedDocs() { return DATA.docs.filter(([day]) => inRange(day)); }
+
+function renderGraph(t) {
+  const docs = themedDocs();
+  const count = new Array(DATA.themes.length).fill(0), pair = {};
+  for (const [, th] of docs) {
+    for (const i of th) count[i]++;
+    for (let a = 0; a < th.length; a++) for (let b = a + 1; b < th.length; b++) {
+      const k = th[a] + "-" + th[b]; pair[k] = (pair[k] || 0) + 1;
+    }
+  }
+  const maxC = Math.max(1, ...count);
+  const nodes = DATA.themes.map((name, i) => ({id: String(i), name, value: count[i],
+    symbolSize: count[i] ? 10 + 34 * Math.sqrt(count[i] / maxC) : 0,
+    itemStyle: {color: t.s1, borderColor: t.surface, borderWidth: 2},
+    label: {show: count[i] > 0, color: t.ink, fontSize: 11, position: "right"}})).filter(n => n.value > 0);
+  const edgesAll = Object.entries(pair).map(([k, v]) => { const [a, b] = k.split("-"); return {source: a, target: b, value: v}; });
+  const maxE = Math.max(1, ...edgesAll.map(e => e.value));
+  const floor = Math.max(1, Math.round(maxE * 0.03));  // hide one-off pairings so the structure shows
+  const edges = edgesAll.filter(e => e.value >= floor).map(e => ({...e,
+    lineStyle: {width: 1 + 5 * e.value / maxE, color: t.axis, opacity: 0.9, curveness: 0.1}}));
+  tables.graph = {head: ["Project", "Also in the same session", "Shared sessions"],
+    rows: edgesAll.sort((a, b) => b.value - a.value).map(e => [DATA.themes[e.source], DATA.themes[e.target], fmt(e.value)])};
+  chart("graph").setOption({
+    tooltip: {...tooltipBase(t), formatter: p => p.dataType === "edge"
+      ? `<b>${fmt(p.data.value)} shared sessions</b><br><span style="color:${t.ink2}">${esc(DATA.themes[p.data.source])} + ${esc(DATA.themes[p.data.target])}</span>`
+      : `<b>${fmt(p.data.value)} sessions</b><br><span style="color:${t.ink2}">${esc(p.data.name)}</span>`},
+    series: [{type: "graph", layout: "force", roam: true, draggable: true, data: nodes, links: edges,
+              force: {repulsion: 170, edgeLength: [50, 130], gravity: 0.3},
+              emphasis: {focus: "adjacency", lineStyle: {color: t.s1}}}],
+  }, true);
+}
+
+function renderThemes(t) {
+  const weeks = weeksBetween(range.from, range.to);
+  const idx = Object.fromEntries(weeks.map((w, i) => [w, i]));
+  const grid = DATA.themes.map(() => new Array(weeks.length).fill(0));
+  for (const [day, th] of themedDocs()) { const w = idx[weekOf(day)]; if (w !== undefined) for (const i of th) grid[i][w]++; }
+  const order = DATA.themes.map((_, i) => i).filter(i => grid[i].some(v => v))
+    .sort((a, b) => grid[b].reduce((x, y) => x + y) - grid[a].reduce((x, y) => x + y));
+  const pts = [];
+  let max = 1;
+  order.forEach((ti, row) => grid[ti].forEach((v, w) => { pts.push([w, row, v || null]); max = Math.max(max, v); }));
+  tables.themes = {head: ["Project", ...weeks.map(w => "wk " + w)], rows: order.map(i => [DATA.themes[i], ...grid[i]])};
+  document.getElementById("themes").style.height = (order.length * 26 + 80) + "px";
+  chart("themes").resize();
+  chart("themes").setOption({
+    tooltip: {...tooltipBase(t), formatter: p => `<b>${fmt(p.value[2] || 0)} sessions</b><br>` +
+              `<span style="color:${t.ink2}">${esc(DATA.themes[order[p.value[1]]])} · week of ${esc(weeks[p.value[0]])}</span>`},
+    grid: {top: 8, left: 170, right: 12, bottom: 56},
+    xAxis: {type: "category", data: weeks.map(w => new Date(w + "T12:00:00").toLocaleDateString(undefined, {month: "short", day: "numeric"})),
+            axisTick: {show: false}, axisLine: {lineStyle: {color: t.axis}}, axisLabel: {color: t.muted, fontSize: 10}},
+    yAxis: {type: "category", data: order.map(i => DATA.themes[i]), inverse: true, axisTick: {show: false},
+            axisLine: {show: false}, axisLabel: {color: t.ink2, fontSize: 12}},
+    visualMap: {min: 1, max, orient: "horizontal", left: "center", bottom: 0, itemWidth: 10, itemHeight: 120,
+                inRange: {color: t.seq}, textStyle: {color: t.muted, fontSize: 11}, text: [String(max), "1"]},
+    series: [{type: "heatmap", data: pts, itemStyle: {borderColor: t.surface, borderWidth: 2, borderRadius: 2},
+              emphasis: {itemStyle: {borderColor: t.ink, borderWidth: 1}}}],
+  }, true);
+}
+
+function renderSources(t) {
+  const weeks = weeksBetween(range.from, range.to);
+  const idx = Object.fromEntries(weeks.map((w, i) => [w, i]));
+  const sums = Object.fromEntries(SOURCES.map(([k]) => [k, new Array(weeks.length).fill(0)]));
+  for (const [day, d] of Object.entries(DATA.days)) {
+    if (!inRange(day)) continue;
+    const w = idx[weekOf(day)];
+    for (const [k] of SOURCES) sums[k][w] += d[k];
+  }
+  tables.sources = {head: ["Week of", ...SOURCES.map(([, n]) => n)], rows: weeks.map((w, i) => [w, ...SOURCES.map(([k]) => sums[k][i])])};
+  const box = document.getElementById("sources");
+  if (!box.children.length) {
+    for (const [k, name] of SOURCES) {
+      const mini = document.createElement("div"); mini.className = "mini";
+      const h = document.createElement("h3"); h.textContent = name;
+      const tot = document.createElement("div"); tot.className = "total"; tot.id = "tot-" + k;
+      const c = document.createElement("div"); c.id = "src-" + k; c.style.height = "120px";
+      mini.append(h, tot, c); box.append(mini);
+    }
+  }
+  const labels = weeks.map(w => new Date(w + "T12:00:00").toLocaleDateString(undefined, {month: "short", day: "numeric"}));
+  for (const [k] of SOURCES) {
+    document.getElementById("tot-" + k).textContent = fmt(sums[k].reduce((a, b) => a + b, 0)) + " in range";
+    chart("src-" + k).setOption({
+      tooltip: {...tooltipBase(t), trigger: "axis", axisPointer: {type: "line", lineStyle: {color: t.axis}},
+                formatter: ps => `<b>${fmt(ps[0].value)}</b><br><span style="color:${t.ink2}">week of ${esc(ps[0].axisValue)}</span>`},
+      grid: {top: 8, left: 4, right: 8, bottom: 20, containLabel: true},
+      xAxis: {type: "category", data: labels, boundaryGap: false, axisTick: {show: false},
+              axisLine: {lineStyle: {color: t.axis}}, axisLabel: {color: t.muted, fontSize: 10, interval: "auto", hideOverlap: true}},
+      yAxis: {type: "value", splitNumber: 2, splitLine: {lineStyle: {color: t.grid}},
+              axisLabel: {color: t.muted, fontSize: 10, formatter: v => compact(v)}},
+      series: [{type: "line", data: sums[k], symbol: "none", lineStyle: {width: 2, color: t.s1, cap: "round", join: "round"},
+                areaStyle: {color: t.s1, opacity: 0.1}}],
+    }, true);
+  }
+}
+
+function renderBars(id, byDay, t, noun) {
+  const total = {};
+  for (const [day, counts] of Object.entries(byDay)) if (inRange(day))
+    for (const [k, v] of Object.entries(counts)) total[k] = (total[k] || 0) + v;
+  const all = Object.entries(total).sort((a, b) => b[1] - a[1]);
+  tables[id] = {head: [noun, "Count"], rows: all.map(([k, v]) => [k, fmt(v)])};
+  const top = all.slice(0, 12).reverse();
+  const el = document.getElementById(id);
+  if (!top.length) { chart(id).clear(); el.dataset.empty = "1"; return; }
+  chart(id).setOption({
+    tooltip: {...tooltipBase(t), formatter: p => `<b>${fmt(p.value)}</b><br><span style="color:${t.ink2}">${esc(p.name)}</span>`},
+    grid: {top: 4, left: 8, right: 56, bottom: 4, containLabel: true},
+    xAxis: {type: "value", show: false},
+    yAxis: {type: "category", data: top.map(([k]) => k), axisTick: {show: false}, axisLine: {lineStyle: {color: t.axis}},
+            axisLabel: {color: t.ink2, fontSize: 12, width: 150, overflow: "truncate"}},
+    series: [{type: "bar", data: top.map(([, v]) => v), barMaxWidth: 18, itemStyle: {color: t.s1, borderRadius: [0, 4, 4, 0]},
+              label: {show: true, position: "right", color: t.ink2, fontSize: 11, formatter: p => compact(p.value)}}],
+  }, true);
+}
+
+function renderTableFor(card) {
+  const id = card.dataset.table, spec = tables[id];
+  let wrap = card.querySelector(".tablewrap");
+  if (!wrap) return;
+  const table = document.createElement("table");
+  const tr = document.createElement("tr");
+  // Right-align columns that hold numbers (counts, "12%", "1,234"); text columns stay left.
+  const numeric = spec.head.map((_, i) => i > 0 && spec.rows.every(r => typeof r[i] === "number" || /^[\d,.%]*$/.test(r[i])));
+  spec.head.forEach((h, i) => { const th = document.createElement("th"); th.textContent = h; if (numeric[i]) th.className = "num"; tr.append(th); });
+  const thead = document.createElement("thead"); thead.append(tr);
+  const tbody = document.createElement("tbody");
+  for (const row of spec.rows) {
+    const r = document.createElement("tr");
+    row.forEach((v, i) => { const td = document.createElement("td"); td.textContent = v; if (numeric[i]) td.className = "num"; r.append(td); });
+    tbody.append(r);
+  }
+  table.append(thead, tbody);
+  wrap.replaceChildren(table);
+}
+
+function render() {
+  const t = theme();
+  document.getElementById("sub").textContent =
+    `Everything your vault holds, ${range.from} to ${range.to}. Private: built from files on this PC.`;
+  renderTiles();
+  renderCalendar(t); renderRhythm(t); renderGraph(t); renderThemes(t); renderSources(t);
+  renderBars("apps", DATA.apps, t, "App"); renderBars("sites", DATA.sites, t, "Site");
+  document.querySelectorAll(".card[data-table]").forEach(renderTableFor);
+  document.getElementById("foot").textContent =
+    `Built ${DATA.built} by Inkvault from your local vault. Nothing on this page was sent anywhere.`;
+}
+
+function setRange(from, to, preset) {
+  range = {from: from < FIRST ? FIRST : from, to: to > LAST ? LAST : to};
+  document.getElementById("from").value = range.from;
+  document.getElementById("to").value = range.to;
+  document.querySelectorAll("[data-range]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.range === preset)));
+  try { localStorage.setItem("inkvault-range", JSON.stringify({...range, preset})); } catch (e) {}
+  render();
+}
+const presets = {
+  all: () => [FIRST, LAST], 30: () => [addDays(LAST, -29), LAST], 90: () => [addDays(LAST, -89), LAST],
+  365: () => [addDays(LAST, -364), LAST],
+};
+document.querySelectorAll("[data-range]").forEach(b => b.addEventListener("click", () => setRange(...presets[b.dataset.range](), b.dataset.range)));
+for (const id of ["from", "to"]) document.getElementById(id).addEventListener("change", () => {
+  const f = document.getElementById("from").value, t = document.getElementById("to").value;
+  if (f && t && f <= t) setRange(f, t, null);
+});
+document.querySelectorAll(".card .tbl").forEach(btn => btn.addEventListener("click", () => {
+  const card = btn.closest(".card");
+  let wrap = card.querySelector(".tablewrap");
+  if (wrap) { wrap.remove(); btn.textContent = "Show table"; return; }
+  wrap = document.createElement("div"); wrap.className = "tablewrap"; card.append(wrap);
+  btn.textContent = "Hide table"; renderTableFor(card);
+}));
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+
+let saved = null;
+try { saved = JSON.parse(localStorage.getItem("inkvault-range")); } catch (e) {}
+if (saved && saved.preset && presets[saved.preset]) setRange(...presets[saved.preset](), saved.preset);
+else setRange(FIRST, LAST, "all");
+</script>
+</body>
+</html>

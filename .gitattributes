@@ -1,0 +1,2 @@
+# Store text with LF line endings so the repo is identical on Windows, macOS and Linux.
+* text=auto eol=lf

@@ -1,0 +1,15 @@
+# User data never lives in this folder (it goes to the Inkvault home, see src/inkvault/paths.py),
+# but guard against someone pointing INKVAULT_HOME here anyway.
+*.db
+*.db-*
+*.npz
+dashboard.html
+vault/
+
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/

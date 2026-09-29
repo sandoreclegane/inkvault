@@ -1,0 +1,50 @@
+"""Where Inkvault keeps a user's data: outside the code, in the platform's app-data folder.
+
+Override with the INKVAULT_HOME environment variable (or --home on the command line).
+"""
+import os
+import sys
+from pathlib import Path
+
+
+def home() -> Path:
+    if os.environ.get("INKVAULT_HOME"):
+        base = Path(os.environ["INKVAULT_HOME"])
+    elif sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Inkvault"
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support" / "Inkvault"
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "inkvault"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def vault_db() -> Path:
+    """The raw export from PiecesOS: the one irreplaceable file."""
+    return home() / "vault.db"
+
+
+def search_db() -> Path:
+    return home() / "search.db"
+
+
+def vectors() -> Path:
+    return home() / "vectors.npz"
+
+
+def digests_db() -> Path:
+    return home() / "digests.db"
+
+
+def dashboard() -> Path:
+    return home() / "dashboard.html"
+
+
+def model_dir() -> Path:
+    return home() / "model"
+
+
+def themes_file() -> Path:
+    """Optional 'Name = regex' lines that override the dashboard's auto-detected projects."""
+    return home() / "themes.txt"

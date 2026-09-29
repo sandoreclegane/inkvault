@@ -1,0 +1,34 @@
+[project]
+name = "inkvault"
+version = "0.1.0"
+description = "Rescue your Pieces long-term memory before it's gone, and search it locally from Claude, Codex, or any MCP client."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "T. Matthew Chase", email = "242277862+sandoreclegane@users.noreply.github.com" }]
+requires-python = ">=3.10"
+dependencies = ["mcp>=2.2", "model2vec>=0.9", "numpy>=2"]
+keywords = ["pieces", "memory", "mcp", "export", "local-first", "claude"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/sandoreclegane/inkvault"
+Issues = "https://github.com/sandoreclegane/inkvault/issues"
+
+[project.scripts]
+inkvault = "inkvault.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
