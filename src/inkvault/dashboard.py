@@ -28,6 +28,8 @@ GENERIC = {
     "performance", "debugging", "testing", "implementation", "communication", "collaboration", "progress",
     "overview", "summary", "notes", "task", "tasks", "new", "top", "what", "mind", "flow", "issues", "fixes",
     "enhancement", "enhancements", "improvements", "application", "app", "apps", "web", "website", "api",
+    "audit", "governance", "logistics", "workspace", "protocol", "security", "support", "planning", "tracking",
+    "investigation", "verification", "validation", "audits", "sync", "status", "check", "checks", "report",
 }
 
 

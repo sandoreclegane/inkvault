@@ -15,6 +15,9 @@ uvx --from git+https://github.com/sandoreclegane/inkvault inkvault rescue
 
 That's the whole thing. It needs [uv](https://docs.astral.sh/uv/getting-started/installation/) and PiecesOS running.
 
+**It takes a while.** PiecesOS hands records over at about 8 per second, so a year of captures (~100,000) takes
+around 3-4 hours. Leave it running, or stop it anytime and run the same command later: it picks up where it left off.
+
 ## What you get
 
 - **The vault**: everything PiecesOS will hand over (captures, summaries and their text, chats, snippets, tags,

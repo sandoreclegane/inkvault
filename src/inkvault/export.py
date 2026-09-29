@@ -121,7 +121,9 @@ def run():
         print(f"PiecesOS isn't answering on port(s) {', '.join(map(str, PORTS))}.\n"
               "Open the Pieces app (or PiecesOS) and try again. If it uses another port, set INKVAULT_PIECES_PORTS.")
         return False
-    print(f"PiecesOS {version} at {pos.base}\nSaving to {paths.vault_db()}", flush=True)
+    print(f"PiecesOS {version} at {pos.base}\nSaving to {paths.vault_db()}\n"
+          "PiecesOS hands records over slowly (~8/second), so a big vault can take a few hours.\n"
+          "It's safe to stop anytime (Ctrl+C) and run again later: it picks up where it left off.", flush=True)
     db = open_vault()
     db.execute("DELETE FROM failures")  # failed items are retried below and re-recorded if they still fail
     db.executemany("INSERT OR REPLACE INTO meta VALUES (?,?)", [
