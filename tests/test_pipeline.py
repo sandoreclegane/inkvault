@@ -138,8 +138,23 @@ def test_interrupted_rescue_still_builds_a_dashboard(vault, monkeypatch):
 def test_status_without_vault(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
     monkeypatch.setenv("INKVAULT_PIECES_PORTS", "1")  # nothing listens there
-    from inkvault import cli, export
-    monkeypatch.setattr(export, "PORTS", [1])
+    from inkvault import cli
     assert cli.main(["status"]) == 0
     out = capsys.readouterr().out
     assert "vault: empty" in out and "not reachable" in out
+
+
+def test_port_file_is_tried_first_and_env_overrides(tmp_path, monkeypatch):
+    from inkvault import export
+    cfg = tmp_path / "Mesh Intelligent Technologies, Inc" / "Pieces OS" / export.PORT_FILE
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("39301\n")
+    monkeypatch.setattr(export, "port_file_dirs", lambda: [tmp_path])
+    monkeypatch.delenv("INKVAULT_PIECES_PORTS", raising=False)
+    assert export.ports() == [39301, 39300, 1000]
+    cfg.write_text("39300")  # same as a default: no duplicate
+    assert export.ports() == [39300, 1000]
+    cfg.write_text("not a port")  # unreadable file falls back to the defaults
+    assert export.ports() == [39300, 1000]
+    monkeypatch.setenv("INKVAULT_PIECES_PORTS", "5,6")
+    assert export.ports() == [5, 6]

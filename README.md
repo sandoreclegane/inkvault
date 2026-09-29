@@ -83,7 +83,7 @@ with `inkvault index`.
 - **Your projects** on the dashboard are detected from recurring phrases in your session titles. To choose your own,
   create `themes.txt` in your InkVault folder with lines like `Website = website|landing page|stripe` and run
   `inkvault dashboard`.
-- **PiecesOS port**: InkVault tries 39300, then 1000. If yours differs, set `INKVAULT_PIECES_PORTS`.
+- **PiecesOS port**: InkVault reads the port PiecesOS saved in its own config (`.port.txt`), then tries 39300 and 1000. To force a port, set `INKVAULT_PIECES_PORTS`.
 - **Pieces' own export tool**: Pieces said they'd send one. Use it too; two copies are better than one. Support
   for importing its format into InkVault is planned.
 - Tested on Windows with PiecesOS 12.6.2 and a vault of 120,000 captures. macOS and Linux should work;

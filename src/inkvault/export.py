@@ -11,12 +11,44 @@ import sqlite3
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 from . import paths
 
 # PiecesOS has listened on 39300 (current) and 1000 (older macOS/Linux builds).
-PORTS = [int(p) for p in os.environ.get("INKVAULT_PIECES_PORTS", "39300,1000").split(",")]
+DEFAULT_PORTS = [39300, 1000]
+# PiecesOS writes the port it chose here, e.g. on Windows:
+# %LOCALAPPDATA%\Mesh Intelligent Technologies, Inc\Pieces OS\com.pieces.os\production\Config\.port.txt
+PORT_FILE = Path("com.pieces.os", "production", "Config", ".port.txt")
 WORKERS = 16
+
+
+def port_file_dirs():
+    """App-data folders PiecesOS may keep its config under (the exact macOS/Linux spot is unconfirmed)."""
+    home = Path.home()
+    dirs = [home / "Library" / "Application Support", home / "Library",
+            Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share")), home / "Documents"]
+    if os.environ.get("LOCALAPPDATA"):
+        dirs.insert(0, Path(os.environ["LOCALAPPDATA"]))
+    return dirs
+
+
+def ports_from_files(dirs):
+    found = []
+    for d in dirs:
+        for f in [d / PORT_FILE, *d.glob(f"*/{PORT_FILE.as_posix()}"), *d.glob(f"*/*/{PORT_FILE.as_posix()}")]:
+            try:
+                found.append(int(f.read_text().strip()))
+            except (OSError, ValueError):
+                continue
+    return found
+
+
+def ports():
+    """Ports to try: INKVAULT_PIECES_PORTS if set, else PiecesOS's own port file, then the usual defaults."""
+    if os.environ.get("INKVAULT_PIECES_PORTS"):
+        return [int(p) for p in os.environ["INKVAULT_PIECES_PORTS"].split(",")]
+    return list(dict.fromkeys(ports_from_files(port_file_dirs()) + DEFAULT_PORTS))
 # Collections fetched as one list. Missing ones are skipped: not every PiecesOS version has all of them.
 LISTED = {
     "summary": "/workstream_summaries",
@@ -41,7 +73,7 @@ class PiecesOS:
 
     @classmethod
     def find(cls):
-        for port in PORTS:
+        for port in ports():
             base = f"http://localhost:{port}"
             try:
                 with urllib.request.urlopen(base + "/.well-known/version", timeout=5) as r:
@@ -123,7 +155,7 @@ def export_listed(pos, db, kind, path):
 def run():
     pos, version = PiecesOS.find()
     if not pos:
-        print(f"PiecesOS isn't answering on port(s) {', '.join(map(str, PORTS))}.\n"
+        print(f"PiecesOS isn't answering on port(s) {', '.join(map(str, ports()))}.\n"
               "Open the Pieces app (or PiecesOS) and try again. If it uses another port, set INKVAULT_PIECES_PORTS.")
         return False
     print(f"PiecesOS {version} at {pos.base}\nSaving to {paths.vault_db()}\n"
