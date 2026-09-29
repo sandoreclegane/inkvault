@@ -41,8 +41,11 @@ def open_dashboard(path):
 
 def cmd_rescue(args):
     from . import dashboard, digest, export, index
-    if not export.run():
-        return 1
+    try:
+        if not export.run():
+            return 1
+    except KeyboardInterrupt:
+        return partial_rescue(args)
     index.build()
     if not args.no_digest:
         digest.run(model=args.model)
@@ -51,6 +54,21 @@ def cmd_rescue(args):
     if not args.no_open:
         open_dashboard(path)
     return 0
+
+
+def partial_rescue(args):
+    """Ctrl+C during a long export: show what's saved so far instead of nothing."""
+    from . import dashboard, index, paths
+    print("\n\nStopped. Everything fetched so far is saved.")
+    if not paths.vault_db().exists():
+        return 130
+    print("Building search and a dashboard from what you have so far (skipping digests)…\n", flush=True)
+    index.build()
+    path = dashboard.build()
+    print("\nThis is a partial rescue. Run `inkvault rescue` again anytime to continue where it stopped.")
+    if not args.no_open:
+        open_dashboard(path)
+    return 130  # the conventional exit code for "stopped with Ctrl+C"
 
 
 def cmd_status(_args):
@@ -110,6 +128,14 @@ def main(argv=None):
             if hasattr(stream, "reconfigure"):
                 stream.reconfigure(encoding="utf-8", errors="replace")
 
+    try:
+        return dispatch(args)
+    except KeyboardInterrupt:  # e.g. a second Ctrl+C while the partial dashboard builds
+        print("\nStopped. Your vault is saved; run the same command again to continue.")
+        return 130
+
+
+def dispatch(args):
     if args.cmd == "rescue":
         return cmd_rescue(args)
     if args.cmd == "export":

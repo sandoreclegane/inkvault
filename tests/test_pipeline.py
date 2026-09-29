@@ -94,6 +94,47 @@ def test_export_event_row_reads_ocr_fallbacks():
     assert row[:6] == ("e", "t", "App", "Win", "https://u", "r")
 
 
+def test_ctrl_c_mid_export_keeps_progress_and_stops_fast(tmp_path, monkeypatch):
+    import time
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    from inkvault import export
+
+    class SlowPiecesOS:  # 500 items at 20 ms each: waiting for the whole queue would take seconds
+        def get(self, path, timeout=60):
+            if path.endswith("identifiers"):
+                return {"iterable": [{"id": f"e{i}"} for i in range(500)]}
+            time.sleep(0.02)
+            return {"id": path.rsplit("/", 1)[1], "created": {"value": "2026-01-01T00:00:00Z"}}
+
+    db = export.open_vault()
+    saved = []
+
+    def save(ev):
+        if len(saved) == 3:
+            raise KeyboardInterrupt  # the user presses Ctrl+C
+        db.execute("INSERT INTO events VALUES (?,?,?,?,?,?,?)", export.event_row(ev))
+        saved.append(ev["id"])
+
+    start = time.time()
+    with pytest.raises(KeyboardInterrupt):
+        export.fetch_each(SlowPiecesOS(), db, "events", "/workstream_events/identifiers",
+                          "/workstream_event/{id}", save, set())
+    assert time.time() - start < 1.5  # didn't wait for the other ~490 queued requests
+    db.close()
+    check = sqlite3.connect(tmp_path / "vault.db")
+    assert check.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 3  # progress was committed
+
+
+def test_interrupted_rescue_still_builds_a_dashboard(vault, monkeypatch):
+    from inkvault import cli, export, paths
+
+    def interrupted():
+        raise KeyboardInterrupt
+    monkeypatch.setattr(export, "run", interrupted)
+    assert cli.main(["rescue", "--no-open"]) == 130
+    assert paths.dashboard().exists() and paths.search_db().exists()
+
+
 def test_status_without_vault(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
     monkeypatch.setenv("INKVAULT_PIECES_PORTS", "1")  # nothing listens there

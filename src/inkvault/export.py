@@ -88,7 +88,8 @@ def fetch_each(pos, db, kind, ids_path, item_path, save, have):
     todo = [i for i in ids if i not in have]
     print(f"{kind}: {len(ids)} total, {len(ids) - len(todo)} already saved, {len(todo)} to fetch", flush=True)
     start, n = time.time(), 0
-    with ThreadPoolExecutor(WORKERS) as pool:
+    pool = ThreadPoolExecutor(WORKERS)
+    try:
         futures = {pool.submit(pos.get, item_path.format(id=i)): i for i in todo}
         for f in as_completed(futures):
             try:
@@ -100,7 +101,11 @@ def fetch_each(pos, db, kind, ids_path, item_path, save, have):
                 db.commit()
                 rate = n / (time.time() - start)
                 print(f"  {n}/{len(todo)} ({rate:.0f}/s, ~{(len(todo) - n) / rate / 60:.1f} min left)", flush=True)
-    db.commit()
+    finally:
+        # Keep everything fetched so far. On Ctrl+C, drop the queued requests instead of waiting
+        # for all of them (a `with` block would wait, which can mean hours).
+        db.commit()
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def export_listed(pos, db, kind, path):
