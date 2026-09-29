@@ -15,6 +15,7 @@ from datetime import datetime
 from urllib.parse import urlsplit
 
 from . import paths
+from .times import local
 
 OLLAMA = os.environ.get("INKVAULT_OLLAMA", "http://127.0.0.1:11434")
 DEFAULT_MODEL = os.environ.get("INKVAULT_DIGEST_MODEL", "qwen3.5:4b")
@@ -31,7 +32,7 @@ DAY: {day}
 
 
 def local_day(ts):
-    return datetime.fromisoformat(ts).astimezone().date().isoformat()
+    return local(ts).date().isoformat()
 
 
 def clip(text, n):

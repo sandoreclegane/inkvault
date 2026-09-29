@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import paths
+from .times import local
 
 MAX_THEMES = 14
 # Words that never make a project name on their own: function words and generic work words.
@@ -31,11 +32,6 @@ GENERIC = {
     "audit", "governance", "logistics", "workspace", "protocol", "security", "support", "planning", "tracking",
     "investigation", "verification", "validation", "audits", "sync", "status", "check", "checks", "report",
 }
-
-
-def local(ts):
-    """ISO timestamp (UTC) -> this machine's local time: 'when you work' should read in your hours."""
-    return datetime.fromisoformat(ts).astimezone()
 
 
 def load_themes(titles):
