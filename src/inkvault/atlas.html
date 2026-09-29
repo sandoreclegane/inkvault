@@ -106,7 +106,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
 
   <section class="card" data-table="themes">
     <div class="head"><div><h2>Projects over time</h2>
-      <p class="desc">Sessions per week that mention each project, found automatically in your session and chat titles. To choose your own, write <code>Name = pattern</code> lines in <code>themes.txt</code> in your Inkvault folder.</p></div>
+      <p class="desc">Sessions per week that mention each project, found automatically in your session and chat titles. To choose your own, write <code>Name = pattern</code> lines in <code>themes.txt</code> in your InkVault folder.</p></div>
       <button class="tbl">Show table</button></div>
     <div class="chart" id="themes" style="height:460px"></div>
   </section>
@@ -415,7 +415,7 @@ function render() {
   renderBars("apps", DATA.apps, t, "App"); renderBars("sites", DATA.sites, t, "Site");
   document.querySelectorAll(".card[data-table]").forEach(renderTableFor);
   document.getElementById("foot").textContent =
-    `Built ${DATA.built} by Inkvault from your local vault. Nothing on this page was sent anywhere.`;
+    `Built ${DATA.built} by InkVault from your local vault. Nothing on this page was sent anywhere.`;
 }
 
 function setRange(from, to, preset) {

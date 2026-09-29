@@ -1,7 +1,7 @@
 """Meaning-search vectors for everything in search.db, with a small static embedding model.
 
 potion-retrieval-32M runs fast on CPU (minutes for ~100k records) and needs no GPU. It is
-downloaded once from Hugging Face into the Inkvault home; after that, nothing needs the network.
+downloaded once from Hugging Face into the InkVault home; after that, nothing needs the network.
 """
 import sqlite3
 import time

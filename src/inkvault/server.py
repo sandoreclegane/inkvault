@@ -1,4 +1,4 @@
-"""MCP server over the Inkvault search index (read-only).
+"""MCP server over the InkVault search index (read-only).
 
 Register it with an MCP client, e.g. Claude Code:
     claude mcp add inkvault --scope user -- uvx --from git+https://github.com/sandoreclegane/inkvault inkvault serve

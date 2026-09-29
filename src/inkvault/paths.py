@@ -1,4 +1,4 @@
-"""Where Inkvault keeps a user's data: outside the code, in the platform's app-data folder.
+"""Where InkVault keeps a user's data: outside the code, in the platform's app-data folder.
 
 Override with the INKVAULT_HOME environment variable (or --home on the command line).
 """
@@ -11,9 +11,9 @@ def home() -> Path:
     if os.environ.get("INKVAULT_HOME"):
         base = Path(os.environ["INKVAULT_HOME"])
     elif sys.platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Inkvault"
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "InkVault"
     elif sys.platform == "darwin":
-        base = Path.home() / "Library" / "Application Support" / "Inkvault"
+        base = Path.home() / "Library" / "Application Support" / "InkVault"
     else:
         base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "inkvault"
     base.mkdir(parents=True, exist_ok=True)

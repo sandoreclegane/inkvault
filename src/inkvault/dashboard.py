@@ -1,6 +1,6 @@
 """Build dashboard.html: a private, local visual overview of the vault ("Memory Atlas").
 
-The page embeds the user's data, so it is written to the Inkvault home and opened from disk,
+The page embeds the user's data, so it is written to the InkVault home and opened from disk,
 never hosted. Charts are drawn in the browser with ECharts; only the library comes from a CDN,
 and no data is sent anywhere.
 """

@@ -56,7 +56,7 @@ def cmd_rescue(args):
 def cmd_status(_args):
     from . import paths
     from .export import PiecesOS
-    print(f"Inkvault {__version__}\nhome: {paths.home()}")
+    print(f"InkVault {__version__}\nhome: {paths.home()}")
     if paths.vault_db().exists():
         db = sqlite3.connect(f"file:{paths.vault_db()}?mode=ro", uri=True)
         meta = dict(db.execute("SELECT key, value FROM meta"))

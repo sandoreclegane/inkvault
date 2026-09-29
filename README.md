@@ -1,4 +1,4 @@
-# Inkvault
+# InkVault
 
 **Rescue your Pieces memory before it's gone, then search it from Claude, Codex, or any MCP client, and see it as a map of your year.**
 
@@ -6,7 +6,7 @@ Pieces for Developers shut down on September 27, 2026. PiecesOS still runs in re
 your long-term memory is still inside it: every capture, session summary, chat and saved snippet. Once you
 uninstall PiecesOS, it's gone.
 
-Inkvault copies all of it into a single file on your machine, makes it searchable by your AI tools, and draws it
+InkVault copies all of it into a single file on your machine, makes it searchable by your AI tools, and draws it
 as a private dashboard. Nothing is uploaded anywhere.
 
 ```bash
@@ -63,9 +63,9 @@ Then ask: *"What was I working on the week of March 10?"*, *"Find that retry hel
 
 ## Privacy
 
-This is your screen history, your chats and your code. Inkvault is built so that none of it leaves your machine:
+This is your screen history, your chats and your code. InkVault is built so that none of it leaves your machine:
 
-- Everything is stored in your app-data folder (`%LOCALAPPDATA%\Inkvault`, `~/Library/Application Support/Inkvault`,
+- Everything is stored in your app-data folder (`%LOCALAPPDATA%\InkVault`, `~/Library/Application Support/InkVault`,
   or `~/.local/share/inkvault`), or wherever `INKVAULT_HOME` points. Never inside the code folder.
 - No telemetry, no accounts, no cloud.
 - Two things are downloaded, and nothing of yours is uploaded: the search model (~130 MB from Hugging Face, once)
@@ -74,22 +74,22 @@ This is your screen history, your chats and your code. Inkvault is built so that
 - Captured text was written by other people and apps. The MCP server tells your AI tool to treat it as data, not
   instructions.
 
-**Back up your vault.** It is one file: `vault.db` in your Inkvault folder. Everything else can be rebuilt from it
+**Back up your vault.** It is one file: `vault.db` in your InkVault folder. Everything else can be rebuilt from it
 with `inkvault index`.
 
 ## Good to know
 
 - **Your projects** on the dashboard are detected from recurring phrases in your session titles. To choose your own,
-  create `themes.txt` in your Inkvault folder with lines like `Website = website|landing page|stripe` and run
+  create `themes.txt` in your InkVault folder with lines like `Website = website|landing page|stripe` and run
   `inkvault dashboard`.
-- **PiecesOS port**: Inkvault tries 39300, then 1000. If yours differs, set `INKVAULT_PIECES_PORTS`.
+- **PiecesOS port**: InkVault tries 39300, then 1000. If yours differs, set `INKVAULT_PIECES_PORTS`.
 - **Pieces' own export tool**: Pieces said they'd send one. Use it too; two copies are better than one. Support
-  for importing its format into Inkvault is planned.
+  for importing its format into InkVault is planned.
 - Tested on Windows with PiecesOS 12.6.2 and a vault of 120,000 captures. macOS and Linux should work;
   reports are welcome.
 
 ## Not affiliated with Pieces
 
-Inkvault is an independent, community tool for people moving on from Pieces. "Pieces" is a trademark of its owner.
+InkVault is an independent, community tool for people moving on from Pieces. "Pieces" is a trademark of its owner.
 
 MIT licensed. Made by [T. Matthew Chase](https://github.com/sandoreclegane) / Logos 7.
