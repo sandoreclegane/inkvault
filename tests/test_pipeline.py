@@ -158,3 +158,14 @@ def test_port_file_is_tried_first_and_env_overrides(tmp_path, monkeypatch):
     assert export.ports() == [39300, 1000]
     monkeypatch.setenv("INKVAULT_PIECES_PORTS", "5,6")
     assert export.ports() == [5, 6]
+
+
+def test_port_file_found_at_macos_location(tmp_path, monkeypatch):
+    from pathlib import Path
+    from inkvault import export
+    cfg = tmp_path / "Documents" / export.PORT_FILE  # ~/Documents/com.pieces.os/production/Config/.port.txt
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("39305")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    assert export.ports_from_files(export.port_file_dirs()) == [39305]

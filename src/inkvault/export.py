@@ -17,17 +17,18 @@ from . import paths
 
 # PiecesOS has listened on 39300 (current) and 1000 (older macOS/Linux builds).
 DEFAULT_PORTS = [39300, 1000]
-# PiecesOS writes the port it chose here, e.g. on Windows:
-# %LOCALAPPDATA%\Mesh Intelligent Technologies, Inc\Pieces OS\com.pieces.os\production\Config\.port.txt
+# PiecesOS writes the port it chose here (locations confirmed by the Pieces team):
+#   Windows: %LOCALAPPDATA%\Mesh Intelligent Technologies, Inc\Pieces OS\com.pieces.os\production\Config\.port.txt
+#   macOS:   ~/Documents/com.pieces.os/production/Config/.port.txt (Linux is likely the same)
 PORT_FILE = Path("com.pieces.os", "production", "Config", ".port.txt")
 WORKERS = 16
 
 
 def port_file_dirs():
-    """App-data folders PiecesOS may keep its config under (the exact macOS/Linux spot is unconfirmed)."""
+    """Folders PiecesOS keeps its config under: the known spots first, then other app-data folders just in case."""
     home = Path.home()
-    dirs = [home / "Library" / "Application Support", home / "Library",
-            Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share")), home / "Documents"]
+    dirs = [home / "Documents", home / "Library" / "Application Support", home / "Library",
+            Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))]
     if os.environ.get("LOCALAPPDATA"):
         dirs.insert(0, Path(os.environ["LOCALAPPDATA"]))
     return dirs
