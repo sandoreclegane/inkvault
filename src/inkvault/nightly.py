@@ -277,7 +277,38 @@ def run():
         return 1
 
 
+@contextlib.contextmanager
+def keep_awake():
+    """Ask Windows not to sleep while the run is going (a sleep mid-run would suspend it). No-op elsewhere.
+
+    The request is per thread and lapses on its own when the process ends. It can never raise: failing to
+    ask must not stop the backup. (macOS does this through caffeinate in the LaunchAgent.)
+    """
+    ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+    set_state = None
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            set_state = ctypes.windll.kernel32.SetThreadExecutionState
+            set_state(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+        except Exception:  # noqa: BLE001
+            set_state = None
+    try:
+        yield
+    finally:
+        if set_state:
+            try:
+                set_state(ES_CONTINUOUS)
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def run_steps():
+    with keep_awake():
+        return _run_steps()
+
+
+def _run_steps():
     log(f"{START} (InkVault {__version__}, pid {os.getpid()}) ===")  # first, so even a killed run shows up
     results = {}
     stream = LogStream()

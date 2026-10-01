@@ -10,7 +10,12 @@ TAG = "# inkvault-nightly"  # marks our crontab line so --off removes only it
 
 
 def unit_dir():
-    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "systemd" / "user"
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "systemd" / "user"
+
+
+def exec_start(argv):
+    """systemd expands %specifiers and $VARIABLES in ExecStart, so a literal one has to be doubled."""
+    return shlex.join(argv).replace("%", "%%").replace("$", "$$")
 
 
 def render_service(argv):
@@ -19,7 +24,7 @@ Description=InkVault nightly refresh
 
 [Service]
 Type=oneshot
-ExecStart={shlex.join(argv)}
+ExecStart={exec_start(argv)}
 """
 
 
@@ -37,19 +42,20 @@ WantedBy=timers.target
 
 
 def cron_line(argv, hour, minute):
-    return f"{minute} {hour} * * * {shlex.join(argv)} {TAG}"
+    command = shlex.join(argv).replace("%", "\\%")  # an unescaped % in a crontab line means newline
+    return f"{minute} {hour} * * * {command} {TAG}"
 
 
 def merge_crontab(existing, line):
     """existing crontab text with our line replaced (or removed, when line is None)."""
-    keep = [l for l in existing.splitlines() if l.strip() and not l.rstrip().endswith(TAG)]
+    keep = [l for l in existing.splitlines() if not l.rstrip().endswith(TAG)]  # the user's blank lines stay
     if line:
         keep.append(line)
     return "".join(l + "\n" for l in keep)
 
 
 def systemctl(*args):
-    return subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True)
+    return subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True, errors="replace")
 
 
 def has_systemd():
@@ -57,12 +63,19 @@ def has_systemd():
 
 
 def get_crontab():
-    r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-    return r.stdout if r.returncode == 0 else ""  # "no crontab for user" is exit 1
+    r = subprocess.run(["crontab", "-l"], capture_output=True, text=True, errors="replace")
+    if r.returncode == 0:
+        return r.stdout
+    if r.returncode == 1 and "no crontab" in r.stderr.lower():
+        return ""  # an empty crontab; any other failure must not be mistaken for it, or we'd overwrite theirs
+    raise RuntimeError(f"couldn't read your crontab: {(r.stderr or r.stdout).strip()}")
 
 
 def set_crontab(text):
-    subprocess.run(["crontab", "-"], input=text, text=True, check=True)
+    try:
+        subprocess.run(["crontab", "-"], input=text, text=True, errors="replace", capture_output=True, check=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"couldn't write your crontab: {(e.stderr or '').strip()}") from e
 
 
 def install(argv, hour, minute, wake):
@@ -75,6 +88,7 @@ def install(argv, hour, minute, wake):
         r = systemctl("enable", "--now", f"{UNIT}.timer")
         if r.returncode:
             raise RuntimeError(f"systemctl couldn't enable the timer: {(r.stderr or r.stdout).strip()}")
+        systemctl("restart", f"{UNIT}.timer")  # enable --now doesn't re-read a timer that was already running
         return (f"systemd user timer {UNIT}.timer; it runs while you're logged in "
                 "(`loginctl enable-linger $USER` keeps it running when you're not)")
     if not shutil.which("crontab"):
@@ -85,13 +99,15 @@ def install(argv, hour, minute, wake):
 
 def remove():
     removed = False
-    if has_systemd():  # checked once: it shells out to systemctl
+    systemd = has_systemd()  # checked once: it shells out to systemctl
+    if systemd:
         systemctl("disable", "--now", f"{UNIT}.timer")
-        for ext in ("timer", "service"):
-            f = unit_dir() / f"{UNIT}.{ext}"
-            if f.exists():
-                f.unlink()
-                removed = True
+    for ext in ("timer", "service"):  # delete the files even if systemctl is gone, so nothing is left behind
+        f = unit_dir() / f"{UNIT}.{ext}"
+        if f.exists():
+            f.unlink()
+            removed = True
+    if systemd:
         systemctl("daemon-reload")
     if shutil.which("crontab"):
         current = get_crontab()
@@ -104,7 +120,12 @@ def remove():
 def installed():
     if (unit_dir() / f"{UNIT}.timer").exists():
         return True
-    return bool(shutil.which("crontab")) and TAG in get_crontab()
+    if not shutil.which("crontab"):
+        return False
+    try:
+        return TAG in get_crontab()
+    except RuntimeError:  # can't read it: say "not installed" rather than crash a status check
+        return False
 
 
 def wake_note(hour, minute):

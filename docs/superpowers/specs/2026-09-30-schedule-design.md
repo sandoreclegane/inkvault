@@ -58,7 +58,7 @@ One module per OS, each with two parts: a **pure function** that renders the tas
 | Trigger | Daily calendar trigger at `--at` | `StartCalendarInterval` {Hour, Minute} | `OnCalendar=*-*-* HH:MM:00` (cron: `MM HH * * *`) |
 | Missed run | `StartWhenAvailable` | launchd runs a calendar job missed during sleep on wake (not one missed while powered off) | `Persistent=true` (asleep or off). Cron: no catch-up, as `schedule` says |
 | `--wake` | `WakeToRun` | Not settable by a LaunchAgent. `schedule` prints `sudo pmset repeat wakeorpoweron MTWRFSU <at minus 2 min>` for the user to run; InkVault never calls sudo | Not available to user timers. `schedule` prints a note and continues without waking |
-| Retries | `RestartOnFailure` 3 × PT15M | none | none |
+| Retries | `RestartOnFailure` 3 × PT15M if the task fails to start | none | none |
 | Limits | `ExecutionTimeLimit` PT4H; runs on battery; `DisallowStartIfOnBatteries`/`StopIfGoingOnBatteries` false; `LeastPrivilege`, `InteractiveToken` (only when logged in, no stored password) | runs when logged in | runs when logged in. `schedule` mentions `loginctl enable-linger $USER` for running while logged out |
 | Remove (`--off`) | `schtasks /Delete /TN "InkVault Nightly" /F` | `launchctl bootout`, delete plist | `disable --now`, delete units (or remove the tagged crontab line) |
 
