@@ -136,20 +136,29 @@ def event_row(ev):
     )
 
 
-def fetch_each(pos, db, kind, ids_path, item_path, save, have):
-    """Fetch items one by one (in parallel): scales to collections too big for one list response."""
+def fetch_each(pos, db, kind, ids_path, item_path, save, have, deadline=None):
+    """Fetch items one by one (in parallel): scales to collections too big for one list response.
+
+    Stops cleanly once time.monotonic() passes deadline (everything fetched so far is committed). Returns True
+    if it stopped for that reason, so a later run knows to continue."""
+    if deadline is not None and time.monotonic() >= deadline:
+        return True
     try:
         ids = [x["id"] for x in pos.get(ids_path, timeout=300).get("iterable", [])]
     except OSError as e:
         print(f"{kind}: skipped ({e})")
-        return
+        return False
     todo = [i for i in ids if i not in have]
     print(f"{kind}: {len(ids)} total, {len(ids) - len(todo)} already saved, {len(todo)} to fetch", flush=True)
     start, n = time.time(), 0
+    out_of_time = False
     pool = ThreadPoolExecutor(WORKERS)
     try:
         futures = {pool.submit(pos.get, item_path.format(id=i)): i for i in todo}
         for f in as_completed(futures):
+            if deadline is not None and time.monotonic() >= deadline:
+                out_of_time = True
+                break
             try:
                 save(f.result())
             except Exception as e:  # one bad record must not stop a rescue
@@ -164,6 +173,7 @@ def fetch_each(pos, db, kind, ids_path, item_path, save, have):
         # for all of them (a `with` block would wait, which can mean hours).
         db.commit()
         pool.shutdown(wait=False, cancel_futures=True)
+    return out_of_time
 
 
 def export_listed(pos, db, kind, path):
@@ -178,7 +188,10 @@ def export_listed(pos, db, kind, path):
     print(f"{kind}: {len(items)}", flush=True)
 
 
-def run():
+def run(budget_seconds=None):
+    """Export everything new. Returns False if PiecesOS isn't there, "partial" if budget_seconds ran out first
+    (progress is saved; the next run continues), else True."""
+    deadline = None if budget_seconds is None else time.monotonic() + budget_seconds
     pos, version = PiecesOS.find()
     if not pos:
         print(f"PiecesOS isn't answering on port(s) {', '.join(map(str, ports()))}.\n"
@@ -199,14 +212,18 @@ def run():
 
     # Saved snippets: Pieces' original feature, and often what people care about most.
     have = {i for (i,) in db.execute("SELECT id FROM raw_records WHERE kind='asset'")}
-    fetch_each(pos, db, "snippets", "/assets/identifiers", "/asset/{id}",
-               lambda a: db.execute("INSERT OR REPLACE INTO raw_records VALUES ('asset',?,?)", (a["id"], json.dumps(a))), have)
+    out_of_time = fetch_each(pos, db, "snippets", "/assets/identifiers", "/asset/{id}",
+                             lambda a: db.execute("INSERT OR REPLACE INTO raw_records VALUES ('asset',?,?)",
+                                                  (a["id"], json.dumps(a))), have, deadline)
 
     have = {i for (i,) in db.execute("SELECT id FROM events")}
-    fetch_each(pos, db, "events", "/workstream_events/identifiers", "/workstream_event/{id}",
-               lambda ev: db.execute("INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?,?)", event_row(ev)), have)
+    out_of_time = out_of_time or fetch_each(
+        pos, db, "events", "/workstream_events/identifiers", "/workstream_event/{id}",
+        lambda ev: db.execute("INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?,?)", event_row(ev)), have, deadline)
 
     fails = db.execute("SELECT kind, COUNT(*) FROM failures GROUP BY kind").fetchall()
     db.close()
+    if out_of_time:
+        print("export stopped after its time budget; the next run continues where it stopped")
     print("export done. failures:", ", ".join(f"{k} {n}" for k, n in fails) if fails else "none")
-    return True
+    return "partial" if out_of_time else True

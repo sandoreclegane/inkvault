@@ -510,7 +510,7 @@ def test_nightly_waits_for_a_rescue_then_runs(quick, home, monkeypatch):
 
 
 def test_nightly_gives_up_after_the_lock_wait(quick, home, monkeypatch):
-    from inkvault import nightly, paths
+    from inkvault import nightly
     monkeypatch.setattr(nightly, "LOCK_POLL", 0.1)
     monkeypatch.setattr(nightly, "LOCK_WAIT", 0.6)
     calls = []

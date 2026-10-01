@@ -294,7 +294,7 @@ def step_export():
         print(f"PiecesOS not reachable on port(s) {', '.join(map(str, export.ports()))}; skipped. "
               "If it uses another port: inkvault --pieces-ports PORT schedule")
         return False
-    return export.run()
+    return export.run(budget_seconds=EXPORT_BUDGET)
 
 
 def step_index():
@@ -419,7 +419,8 @@ def _run_steps():
         log(f"{name}:")
         try:
             with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
-                results[name] = "ok" if step() else "skipped"
+                done = step()
+                results[name] = "partial" if done == "partial" else "ok" if done else "skipped"
         except Exception as e:  # noqa: BLE001 - one broken step must not stop the backup
             results[name] = f"failed: {type(e).__name__}: {' '.join(str(e).split())}"  # one line, or the END line splits
         finally:
