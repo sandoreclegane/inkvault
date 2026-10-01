@@ -46,7 +46,7 @@ def cmd_rescue(args):
     from . import nightly
     with contextlib.ExitStack() as stack:
         try:
-            stack.enter_context(nightly.lock("rescue"))
+            stack.enter_context(nightly.lock())  # the purpose defaults to "rescue"
         except nightly.Busy:
             print("A nightly run is in progress right now; try again when it's done (see `inkvault status`).")
             return 1
