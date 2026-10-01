@@ -151,6 +151,7 @@ def test_port_file_is_tried_first_and_env_overrides(tmp_path, monkeypatch):
     cfg.write_text("39301\n")
     monkeypatch.setattr(export, "port_file_dirs", lambda: [tmp_path])
     monkeypatch.delenv("INKVAULT_PIECES_PORTS", raising=False)
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path / "home"))  # no saved port from a real vault
     assert export.ports() == [39301, 39300, 1000]
     cfg.write_text("39300")  # same as a default: no duplicate
     assert export.ports() == [39300, 1000]
@@ -169,3 +170,15 @@ def test_port_file_found_at_macos_location(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
     assert export.ports_from_files(export.port_file_dirs()) == [39305]
+
+
+def test_saved_port_is_tried_after_port_files_and_before_defaults(vault, monkeypatch):
+    from inkvault import export
+    monkeypatch.delenv("INKVAULT_PIECES_PORTS", raising=False)
+    monkeypatch.setattr(export, "port_file_dirs", lambda: [])  # e.g. macOS kept the job out of ~/Documents
+    assert export.ports() == [39300, 1000]
+
+    class Found:
+        base = "http://localhost:39317"
+    export.remember(Found(), "12.6.2")
+    assert export.ports() == [39317, 39300, 1000]

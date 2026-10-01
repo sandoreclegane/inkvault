@@ -45,11 +45,37 @@ def ports_from_files(dirs):
     return found
 
 
+def saved_port():
+    """The port the last export used (kept in the vault), for when the port file can't be read:
+    macOS may keep a scheduled job out of ~/Documents."""
+    if not paths.vault_db().exists():
+        return []
+    try:
+        # as_uri() escapes characters like # ? % that would otherwise break a "file:" URI
+        db = sqlite3.connect(paths.vault_db().as_uri() + "?mode=ro", uri=True)
+        row = db.execute("SELECT value FROM meta WHERE key='pieces_url'").fetchone()
+        db.close()
+        return [int(row[0].rsplit(":", 1)[1])] if row else []
+    except (sqlite3.Error, ValueError, IndexError):
+        return []
+
+
+def remember(pos, version):
+    """Save where PiecesOS answered, so a later run can find it without the port file."""
+    db = open_vault()
+    db.executemany("INSERT OR REPLACE INTO meta VALUES (?,?)", [("pieces_version", version), ("pieces_url", pos.base)])
+    db.commit()
+    db.close()
+
+
 def ports():
-    """Ports to try: INKVAULT_PIECES_PORTS if set, else PiecesOS's own port file, then the usual defaults."""
+    """Ports to try: INKVAULT_PIECES_PORTS if set, else PiecesOS's own port file, the port that worked last time,
+    then the usual defaults."""
     if os.environ.get("INKVAULT_PIECES_PORTS"):
         return [int(p) for p in os.environ["INKVAULT_PIECES_PORTS"].split(",")]
-    return list(dict.fromkeys(ports_from_files(port_file_dirs()) + DEFAULT_PORTS))
+    return list(dict.fromkeys(ports_from_files(port_file_dirs()) + saved_port() + DEFAULT_PORTS))
+
+
 # Collections fetched as one list. Missing ones are skipped: not every PiecesOS version has all of them.
 LISTED = {
     "summary": "/workstream_summaries",
