@@ -367,3 +367,72 @@ def test_busy_message_says_when_the_pid_is_unknown(quick, monkeypatch):
     monkeypatch.setattr(nightly, "lock", busy)
     assert nightly.run() == 0
     assert "pid unknown" in paths.nightly_log().read_text(encoding="utf-8")
+
+
+def test_last_run_treats_a_truncated_end_line_as_unfinished(home):
+    from inkvault import nightly, paths
+    nightly.log(f"{nightly.START} (pid 1) ===")
+    paths.nightly_log().write_text(paths.nightly_log().read_text(encoding="utf-8")
+                                   + f"2026-10-01 03:00:00  {nightly.END}", encoding="utf-8")  # cut off mid-write
+    started, finished, result = nightly.last_run()
+    assert started and finished is None and result is None
+    nightly.log(f"{nightly.END}: ok (backup ok")  # cut off before the closing marker
+    assert nightly.last_run()[1] is None
+
+
+def test_last_run_ignores_step_output_that_looks_like_a_marker(home):
+    from inkvault import nightly
+    nightly.log(f"{nightly.START} (pid 1) ===")
+    nightly.log(f"  {nightly.END}: ok (fake) ===")  # a step printed it: indented, so not a record
+    assert nightly.last_run()[1] is None
+
+
+def test_last_run_with_an_unreadable_log_says_unknown(home):
+    from inkvault import nightly, paths
+    paths.nightly_log().mkdir()  # exists but can't be read as a file
+    assert nightly.last_run() == nightly.LOG_UNREADABLE
+
+
+def test_status_shows_unknown_for_an_unreadable_log(home, monkeypatch, capsys):
+    from inkvault import cli, paths
+    monkeypatch.setenv("INKVAULT_PIECES_PORTS", "1")
+    paths.nightly_log().mkdir()
+    assert cli.main(["status"]) == 0
+    assert "unknown (log unreadable)" in capsys.readouterr().out
+
+
+def test_trim_survives_a_temp_file_it_cannot_delete(home, monkeypatch):
+    from pathlib import Path
+    from inkvault import nightly
+    for i in range(3):
+        nightly.log(f"{nightly.START} run {i} ===")
+    real = Path.unlink
+
+    def deny(self, *a, **k):
+        if self.name.endswith(".tmp"):
+            raise PermissionError("antivirus has it")
+        return real(self, *a, **k)
+    monkeypatch.setattr(Path, "unlink", deny)
+    nightly.trim(keep=1)  # must not raise
+
+
+def test_status_works_when_the_home_has_uri_special_characters(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "vault#archive 100%"
+    monkeypatch.setenv("INKVAULT_HOME", str(home))
+    monkeypatch.setenv("INKVAULT_PIECES_PORTS", "1")
+    from inkvault import cli
+    make_vault().close()
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "1 captures" in out
+
+
+def test_a_damaged_vault_does_not_hide_the_nightly_lines(home, monkeypatch, capsys):
+    from inkvault import cli, nightly, paths
+    monkeypatch.setenv("INKVAULT_PIECES_PORTS", "1")
+    paths.vault_db().write_bytes(b"this is not a database" * 100)
+    nightly.log(f"{nightly.START} (pid 1) ===")
+    nightly.log(f"{nightly.END}: ok (backup ok) ===")
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "vault: unreadable" in out and "last run" in out and "nightly:" in out

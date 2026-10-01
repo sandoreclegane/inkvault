@@ -9,6 +9,7 @@ Windows runs the job) there is no console, so the log is the only record.
 import contextlib
 import errno
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -22,6 +23,12 @@ KEEP_BACKUPS = 7
 PIECES_WAIT = 600  # after a wake PiecesOS may still be starting: keep looking this many seconds
 PIECES_POLL = 60
 START, END = "=== started", "=== finished"
+# A record is a line that begins with its timestamp. Step output is indented under it, so a step that happens to
+# print a marker is never taken for one, and a line cut off mid-write is not a finished run.
+STAMP = r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d  "
+START_RE = re.compile(STAMP + re.escape(START))
+END_RE = re.compile(STAMP + re.escape(END) + r": (.*) ===\s*$")
+LOG_UNREADABLE = ("unknown", "unknown", "unknown (log unreadable)")  # what last_run returns when it can't read
 
 
 def stamp():
@@ -73,27 +80,33 @@ def trim(keep=KEEP_RUNS):
     tmp = f.with_name(f.name + ".tmp")
     try:
         lines = f.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-        starts = [i for i, line in enumerate(lines) if START in line]
+        starts = [i for i, line in enumerate(lines) if START_RE.match(line)]
         if len(starts) > keep:
             tmp.write_text("".join(lines[starts[-keep]:]), encoding="utf-8")
             os.replace(tmp, f)
     except OSError:  # e.g. another process has the log open: trimming can wait for tomorrow
         pass
     finally:
-        tmp.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):  # e.g. antivirus holds the temp file: it's overwritten next time
+            tmp.unlink(missing_ok=True)
 
 
 def last_run():
-    """(started, finished, result) for the newest run in the log, or None. finished is None if it never finished."""
+    """(started, finished, result) for the newest run in the log, or None. finished is None if it never finished
+    (or its end line is cut off). LOG_UNREADABLE if the log can't be read."""
     f = paths.nightly_log()
-    if not f.exists():
-        return None
+    try:
+        if not f.exists():
+            return None
+        lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return LOG_UNREADABLE
     started = finished = result = None
-    for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
-        if START in line:
+    for line in lines:
+        if START_RE.match(line):
             started, finished, result = line[:19], None, None
-        elif END in line and started:
-            finished, result = line[:19], line.split(END + ": ", 1)[1].rstrip(" =")
+        elif started and (m := END_RE.match(line)):
+            finished, result = line[:19], m.group(1)
     return (started, finished, result) if started else None
 
 
@@ -213,13 +226,7 @@ def backup(today=None):
     day = today or datetime.now().strftime("%Y-%m-%d")
     out, partial = folder / f"vault-{day}.db", folder / f"vault-{day}.db.partial"
     partial.unlink(missing_ok=True)
-    # A URI keeps the source read-only, but SQLite rejects the host part of a network (UNC) path's URI.
-    # resolve() can turn a mapped drive into a UNC (or \\?\) path, so those take the plain-connect branch.
-    if str(src).startswith("\\\\"):
-        opened = sqlite3.connect(str(src))
-    else:
-        opened = sqlite3.connect(src.as_uri() + "?mode=ro", uri=True)
-    with contextlib.closing(opened) as source:
+    with contextlib.closing(paths.connect_ro(src)) as source:
         with contextlib.closing(sqlite3.connect(partial)) as target:
             source.backup(target)
     if quick_check(partial) != "ok":  # never rotate good backups out for a bad copy

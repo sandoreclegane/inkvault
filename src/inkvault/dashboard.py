@@ -6,7 +6,6 @@ and no data is sent anywhere.
 """
 import json
 import re
-import sqlite3
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -123,7 +122,7 @@ def collect(db):
 
     digests = {}
     if paths.digests_db().exists():
-        ddb = sqlite3.connect(f"file:{paths.digests_db()}?mode=ro", uri=True)
+        ddb = paths.connect_ro(paths.digests_db())
         digests = dict(ddb.execute("SELECT day, digest FROM digests"))
         ddb.close()
 
@@ -144,7 +143,7 @@ def build():
     if not paths.search_db().exists():
         print("Nothing to show yet: run `inkvault rescue` first.")
         return None
-    db = sqlite3.connect(f"file:{paths.search_db()}?mode=ro", uri=True)
+    db = paths.connect_ro(paths.search_db())
     data = collect(db)
     db.close()
     if not data["days"]:

@@ -92,16 +92,21 @@ def cmd_status(_args):
     from .export import PiecesOS
     print(f"InkVault {__version__}\nhome: {paths.home()}")
     if paths.vault_db().exists():
-        db = sqlite3.connect(f"file:{paths.vault_db()}?mode=ro", uri=True)
-        meta = dict(db.execute("SELECT key, value FROM meta"))
-        events = db.execute("SELECT COUNT(*), MIN(created), MAX(created) FROM events").fetchone()
-        kinds = dict(db.execute("SELECT kind, COUNT(*) FROM raw_records GROUP BY kind"))
-        db.close()
-        print(f"vault: {paths.vault_db().stat().st_size / 1e6:,.0f} MB, last export {meta.get('last_export', '?')} "
-              f"from PiecesOS {meta.get('pieces_version', '?')}")
-        print(f"  {events[0]:,} captures ({(events[1] or '')[:10]} → {(events[2] or '')[:10]}), "
-              f"{kinds.get('summary', 0):,} summaries, {kinds.get('message', 0):,} chat messages, "
-              f"{kinds.get('asset', 0):,} snippets")
+        try:  # a damaged vault must not hide the nightly and schedule lines below
+            db = paths.connect_ro(paths.vault_db())
+            try:
+                meta = dict(db.execute("SELECT key, value FROM meta"))
+                events = db.execute("SELECT COUNT(*), MIN(created), MAX(created) FROM events").fetchone()
+                kinds = dict(db.execute("SELECT kind, COUNT(*) FROM raw_records GROUP BY kind"))
+            finally:
+                db.close()
+            print(f"vault: {paths.vault_db().stat().st_size / 1e6:,.0f} MB, last export {meta.get('last_export', '?')} "
+                  f"from PiecesOS {meta.get('pieces_version', '?')}")
+            print(f"  {events[0]:,} captures ({(events[1] or '')[:10]} → {(events[2] or '')[:10]}), "
+                  f"{kinds.get('summary', 0):,} summaries, {kinds.get('message', 0):,} chat messages, "
+                  f"{kinds.get('asset', 0):,} snippets")
+        except sqlite3.Error as e:
+            print(f"vault: unreadable ({e}); the nightly backups, if any, are in {paths.backups_dir()}")
     else:
         print("vault: empty (run `inkvault rescue`)")
     print(f"search index: {'ready' if paths.search_db().exists() else 'not built'}; "
@@ -113,7 +118,9 @@ def cmd_status(_args):
     print(f"nightly: {schedule.describe()}")
     if nightly.running():
         print("  running now")
-    elif last := nightly.last_run():
+    elif (last := nightly.last_run()) == nightly.LOG_UNREADABLE:
+        print(f"  last run: {last[2]}")
+    elif last:
         started, finished, result = last
         print(f"  last run {started}: {result if finished else 'started but never finished (see nightly.log)'}")
     return 0

@@ -3,6 +3,7 @@
 Override with the INKVAULT_HOME environment variable (or --home on the command line).
 """
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -68,3 +69,12 @@ def backups_dir() -> Path:
 def schedule_file() -> Path:
     """What `inkvault schedule` set up (time, wake), for `inkvault status`."""
     return home() / "schedule.json"
+
+
+def connect_ro(path):
+    """Open a SQLite file read-only. as_uri() escapes characters like # ? % that would break a hand-built
+    "file:" URI. SQLite rejects the host part of a network (UNC) path's URI, so those connect plainly."""
+    path = Path(path)
+    if str(path).startswith("\\\\"):
+        return sqlite3.connect(str(path))
+    return sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)

@@ -52,8 +52,7 @@ def saved_port():
     if not paths.vault_db().exists():
         return []
     try:
-        # as_uri() escapes characters like # ? % that would otherwise break a "file:" URI
-        with contextlib.closing(sqlite3.connect(paths.vault_db().as_uri() + "?mode=ro", uri=True)) as db:
+        with contextlib.closing(paths.connect_ro(paths.vault_db())) as db:
             row = db.execute("SELECT value FROM meta WHERE key='pieces_url'").fetchone()
         return [int(row[0].rsplit(":", 1)[1])] if row else []
     except (sqlite3.Error, ValueError, IndexError):
