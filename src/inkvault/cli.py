@@ -16,7 +16,7 @@ import webbrowser
 
 from . import __version__
 
-REPO = "git+https://github.com/sandoreclegane/inkvault"
+from .schedule import REPO
 
 
 def mcp_instructions():

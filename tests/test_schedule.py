@@ -74,3 +74,110 @@ def test_linux_crontab_merge_replaces_only_our_line():
     assert linux.merge_crontab(merged, line) == merged  # running schedule twice doesn't duplicate it
     assert linux.merge_crontab(merged, None) == theirs  # --off removes only ours
     assert linux.merge_crontab(line + "\n", None) == ""
+
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    monkeypatch.delenv("INKVAULT_PIECES_PORTS", raising=False)
+    return tmp_path
+
+
+def test_parse_at_and_next_run():
+    from datetime import datetime
+    from inkvault import schedule
+    assert schedule.parse_at("03:00") == (3, 0)
+    assert schedule.parse_at("23:45") == (23, 45)
+    for bad in ("3am", "25:00", ""):
+        with pytest.raises(schedule.ScheduleError):
+            schedule.parse_at(bad)
+    assert schedule.next_run(3, 0, datetime(2026, 10, 1, 1, 0)) == datetime(2026, 10, 1, 3, 0)
+    assert schedule.next_run(3, 0, datetime(2026, 10, 1, 3, 0)) == datetime(2026, 10, 2, 3, 0)
+
+
+def test_job_argv_carries_home_and_ports(home, monkeypatch):
+    from pathlib import Path
+    from inkvault import schedule
+    exe = Path("/tools/inkvault/bin/python")
+    assert schedule.job_argv(exe)[-1] == "nightly"
+    assert schedule.job_argv(exe)[:3] == [str(exe), "-m", "inkvault"]
+    assert ["--home", str(home.resolve())] == schedule.job_argv(exe)[3:5]
+    monkeypatch.setenv("INKVAULT_PIECES_PORTS", "39301")
+    assert "--pieces-ports" in schedule.job_argv(exe) and "39301" in schedule.job_argv(exe)
+
+
+def test_ask_wake(monkeypatch):
+    from inkvault import schedule
+    assert schedule.ask_wake(True, interactive=False) is True
+    assert schedule.ask_wake(False, interactive=True) is False  # a flag wins over asking
+    assert schedule.ask_wake(None, interactive=False) is False  # no terminal: don't wake
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    assert schedule.ask_wake(None, interactive=True) is True
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+    assert schedule.ask_wake(None, interactive=True) is False  # default is no
+
+
+class FakeBackend:
+    def __init__(self):
+        self.calls = []
+        self.on = False
+
+    def install(self, argv, hour, minute, wake):
+        self.calls.append((argv, hour, minute, wake))
+        self.on = True
+        return "a fake scheduler"
+
+    def remove(self):
+        was, self.on = self.on, False
+        return was
+
+    def installed(self):
+        return self.on
+
+    def wake_note(self, hour, minute):
+        return "WAKE NOTE"
+
+
+def test_enable_describe_disable(home, monkeypatch, capsys):
+    from pathlib import Path
+    from inkvault import schedule
+    fake = FakeBackend()
+    monkeypatch.setattr(schedule, "backend", lambda: fake)
+    monkeypatch.setattr(schedule, "ensure_installed", lambda: Path("/tools/python"))
+    monkeypatch.setattr(schedule, "remember_pieces", lambda: None)
+    assert schedule.describe().startswith("off")
+
+    schedule.enable("02:30", wake=True)
+    argv, hour, minute, wake = fake.calls[0]
+    assert (hour, minute, wake) == (2, 30, True) and argv[-1] == "nightly"
+    out = capsys.readouterr().out
+    assert "02:30" in out and "a fake scheduler" in out and "WAKE NOTE" in out
+    assert json.loads(schedule.paths.schedule_file().read_text()) == {"at": "02:30", "wake": True}
+    assert schedule.describe().startswith("daily at 02:30, wakes the computer; next ")
+
+    schedule.disable()
+    assert not fake.on and not schedule.paths.schedule_file().exists()
+    assert schedule.describe().startswith("off")
+
+
+def test_ensure_installed_explains_missing_uv(monkeypatch):
+    from inkvault import schedule
+    monkeypatch.setattr(schedule.shutil, "which", lambda name: None)
+    with pytest.raises(schedule.ScheduleError, match="needs uv"):
+        schedule.ensure_installed()
+
+
+def test_tool_python_points_into_uv_tool_dir(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    from inkvault import schedule
+    exe = (tmp_path / "inkvault" / "Scripts" / "pythonw.exe" if sys.platform == "win32"
+           else tmp_path / "inkvault" / "bin" / "python")
+    monkeypatch.setattr(schedule.shutil, "which", lambda name: "/usr/bin/uv")
+    monkeypatch.setattr(schedule.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=f"{tmp_path}\n", stderr=""))
+    assert schedule.tool_python() is None  # uv works, but InkVault isn't installed as a tool
+    exe.parent.mkdir(parents=True)
+    exe.touch()
+    assert schedule.tool_python() == exe
