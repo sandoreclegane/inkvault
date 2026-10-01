@@ -53,10 +53,15 @@ def tool_python():
     uv = uv_path()
     if not uv:
         return None
-    r = subprocess.run([uv, "tool", "dir"], capture_output=True, text=True)
-    if r.returncode:
-        return None
-    env = Path(r.stdout.strip()) / "inkvault"
+    try:
+        r = subprocess.run([uv, "tool", "dir"], capture_output=True)
+        if r.returncode:
+            return None
+        # uv prints UTF-8 whatever the console code page; no replacement characters: a wrong path must fail
+        tools = r.stdout.decode("utf-8").strip()
+    except (OSError, UnicodeDecodeError) as e:
+        raise ScheduleError(f"Couldn't ask uv where its tools live (`uv tool dir`): {e}") from None
+    env = Path(tools) / "inkvault"
     exe = env / "Scripts" / "pythonw.exe" if sys.platform == "win32" else env / "bin" / "python"
     return exe if exe.exists() else None
 
@@ -96,8 +101,10 @@ def ensure_installed():
     r = subprocess.run(cmd)
     if r.returncode or not (exe := tool_python()):
         raise ScheduleError("`uv tool install` didn't finish; see the message above.")
-    if "--force" in cmd and not ((v := installed_version(exe)) and v >= version_tuple(__version__)):
-        raise ScheduleError(f"The installed InkVault is still older than {__version__} after updating. Run "
+    # Fresh or forced, check what uv actually installed: an old release would fail every night.
+    if not ((v := installed_version(exe)) and v >= version_tuple(__version__)):
+        found = ".".join(map(str, v)) if v else "a version that can't run `nightly`"
+        raise ScheduleError(f"uv installed InkVault {found}, older than this {__version__}. Run "
                             f"`uv tool install --force --reinstall {REPO}` and then `inkvault schedule` again.")
     if shutil.which("inkvault"):
         print("Done. Update it anytime with `uv tool upgrade inkvault`.")
@@ -110,9 +117,35 @@ def job_argv(python):
     """The scheduled command. Settings go as flags: Task Scheduler can't give a task environment variables."""
     # Always pin the vault folder: cron and systemd don't see this shell's XDG_DATA_HOME or a --home used to rescue.
     argv = [str(python), "-m", "inkvault", "--home", str(paths.home())]
-    if os.environ.get("INKVAULT_PIECES_PORTS"):
-        argv += ["--pieces-ports", os.environ["INKVAULT_PIECES_PORTS"]]
+    if ports := pieces_ports():
+        argv += ["--pieces-ports", ports]
     return argv + ["nightly"]
+
+
+def parse_ports(text):
+    """Comma-separated port numbers (1-65535), normalized ("39300, 1000" -> "39300,1000"); the rules of --pieces-ports."""
+    try:
+        ports = [int(part) for part in text.split(",")]
+    except ValueError:
+        ports = []
+    if not ports or not all(1 <= n <= 65535 for n in ports):
+        raise ScheduleError(f"INKVAULT_PIECES_PORTS is {text!r}, which isn't a port list; use numbers from 1 to "
+                            "65535, comma-separated (for example 39300,1000)")
+    return ",".join(map(str, ports))
+
+
+def pieces_ports():
+    """INKVAULT_PIECES_PORTS checked and normalized, or None if unset. A bad value would break every nightly run."""
+    text = os.environ.get("INKVAULT_PIECES_PORTS")
+    return parse_ports(text) if text else None
+
+
+def check_task_scheduler_argv(argv):
+    """Task Scheduler expands %NAME% in a task's command and arguments, and there's no way to escape it."""
+    for arg in argv:
+        if m := re.search(r"%[^%]+%", arg):
+            raise ScheduleError(f"Task Scheduler would treat {m.group()} in {arg} as an environment variable; move "
+                                "the vault or the uv tools folder to a path without %…%")
 
 
 def platform_of(b):
@@ -149,15 +182,19 @@ def remember_pieces():
 
 def enable(at="03:00", wake=None, interactive=False):
     hour, minute = parse_at(at)
+    pieces_ports()  # before installing anything
     exe = ensure_installed()
     b = backend()
+    argv = job_argv(exe)
+    if platform_of(b) == "win32":
+        check_task_scheduler_argv(argv)
     requested = wake
     wake = ask_wake(wake, interactive, platform_of(b))
     remember_pieces()
     if not paths.vault_db().exists():
         print(f"No vault at {paths.home()} yet. If you rescued with --home, run schedule with the same --home.")
     try:
-        where = b.install(job_argv(exe), hour, minute, wake)
+        where = b.install(argv, hour, minute, wake)
     except Exception as e:  # noqa: BLE001 - whatever the scheduler tool did, the user needs the message
         raise ScheduleError(f"Couldn't set up the nightly run: {e}") from None
     at = f"{hour:02d}:{minute:02d}"
@@ -187,15 +224,54 @@ def disable():
           else "There was no nightly run set up.")
 
 
+OVERDUE = timedelta(hours=26)  # a daily run, plus slack for a late start or a long run
+
+
+def same_path(a, b):
+    return os.path.normcase(str(Path(a).resolve())) == os.path.normcase(str(Path(b).resolve()))
+
+
+def overdue(now):
+    """"; overdue: ..." if the healthy-looking job hasn't started a run in OVERDUE, else ""."""
+    from . import nightly
+    last = nightly.last_run()
+    if last:
+        try:
+            started = datetime.strptime(last[0], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return ""
+        return f"; overdue: no run since {started:%Y-%m-%d %H:%M}" if now - started > OVERDUE else ""
+    try:
+        since = datetime.fromtimestamp(paths.schedule_file().stat().st_mtime)
+    except OSError:
+        return ""
+    return f"; overdue: no run since it was set up on {since:%Y-%m-%d %H:%M}" if now - since > OVERDUE else ""
+
+
 def describe(now=None):
-    """One line for `inkvault status`."""
+    """One line for `inkvault status`: what the OS scheduler really has, not just that something is there."""
+    now = now or datetime.now()
     f = paths.schedule_file()
-    if not f.exists() or not backend().installed():
+    if not f.exists():
+        return "off (turn on with `inkvault schedule`)"
+    try:
+        job = backend().query()
+    except Exception as e:  # noqa: BLE001 - status must not crash on a scheduler problem
+        return f"on, but the scheduler couldn't be asked about it ({e})"
+    if not job.present:
         return "off (turn on with `inkvault schedule`)"
     try:
         s = json.loads(f.read_text(encoding="utf-8"))
         hour, minute = parse_at(s["at"])
-        upcoming = next_run(hour, minute, now or datetime.now())
-        return f"daily at {s['at']}{', wakes the computer' if s.get('wake') else ''}; next {upcoming:%Y-%m-%d %H:%M}"
+        wake = ", wakes the computer" if s.get("wake") else ""
     except (OSError, ValueError, KeyError, TypeError, ScheduleError):
         return "on, but schedule.json is unreadable (run `inkvault schedule` again)"
+    if job.enabled is False:
+        return f"on, but the task is disabled in {job.scheduler} (run `inkvault schedule` again to turn it back on)"
+    if job.home and not same_path(job.home, paths.home()):
+        return (f"on, but it runs a different vault ({job.home}); run `inkvault schedule` here to switch the "
+                "nightly run to this vault (there is one nightly run per computer user)")
+    if job.executable and not Path(job.executable).exists():
+        return f"on, but its program is missing ({job.executable}); run `inkvault schedule` again to reinstall it"
+    upcoming = next_run(hour, minute, now)
+    return f"daily at {s['at']}{wake}; next {upcoming:%Y-%m-%d %H:%M}{overdue(now)}"

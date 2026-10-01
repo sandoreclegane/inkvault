@@ -159,9 +159,10 @@ def test_ask_wake(monkeypatch):
 class FakeBackend:
     PLATFORM = "win32"  # so the wake prompt behaves the same whatever OS runs the tests
 
-    def __init__(self, on=False):
+    def __init__(self, on=False, **job):
         self.calls = []
         self.on = on
+        self.job = job  # what query() reports beyond present: enabled, home, executable
 
     def install(self, argv, hour, minute, wake):
         self.calls.append((argv, hour, minute, wake))
@@ -171,6 +172,10 @@ class FakeBackend:
     def remove(self):
         was, self.on = self.on, False
         return was
+
+    def query(self):
+        from inkvault.schedulers import Job
+        return Job(self.on, **{"enabled": True, "scheduler": "Fake Scheduler", **self.job})
 
     def installed(self):
         return self.on
@@ -216,7 +221,7 @@ def test_tool_python_points_into_uv_tool_dir(tmp_path, monkeypatch):
            else tmp_path / "inkvault" / "bin" / "python")
     monkeypatch.setattr(schedule.shutil, "which", lambda name: "/usr/bin/uv")
     monkeypatch.setattr(schedule.subprocess, "run",
-                        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=f"{tmp_path}\n", stderr=""))
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=f"{tmp_path}\n".encode(), stderr=b""))
     assert schedule.tool_python() is None  # uv works, but InkVault isn't installed as a tool
     exe.parent.mkdir(parents=True)
     exe.touch()
@@ -432,3 +437,161 @@ def test_rescue_without_lock_support_warns_and_runs(home, monkeypatch, capsys):
     monkeypatch.setattr(cli, "rescue", lambda args: 0)
     assert cli.main(["rescue", "--no-open"]) == 0
     assert "continuing without it" in capsys.readouterr().out
+
+
+# --- review round 3 --------------------------------------------------------------------------------------------
+
+def scheduled(vault, monkeypatch, at="03:00", **job):
+    """schedule.json says `at`, and the fake scheduler reports a job with these fields."""
+    from inkvault import schedule
+    fake = FakeBackend(on=True, **job)
+    monkeypatch.setattr(schedule, "backend", lambda: fake)
+    schedule.paths.schedule_file().write_text(json.dumps({"at": at, "wake": False}))
+    return schedule
+
+
+def test_describe_reports_a_disabled_task(home, monkeypatch):
+    schedule = scheduled(home, monkeypatch, enabled=False)
+    assert schedule.describe() == ("on, but the task is disabled in Fake Scheduler "
+                                   "(run `inkvault schedule` again to turn it back on)")
+
+
+def test_describe_reports_a_job_for_another_vault(home, monkeypatch, tmp_path_factory):
+    other = str(tmp_path_factory.mktemp("vault-b"))
+    schedule = scheduled(home, monkeypatch, home=other)
+    assert schedule.describe().startswith(f"on, but it runs a different vault ({other})")
+    schedule = scheduled(home, monkeypatch, home=str(home) + "/")  # the same folder, spelled differently
+    assert schedule.describe().startswith("daily at 03:00")
+
+
+def test_describe_reports_a_missing_program(home, monkeypatch):
+    gone = str(home / "uv" / "tools" / "inkvault" / "python")
+    schedule = scheduled(home, monkeypatch, home=str(home), executable=gone)
+    assert schedule.describe().startswith(f"on, but its program is missing ({gone})")
+    (home / "python").touch()
+    schedule = scheduled(home, monkeypatch, home=str(home), executable=str(home / "python"))
+    assert schedule.describe().startswith("daily at 03:00; next ")
+
+
+def test_describe_is_off_when_the_scheduler_has_no_job(home, monkeypatch):
+    schedule = scheduled(home, monkeypatch)
+    schedule.backend().on = False  # schedule.json remains (another vault's schedule replaced ours, say)
+    assert schedule.describe().startswith("off")
+
+
+def test_describe_flags_an_overdue_run(home, monkeypatch):
+    import os
+    from datetime import datetime, timedelta
+    from inkvault import nightly
+    schedule = scheduled(home, monkeypatch)
+    now = datetime(2026, 10, 1, 12, 0)
+    log = schedule.paths.nightly_log()
+    log.write_text(f"2026-09-28 03:00:01  {nightly.START} (pid 1) ===\n", encoding="utf-8")
+    assert schedule.describe(now) == "daily at 03:00; next 2026-10-02 03:00; overdue: no run since 2026-09-28 03:00"
+    log.write_text(f"2026-10-01 03:00:01  {nightly.START} (pid 1) ===\n", encoding="utf-8")
+    assert schedule.describe(now) == "daily at 03:00; next 2026-10-02 03:00"
+
+    log.unlink()  # never ran: overdue once it was set up more than 26 hours ago
+    f = schedule.paths.schedule_file()
+    recent = (now - timedelta(hours=2)).timestamp()
+    os.utime(f, (recent, recent))
+    assert "overdue" not in schedule.describe(now)
+    old = (now - timedelta(hours=30)).timestamp()
+    os.utime(f, (old, old))
+    assert schedule.describe(now).endswith("; overdue: no run since it was set up on 2026-09-30 06:00")
+
+
+def test_ensure_installed_checks_the_version_of_a_fresh_install(monkeypatch):
+    from pathlib import Path
+    import subprocess
+    from inkvault import schedule
+    exe = Path("/tools/inkvault/bin/python")
+    found = iter([None, exe])  # not installed, then installed by uv
+    monkeypatch.setattr(schedule.shutil, "which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+    monkeypatch.setattr(schedule, "tool_python", lambda: next(found))
+    monkeypatch.setattr(schedule, "installed_version", lambda e: (0, 0, 1))  # uv resolved an old release
+    monkeypatch.setattr(schedule.subprocess, "run", lambda cmd, **k: subprocess.CompletedProcess(cmd, 0))
+    with pytest.raises(schedule.ScheduleError, match="older than"):
+        schedule.ensure_installed()
+
+
+def test_parse_ports():
+    from inkvault import schedule
+    assert schedule.parse_ports("39300, 1000") == "39300,1000"
+    for bad in ("abc", "0", "70000", "1,,2", "", " "):
+        with pytest.raises(schedule.ScheduleError, match="INKVAULT_PIECES_PORTS"):
+            schedule.parse_ports(bad)
+
+
+def test_enable_rejects_bad_ports_before_installing_anything(home, monkeypatch):
+    from inkvault import schedule
+    monkeypatch.setattr(schedule, "ensure_installed", lambda: pytest.fail("installed before checking ports"))
+    monkeypatch.setattr(schedule, "backend", lambda: pytest.fail("touched the scheduler"))
+    monkeypatch.setenv("INKVAULT_PIECES_PORTS", "39300,x")
+    assert not schedule.paths.vault_db().exists()
+    with pytest.raises(schedule.ScheduleError, match="39300,x"):
+        schedule.enable("03:00", wake=False)
+
+
+def test_job_argv_normalizes_ports(home, monkeypatch):
+    from pathlib import Path
+    from inkvault import schedule
+    monkeypatch.setenv("INKVAULT_PIECES_PORTS", " 39300 , 1000")
+    argv = schedule.job_argv(Path("/p"))
+    assert argv[argv.index("--pieces-ports") + 1] == "39300,1000"
+
+
+def test_tool_python_decodes_uv_output_as_utf8(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    from inkvault import schedule
+    tools = tmp_path / "Ünïcödé 工具"
+    exe = (tools / "inkvault" / "Scripts" / "pythonw.exe" if sys.platform == "win32"
+           else tools / "inkvault" / "bin" / "python")
+    exe.parent.mkdir(parents=True)
+    exe.touch()
+    monkeypatch.setattr(schedule.shutil, "which", lambda name: "/usr/bin/uv")
+    out = [f"{tools}\n".encode("utf-8")]
+    monkeypatch.setattr(schedule.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=out[0], stderr=b""))
+    assert schedule.tool_python() == exe
+    out[0] = b"C:\\caf\xe9\\tools\n"  # not UTF-8 (an ANSI code page): a wrong path must not be guessed at
+    with pytest.raises(schedule.ScheduleError, match="uv tool dir"):
+        schedule.tool_python()
+
+    def missing(*a, **k):
+        raise FileNotFoundError("uv")
+    monkeypatch.setattr(schedule.subprocess, "run", missing)
+    with pytest.raises(schedule.ScheduleError, match="uv tool dir"):
+        schedule.tool_python()
+
+
+def test_enable_refuses_percent_names_on_windows(home, monkeypatch):
+    from pathlib import Path
+    from inkvault import schedule
+    fake = FakeBackend()  # PLATFORM win32
+    monkeypatch.setattr(schedule, "backend", lambda: fake)
+    monkeypatch.setattr(schedule, "ensure_installed", lambda: Path("C:/Users/x/%TOOLS%/pythonw.exe"))
+    monkeypatch.setattr(schedule, "remember_pieces", lambda: None)
+    with pytest.raises(schedule.ScheduleError, match="would treat %TOOLS% in C:.*as an environment variable"):
+        schedule.enable("03:00", wake=False)
+    assert fake.calls == []
+    schedule.check_task_scheduler_argv(["C:/100% sure/python", "nightly"])  # a lone % is fine
+
+    class LinuxFake(FakeBackend):
+        PLATFORM = "linux"
+    linux = LinuxFake()
+    monkeypatch.setattr(schedule, "backend", lambda: linux)
+    schedule.enable("03:00", wake=False)  # cron and systemd have their own escaping
+    assert linux.calls
+
+
+def test_disable_keeps_the_settings_when_removal_fails(home, monkeypatch):
+    schedule = scheduled(home, monkeypatch)
+
+    def denied():
+        raise RuntimeError("schtasks couldn't delete the task: Access is denied.")
+    monkeypatch.setattr(schedule.backend(), "remove", denied)
+    with pytest.raises(schedule.ScheduleError, match="Access is denied"):
+        schedule.disable()
+    assert schedule.paths.schedule_file().exists()
