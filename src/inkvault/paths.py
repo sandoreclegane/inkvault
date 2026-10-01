@@ -48,3 +48,23 @@ def model_dir() -> Path:
 def themes_file() -> Path:
     """Optional 'Name = regex' lines that override the dashboard's auto-detected projects."""
     return home() / "themes.txt"
+
+
+def nightly_log() -> Path:
+    """What each scheduled run did, newest last (the last 30 runs)."""
+    return home() / "nightly.log"
+
+
+def nightly_lock() -> Path:
+    """Exists while a nightly run or rescue is working; holds its process id."""
+    return home() / "nightly.lock"
+
+
+def backups_dir() -> Path:
+    """Dated copies of vault.db made by the nightly run."""
+    return home() / "backups"
+
+
+def schedule_file() -> Path:
+    """What `inkvault schedule` set up (time, wake), for `inkvault status`."""
+    return home() / "schedule.json"
