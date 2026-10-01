@@ -22,6 +22,9 @@ KEEP_RUNS = 30
 KEEP_BACKUPS = 7
 PIECES_WAIT = 600  # after a wake PiecesOS may still be starting: keep looking this many seconds
 PIECES_POLL = 60
+LOCK_WAIT = 3 * 3600  # a nightly run that finds a rescue holding the lock waits this long for it
+LOCK_POLL = 30
+EXPORT_BUDGET = 3 * 3600  # export stops cleanly after this, leaving time to back up inside Windows' 4-hour task limit
 START, END = "=== started", "=== finished"
 # A record is a line that begins with its timestamp. Step output is indented under it, so a step that happens to
 # print a marker is never taken for one, and a line cut off mid-write is not a finished run.
@@ -35,10 +38,32 @@ def stamp():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+log_failures = []  # why nightly.log couldn't be written during this run (empty if it always could)
+
+
+def append(path, text):
+    with open(path, "a", encoding="utf-8", errors="replace") as f:
+        f.write(text)
+
+
 def log(msg):
-    with open(paths.nightly_log(), "a", encoding="utf-8", errors="replace") as f:
-        for line in str(msg).splitlines() or [""]:
-            f.write(f"{stamp()}  {line}\n")
+    """Add lines to nightly.log. Never raises: a locked or full log must not stop the backup.
+
+    If nightly.log can't be written the failure is remembered (run() then exits 1, so the scheduler records it)
+    and the lines go to nightly-fallback.log in the same folder instead."""
+    text = "".join(f"{stamp()}  {line}\n" for line in str(msg).splitlines() or [""])
+    try:
+        append(paths.nightly_log(), text)
+        return
+    except Exception as e:  # noqa: BLE001 - OSError mostly, but nothing here may stop the run
+        failure = f"{type(e).__name__}: {e}"
+    try:
+        if not log_failures:
+            text = f"{stamp()}  couldn't write nightly.log ({failure}); logging here instead\n" + text
+        append(paths.nightly_fallback_log(), text)
+    except Exception:  # noqa: BLE001 - nowhere left to write; the exit code still reports it
+        pass
+    log_failures.append(failure)
 
 
 class LogStream:
@@ -152,13 +177,26 @@ def unlock(fd):
         pass
 
 
+def lock_lines():
+    try:
+        return paths.nightly_lock().read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+
+
 def lock_owner():
     """The pid written in the lock file. For display only: the kernel lock is what decides who holds it."""
     try:
-        pid = int(paths.nightly_lock().read_text().strip())
-    except (OSError, ValueError):
+        pid = int((lock_lines() or [""])[0].strip())
+    except ValueError:
         return 0
     return pid if 0 < pid < 2**32 else 0
+
+
+def lock_purpose():
+    """What the holder is doing, "nightly" or "rescue" (from the lock file's second line), or "" if unknown."""
+    lines = lock_lines()
+    return lines[1].strip() if len(lines) > 1 and lines[1].strip() in ("nightly", "rescue") else ""
 
 
 def running():
@@ -180,12 +218,12 @@ def running():
 
 
 @contextlib.contextmanager
-def lock():
+def lock(purpose="rescue"):
     """Only one nightly run or rescue at a time.
 
     The lock is the operating system's, held on a permanent nightly.lock file, so it is released the moment
     the process ends however it ends: a crash or reboot can never leave a stale lock behind. The pid written
-    inside is only so a message can say who has it.
+    inside (and the purpose, "nightly" or "rescue") is only so a message can say who has it.
     """
     fd = os.open(paths.nightly_lock(), os.O_RDWR | os.O_CREAT)
     try:
@@ -196,7 +234,7 @@ def lock():
         try:
             os.lseek(fd, 0, os.SEEK_SET)
             os.ftruncate(fd, 0)
-            os.write(fd, str(os.getpid()).encode())
+            os.write(fd, f"{os.getpid()}\n{purpose}".encode())
             yield
         finally:
             unlock(fd)
@@ -284,21 +322,53 @@ def steps():
 started = []  # non-empty once this run has written its START line
 
 
+def acquire(stack):
+    """Take the lock, waiting for a rescue (or any holder of unknown purpose) to finish. Raises Busy if another
+    nightly run holds it (it is already doing this job) or if the wait runs out."""
+    deadline = time.monotonic() + LOCK_WAIT
+    waited = False
+    while True:
+        try:
+            return stack.enter_context(lock("nightly"))
+        except Busy as busy:
+            if lock_purpose() == "nightly":
+                raise
+            if time.monotonic() >= deadline:
+                busy.timed_out = True
+                raise
+            if not waited:
+                who = f"pid {busy.args[0]}" if busy.args[0] else "pid unknown"
+                log(f"waiting for a rescue or another run to finish ({who} holds the lock)")
+                waited = True
+            time.sleep(LOCK_POLL)
+
+
 def run():
-    """One nightly run. Returns the exit code: 1 only if the backup failed."""
+    """One nightly run. Returns the exit code: 1 if the backup failed, if nightly.log couldn't be written, or
+    if the run never got the lock. Run `inkvault nightly` while another nightly run is going and it exits 0."""
     started.clear()
+    log_failures.clear()
+    code = _run()
+    return 1 if log_failures else code
+
+
+def _run():
     try:
         with contextlib.ExitStack() as stack:
             try:
-                stack.enter_context(lock())
+                acquire(stack)
             except Busy:
                 raise
             except OSError as e:  # e.g. a drive without file locking: better to run unguarded than not at all
                 log(f"warning: couldn't take the lock ({e}); running without it")
             return run_steps()
     except Busy as busy:
+        if getattr(busy, "timed_out", False):
+            log(f"{START} (InkVault {__version__}, pid {os.getpid()}) ===")
+            log(f"{END}: failed (another run held the lock for {LOCK_WAIT / 3600:g} hours) ===")
+            return 1
         who = f"pid {busy.args[0]}" if busy.args[0] else "pid unknown"
-        log(f"another run is in progress ({who}); not starting a second one")
+        log(f"another nightly run is already in progress ({who}); not starting a second one")
         return 0
     except Exception as e:  # noqa: BLE001 - pythonw has no console, so the log is the only place this can go
         trace = traceback.format_exc()

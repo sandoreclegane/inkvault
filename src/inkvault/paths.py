@@ -56,6 +56,11 @@ def nightly_log() -> Path:
     return home() / "nightly.log"
 
 
+def nightly_fallback_log() -> Path:
+    """Where the nightly run writes when nightly.log itself can't be written."""
+    return home() / "nightly-fallback.log"
+
+
 def nightly_lock() -> Path:
     """Exists while a nightly run or rescue is working; holds its process id."""
     return home() / "nightly.lock"

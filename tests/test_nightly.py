@@ -207,14 +207,6 @@ def test_step_output_goes_to_the_log(quick):
     assert "PiecesOS not reachable" in text and "no vault yet" in text
 
 
-def test_second_run_while_one_is_going_exits_quietly(quick, home):
-    from inkvault import nightly, paths
-    with holder(home):
-        assert nightly.run() == 0
-    assert "another run is in progress" in paths.nightly_log().read_text(encoding="utf-8")
-    assert nightly.last_run() is None  # it never started
-
-
 def test_waits_for_piecesos_after_a_wake(quick, monkeypatch):
     from inkvault import export, nightly
     calls = []
@@ -361,10 +353,11 @@ def test_busy_message_says_when_the_pid_is_unknown(quick, monkeypatch):
     import contextlib
 
     @contextlib.contextmanager
-    def busy():
+    def busy(purpose="rescue"):
         raise nightly.Busy(0)
         yield
     monkeypatch.setattr(nightly, "lock", busy)
+    monkeypatch.setattr(nightly, "lock_purpose", lambda: "nightly")
     assert nightly.run() == 0
     assert "pid unknown" in paths.nightly_log().read_text(encoding="utf-8")
 
@@ -436,3 +429,159 @@ def test_a_damaged_vault_does_not_hide_the_nightly_lines(home, monkeypatch, caps
     assert cli.main(["status"]) == 0
     out = capsys.readouterr().out
     assert "vault: unreadable" in out and "last run" in out and "nightly:" in out
+
+
+# ---- logging is best-effort ----
+
+def deny_log_writes(monkeypatch, err=PermissionError(13, "held by another process")):
+    """Every write to nightly.log fails (another process has it open without write sharing, or the disk is full)."""
+    import builtins
+    real = builtins.open
+
+    def fake(file, mode="r", *a, **k):
+        if os.path.basename(str(file)) == "nightly.log" and ("a" in mode or "w" in mode):
+            raise err
+        return real(file, mode, *a, **k)
+    monkeypatch.setattr(builtins, "open", fake)
+
+
+@pytest.mark.parametrize("err", [PermissionError(13, "in use"), OSError(28, "No space left on device")])
+def test_an_unwritable_log_does_not_stop_the_backup_but_fails_the_run(quick, monkeypatch, err):
+    from inkvault import nightly, paths
+    make_vault().close()
+    deny_log_writes(monkeypatch, err)
+    calls = []
+    real = nightly.backup
+    monkeypatch.setattr(nightly, "backup", lambda today=None: calls.append(1) or real(today))
+    assert nightly.run() == 1  # the scheduler records a failure even though the backup worked
+    assert calls and list(paths.backups_dir().glob("vault-*.db"))
+    fallback = paths.nightly_fallback_log().read_text(encoding="utf-8")
+    assert nightly.END in fallback and "backup ok" in fallback and "couldn't write nightly.log" in fallback
+
+
+def test_a_log_path_that_is_a_directory_still_backs_up(quick):
+    from inkvault import nightly, paths
+    make_vault().close()
+    paths.nightly_log().mkdir()
+    assert nightly.run() == 1
+    assert list(paths.backups_dir().glob("vault-*.db"))
+    assert nightly.END in paths.nightly_fallback_log().read_text(encoding="utf-8")
+
+
+def test_log_never_raises_even_with_no_fallback(home, monkeypatch):
+    from inkvault import nightly
+    import builtins
+
+    def boom(*a, **k):
+        raise OSError(28, "disk full")
+    monkeypatch.setattr(builtins, "open", boom)
+    nightly.log("hello")  # must not raise
+    assert nightly.log_failures
+
+
+def test_a_healthy_run_leaves_no_fallback_log(quick):
+    from inkvault import nightly, paths
+    assert nightly.run() == 0
+    assert not paths.nightly_fallback_log().exists()
+
+
+# ---- waiting for a rescue ----
+
+import threading
+
+
+def release_after(p, seconds):
+    t = threading.Timer(seconds, p.stdin.close)
+    t.start()
+    return t
+
+
+def test_nightly_waits_for_a_rescue_then_runs(quick, home, monkeypatch):
+    from inkvault import nightly, paths
+    make_vault().close()
+    monkeypatch.setattr(nightly, "LOCK_POLL", 0.2)
+    with holder(home) as p:  # a rescue holds the lock
+        t = release_after(p, 1.5)
+        assert nightly.run() == 0
+        t.join()
+    text = paths.nightly_log().read_text(encoding="utf-8")
+    assert text.count("waiting for a rescue or another run to finish") == 1
+    assert "backup ok" in nightly.last_run()[2] and list(paths.backups_dir().glob("vault-*.db"))
+
+
+def test_nightly_gives_up_after_the_lock_wait(quick, home, monkeypatch):
+    from inkvault import nightly, paths
+    monkeypatch.setattr(nightly, "LOCK_POLL", 0.1)
+    monkeypatch.setattr(nightly, "LOCK_WAIT", 0.6)
+    calls = []
+    monkeypatch.setattr(nightly, "backup", lambda today=None: calls.append(1))
+    with holder(home):
+        assert nightly.run() == 1
+    assert not calls
+    started, finished, result = nightly.last_run()
+    assert finished
+    assert result.startswith("failed (another run held the lock for")
+
+
+NIGHTLY_HOLD = """
+import os, sys
+os.environ["INKVAULT_HOME"] = sys.argv[1]
+from inkvault import nightly
+with nightly.lock("nightly"):
+    print("held", flush=True)
+    sys.stdin.read()
+"""
+
+
+def test_a_second_nightly_exits_at_once_with_zero(quick, home, monkeypatch):
+    import time
+    from inkvault import nightly, paths
+    monkeypatch.setattr(nightly, "LOCK_POLL", 30)
+    p = subprocess.Popen([sys.executable, "-c", NIGHTLY_HOLD, str(home)], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, text=True)
+    try:
+        assert p.stdout.readline().strip() == "held"
+        assert nightly.lock_purpose() == "nightly" and nightly.lock_owner() not in (0, os.getpid())
+        t0 = time.time()
+        assert nightly.run() == 0
+        assert time.time() - t0 < 10
+    finally:
+        p.stdin.close()
+        p.wait(timeout=30)
+    assert "already in progress" in paths.nightly_log().read_text(encoding="utf-8")
+    assert nightly.last_run() is None
+
+
+def test_lock_records_its_purpose_and_pid(home):
+    from inkvault import nightly
+    with nightly.lock("nightly"):
+        assert nightly.lock_purpose() == "nightly" and nightly.lock_owner() == os.getpid()
+    with nightly.lock():
+        assert nightly.lock_purpose() == "rescue"
+
+
+def test_rescue_backs_up_while_still_holding_the_lock(home, monkeypatch, capsys):
+    from inkvault import cli, nightly
+    make_vault().close()
+    seen = []
+    monkeypatch.setattr(cli, "rescue", lambda args: 0)
+    real = nightly.backup
+
+    def backup(today=None):
+        seen.append(nightly.lock_purpose())
+        return real(today)
+    monkeypatch.setattr(nightly, "backup", backup)
+    assert cli.main(["rescue", "--no-open"]) == 0
+    assert seen == ["rescue"]  # the lock file named the rescue as holder at backup time
+    assert "saved vault-" in capsys.readouterr().out
+
+
+def test_a_failed_backup_makes_rescue_fail(home, monkeypatch, capsys):
+    from inkvault import cli, nightly
+    monkeypatch.setattr(cli, "rescue", lambda args: 0)
+
+    def broken(today=None):
+        raise OSError("backup drive gone")
+    monkeypatch.setattr(nightly, "backup", broken)
+    assert cli.main(["rescue", "--no-open"]) == 1
+    assert "Backup failed" in capsys.readouterr().out

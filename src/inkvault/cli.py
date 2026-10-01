@@ -46,13 +46,20 @@ def cmd_rescue(args):
     from . import nightly
     with contextlib.ExitStack() as stack:
         try:
-            stack.enter_context(nightly.lock())
+            stack.enter_context(nightly.lock("rescue"))
         except nightly.Busy:
             print("A nightly run is in progress right now; try again when it's done (see `inkvault status`).")
             return 1
         except OSError as e:  # e.g. a drive without file locking: better to rescue unguarded than not at all
             print(f"Couldn't take the lock that keeps a rescue and the nightly run apart ({e}); continuing without it.")
-        return rescue(args)
+        code = rescue(args)
+        # Back up while the lock is still held, so a nightly run can't start in between: the vault just grew.
+        try:
+            nightly.backup()
+        except Exception as e:  # noqa: BLE001 - say so and fail, whatever went wrong
+            print(f"Backup failed: {type(e).__name__}: {e}")
+            return code or 1
+        return code
 
 
 def rescue(args):
