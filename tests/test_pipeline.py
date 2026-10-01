@@ -182,3 +182,23 @@ def test_saved_port_is_tried_after_port_files_and_before_defaults(vault, monkeyp
         base = "http://localhost:39317"
     export.remember(Found(), "12.6.2")
     assert export.ports() == [39317, 39300, 1000]
+
+
+def test_embedding_never_uses_worker_processes(vault, monkeypatch):
+    """model2vec's worker processes crash under pythonw, which is how the nightly job runs on Windows."""
+    import importlib
+
+    import numpy as np
+    from inkvault import embed, index, paths
+    index.build()
+    embed = importlib.reload(embed)  # the vault fixture stubbed build(); get the real one back
+    calls = []
+
+    class FakeModel:
+        def encode(self, texts, **kwargs):
+            calls.append(kwargs)
+            return np.ones((len(texts), 4), dtype=np.float32)
+    monkeypatch.setattr(embed, "load_model", lambda: FakeModel())
+    embed.build()
+    assert calls and all(kw.get("use_multiprocessing") is False for kw in calls)
+    assert paths.vectors().exists()
