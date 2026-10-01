@@ -35,13 +35,13 @@ The README switches its examples to `uv tool install` + `inkvault …`, keeping 
 
 Steps, in order:
 
-1. Take the lock (`nightly.lock` in the vault folder, containing the PID). If another live run holds it, log "already running" and exit 0. A lock whose PID is gone is stale and is taken over. `rescue` takes the same lock, so the two never overlap. If `rescue` finds the lock held, it says the nightly run is in progress and exits 1.
+1. Take the lock: an OS file lock (kernel-held `flock`, or an `msvcrt` lock on Windows) on a permanent `nightly.lock` in the vault folder, which also holds the PID for messages. The OS releases it if the process dies, so it can never go stale. If another run holds it, log "already running" and exit 0. If the drive can't lock files at all, log a warning and run without it. `rescue` takes the same lock, so the two never overlap. If `rescue` finds the lock held, it says the nightly run is in progress and exits 1.
 2. Log `started` (the very first thing it does, so a run killed at startup is still visible).
 3. **Export.** Find PiecesOS. If it does not answer, retry every 60 s for up to 10 minutes (it may still be starting after a wake), then log "PiecesOS not reachable, skipped" and continue. Otherwise run the incremental export.
-4. **Index:** `index.build()`.
-5. **Digest:** `digest.run()` (it already skips itself when Ollama is not running).
-6. **Dashboard:** `dashboard.build()` without opening a browser.
-7. **Backup** (always runs, even if earlier steps failed): copy `vault.db` with SQLite's online backup API (consistent while in WAL mode) to `backups/vault-YYYY-MM-DD.db` in the vault folder, and keep the newest 7. A second run on the same day overwrites that day's file.
+4. **Backup** (always runs, even if earlier steps failed; only export writes `vault.db`, so it goes right after export and a slow digest can never starve it before the 4-hour limit): copy `vault.db` with SQLite's online backup API (consistent while in WAL mode) to `backups/vault-YYYY-MM-DD.db` in the vault folder, and keep the newest 7. A second run on the same day overwrites that day's file. The copy is checked with `PRAGMA quick_check` before older backups are rotated; if it fails, it is deleted and the run fails.
+5. **Index:** `index.build()`.
+6. **Digest:** `digest.run()` (it already skips itself when Ollama is not running).
+7. **Dashboard:** `dashboard.build()` without opening a browser.
 8. Log `finished` with one line per step (`ok` / `skipped` / `failed: <error>`), then release the lock.
 
 Each step runs in its own `try`, and a failure is logged and the run moves on. Exit code: 0 if the backup succeeded, else 1. A failed backup is the only failure that makes the run fail, because `vault.db` is the irreplaceable file.

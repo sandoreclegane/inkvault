@@ -63,18 +63,27 @@ This installs InkVault as a permanent `inkvault` command (with `uv tool install`
 up a nightly run at 03:00 with your system's own scheduler: Task Scheduler on Windows, launchd on macOS, a systemd
 user timer (or cron) on Linux. If uv's tool folder isn't on your PATH, it tells you to run `uv tool update-shell`.
 
-Each run exports new captures (if PiecesOS is running), rebuilds search, writes new digests (if Ollama is running),
-rebuilds the dashboard and saves a dated copy of `vault.db` in `backups/` (the last 7 are kept). One step failing
-never stops the backup. The computer is kept awake while it runs. `rescue` waits for a running nightly run, so the two
-never overlap. See how it went with `inkvault status`, or read `nightly.log` in your InkVault folder.
+Each run exports new captures (if PiecesOS is running) and saves a dated copy of `vault.db` in `backups/` right
+after (the last 7 are kept). Then it rebuilds search, writes new digests (if Ollama is running) and rebuilds the
+dashboard. One step failing never stops the others. The computer is kept awake while it runs (Windows and macOS).
+`rescue` won't start while a nightly run is going; it tells you to try again. See how it went with
+`inkvault status`, or read `nightly.log` in your InkVault folder.
 
-If the computer is asleep at run time, the run happens when it next wakes. You can have it wake the computer instead:
+The schedule is tied to your vault folder, so if you rescued with `--home`, run `schedule` with the same `--home`.
+
+If the computer is asleep or off at run time:
+
+- **Windows** and **systemd** catch up when the computer is next on.
+- **macOS** catches up after sleep, but not after a power-off.
+- **cron** doesn't catch up.
+
+The Windows task runs only while you're logged in. You can have the computer wake for the run:
 
 - **Windows**: `schedule` asks. Your power plan must allow wake timers, and some laptops (Modern Standby) ignore them.
 - **macOS**: `schedule` asks, then prints a one-time `sudo pmset repeat ...` command for you to run. It replaces any
   `pmset repeat` schedule you already have.
-- **Linux**: a user timer can't wake the computer, so it catches up at the next boot or wake. systemd runs the timer
-  while you're logged in; `loginctl enable-linger $USER` keeps it going always. With cron there is no catch-up.
+- **Linux**: a user timer can't wake the computer. systemd runs the timer while you're logged in;
+  `loginctl enable-linger $USER` keeps it going always.
 
 `inkvault schedule --at 02:30` picks another time, `--wake` or `--no-wake` skips the question, `--off` turns it off,
 and `uv tool upgrade inkvault` updates InkVault.
