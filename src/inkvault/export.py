@@ -204,7 +204,6 @@ def run(budget_seconds=None):
     db.execute("DELETE FROM failures")  # failed items are retried below and re-recorded if they still fail
     db.executemany("INSERT OR REPLACE INTO meta VALUES (?,?)", [
         ("pieces_version", version), ("pieces_url", pos.base),
-        ("last_export", datetime.datetime.now().astimezone().isoformat(timespec="seconds")),
     ])
 
     for kind, path in LISTED.items():
@@ -221,6 +220,12 @@ def run(budget_seconds=None):
         pos, db, "events", "/workstream_events/identifiers", "/workstream_event/{id}",
         lambda ev: db.execute("INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?,?)", event_row(ev)), have, deadline)
 
+    # Recorded at the end, complete or partial, so "last export" means when the vault was last brought up to date.
+    db.executemany("INSERT OR REPLACE INTO meta VALUES (?,?)", [
+        ("last_export", datetime.datetime.now().astimezone().isoformat(timespec="seconds")),
+        ("last_export_partial", "1" if out_of_time else "0"),
+    ])
+    db.commit()
     fails = db.execute("SELECT kind, COUNT(*) FROM failures GROUP BY kind").fetchall()
     db.close()
     if out_of_time:

@@ -235,14 +235,85 @@ def test_export_stops_cleanly_at_its_time_budget(tmp_path, monkeypatch, capsys):
     assert check.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 500
 
 
-def test_nightly_passes_the_export_budget_and_reports_partial(tmp_path, monkeypatch):
-    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
-    from inkvault import export, nightly
-    assert nightly.EXPORT_BUDGET == 3 * 3600
+def fake_export(monkeypatch, nightly, result="partial"):
+    from inkvault import export
     seen = []
-    monkeypatch.setattr(nightly, "wait_for_pieces", lambda: object())
-    monkeypatch.setattr(export, "run", lambda budget_seconds=None: seen.append(budget_seconds) or "partial")
+    monkeypatch.setattr(nightly, "wait_for_pieces", lambda max_wait=None: object())
+    monkeypatch.setattr(export, "run", lambda budget_seconds=None: seen.append(budget_seconds) or result)
     monkeypatch.setattr(nightly, "steps", lambda: [("export", nightly.step_export), ("backup", lambda: True)])
+    return seen
+
+
+def test_nightly_passes_the_remaining_run_budget_and_reports_partial(tmp_path, monkeypatch):
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    from inkvault import nightly
+    assert nightly.RUN_BUDGET == 3 * 3600 and nightly.LOCK_WAIT == 3600 and nightly.BACKUP_MARGIN == 600
+    seen = fake_export(monkeypatch, nightly)
     assert nightly.run() == 0
-    assert seen == [3 * 3600]
+    assert 3 * 3600 - 600 - 60 < seen[0] <= 3 * 3600 - 600
     assert "export partial, backup ok" in nightly.last_run()[2]
+
+
+def test_the_export_budget_shrinks_by_the_time_spent_waiting(tmp_path, monkeypatch):
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    import threading
+    from conftest import holder
+    from inkvault import nightly
+    monkeypatch.setattr(nightly, "RUN_BUDGET", 100)
+    monkeypatch.setattr(nightly, "BACKUP_MARGIN", 10)
+    monkeypatch.setattr(nightly, "LOCK_POLL", 0.2)
+    seen = fake_export(monkeypatch, nightly)
+    with holder(tmp_path) as p:
+        t = threading.Timer(2.0, p.stdin.close)
+        t.start()
+        assert nightly.run() == 0
+        t.join()
+    assert 85 < seen[0] < 88.5  # 100 - 10 margin - the ~2 s spent waiting for the lock
+
+
+def test_export_is_skipped_but_backup_still_runs_when_no_time_is_left(tmp_path, monkeypatch):
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    from inkvault import nightly, paths
+    monkeypatch.setattr(nightly, "RUN_BUDGET", 5)
+    monkeypatch.setattr(nightly, "BACKUP_MARGIN", 10)
+    seen = fake_export(monkeypatch, nightly)
+    assert nightly.run() == 0
+    assert seen == []  # export never started
+    result = nightly.last_run()[2]
+    assert "export skipped" in result and "backup ok" in result
+    assert "no time left after waiting" in paths.nightly_log().read_text(encoding="utf-8")
+
+
+def test_the_piecesos_wait_is_capped_by_the_remaining_budget(tmp_path, monkeypatch):
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    from inkvault import nightly
+    monkeypatch.setattr(nightly, "RUN_BUDGET", 100)
+    monkeypatch.setattr(nightly, "BACKUP_MARGIN", 10)
+    fake_export(monkeypatch, nightly)
+    waits = []
+    monkeypatch.setattr(nightly, "wait_for_pieces", lambda max_wait=None: waits.append(max_wait) or object())
+    nightly.run()
+    assert waits and waits[0] <= 90 and waits[0] < nightly.PIECES_WAIT
+
+
+def test_export_records_last_export_at_the_end_and_whether_it_was_partial(tmp_path, monkeypatch):
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    from inkvault import export
+    monkeypatch.setattr(export.PiecesOS, "find", staticmethod(lambda: (SlowPiecesOS(), "12.0")))
+    assert export.run(budget_seconds=0.3) == "partial"
+    meta = dict(sqlite3.connect(tmp_path / "vault.db").execute("SELECT key, value FROM meta"))
+    assert meta["last_export"] and meta["last_export_partial"] == "1"
+    assert export.run() is True
+    meta = dict(sqlite3.connect(tmp_path / "vault.db").execute("SELECT key, value FROM meta"))
+    assert meta["last_export_partial"] == "0"
+
+
+def test_status_says_when_the_last_export_was_partial(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    monkeypatch.setenv("INKVAULT_PIECES_PORTS", "1")
+    from inkvault import cli, export
+    monkeypatch.setattr(export.PiecesOS, "find", staticmethod(lambda: (SlowPiecesOS(), "12.0")))
+    export.run(budget_seconds=0.3)
+    monkeypatch.setattr(export.PiecesOS, "find", staticmethod(lambda: (None, None)))
+    assert cli.main(["status"]) == 0
+    assert "(partial; continues next run)" in capsys.readouterr().out

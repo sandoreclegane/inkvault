@@ -52,14 +52,23 @@ def cmd_rescue(args):
             return 1
         except OSError as e:  # e.g. a drive without file locking: better to rescue unguarded than not at all
             print(f"Couldn't take the lock that keeps a rescue and the nightly run apart ({e}); continuing without it.")
-        code = rescue(args)
-        # Back up while the lock is still held, so a nightly run can't start in between: the vault just grew.
+        code = 1
         try:
-            nightly.backup()
-        except Exception as e:  # noqa: BLE001 - say so and fail, whatever went wrong
-            print(f"Backup failed: {type(e).__name__}: {e}")
-            return code or 1
-        return code
+            code = rescue(args)
+        finally:
+            # Back up while the lock is still held, so a nightly run can't start in between and the vault
+            # (which just grew) is protected even if the rescue itself blew up.
+            backed_up = backup_after_rescue(nightly)
+        return code if backed_up else code or 1
+
+
+def backup_after_rescue(nightly):
+    try:
+        nightly.backup()
+        return True
+    except Exception as e:  # noqa: BLE001 - say so and fail, whatever went wrong
+        print(f"Backup failed: {type(e).__name__}: {e}")
+        return False
 
 
 def rescue(args):
@@ -107,7 +116,8 @@ def cmd_status(_args):
                 kinds = dict(db.execute("SELECT kind, COUNT(*) FROM raw_records GROUP BY kind"))
             finally:
                 db.close()
-            print(f"vault: {paths.vault_db().stat().st_size / 1e6:,.0f} MB, last export {meta.get('last_export', '?')} "
+            print(f"vault: {paths.vault_db().stat().st_size / 1e6:,.0f} MB, last export {meta.get('last_export', '?')}"
+                  f"{' (partial; continues next run)' if meta.get('last_export_partial') == '1' else ''} "
                   f"from PiecesOS {meta.get('pieces_version', '?')}")
             print(f"  {events[0]:,} captures ({(events[1] or '')[:10]} → {(events[2] or '')[:10]}), "
                   f"{kinds.get('summary', 0):,} summaries, {kinds.get('message', 0):,} chat messages, "
@@ -123,6 +133,8 @@ def cmd_status(_args):
     print(f"PiecesOS: {'running ' + version + ' at ' + pos.base if pos else 'not reachable'}")
     from . import nightly, schedule
     print(f"nightly: {schedule.describe()}")
+    if nightly.fallback_newer():
+        print("  nightly.log couldn't be written; see nightly-fallback.log")
     if nightly.running():
         print("  running now")
     elif (last := nightly.last_run()) == nightly.LOG_UNREADABLE:

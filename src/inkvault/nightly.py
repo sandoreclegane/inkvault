@@ -22,9 +22,14 @@ KEEP_RUNS = 30
 KEEP_BACKUPS = 7
 PIECES_WAIT = 600  # after a wake PiecesOS may still be starting: keep looking this many seconds
 PIECES_POLL = 60
-LOCK_WAIT = 3 * 3600  # a nightly run that finds a rescue holding the lock waits this long for it
+LOCK_WAIT = 3600  # a nightly run that finds a rescue holding the lock waits this long (a rescue backs up itself)
 LOCK_POLL = 30
-EXPORT_BUDGET = 3 * 3600  # export stops cleanly after this, leaving time to back up inside Windows' 4-hour task limit
+# One deadline for the whole run, measured from before the lock wait: waiting for the lock, waiting for PiecesOS and
+# exporting must all fit in RUN_BUDGET, leaving BACKUP_MARGIN (plus the index/digest steps) before Windows' task
+# time limit would kill the run. The export gets whatever is left; the backup always runs.
+RUN_BUDGET = 3 * 3600
+BACKUP_MARGIN = 600
+run_started = None  # time.monotonic() when this run began, before it asked for the lock
 START, END = "=== started", "=== finished"
 # A record is a line that begins with its timestamp. Step output is indented under it, so a step that happens to
 # print a marker is never taken for one, and a line cut off mid-write is not a finished run.
@@ -98,14 +103,22 @@ class LogStream:
             log("  " + line)
 
 
+FALLBACK_RE = re.compile(STAMP + "couldn't write nightly.log")  # first line of each run's part of the fallback log
+
+
 def trim(keep=KEEP_RUNS):
-    f = paths.nightly_log()
+    trim_file(paths.nightly_log(), START_RE, keep)
+    trim_file(paths.nightly_fallback_log(), FALLBACK_RE, keep)
+
+
+def trim_file(f, marker, keep):
+    """Keep only the last `keep` runs (each begins with a line matching marker) of the log f."""
     if not f.exists():
         return
     tmp = f.with_name(f.name + ".tmp")
     try:
         lines = f.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-        starts = [i for i, line in enumerate(lines) if START_RE.match(line)]
+        starts = [i for i, line in enumerate(lines) if marker.match(line)]
         if len(starts) > keep:
             tmp.write_text("".join(lines[starts[-keep]:]), encoding="utf-8")
             os.replace(tmp, f)
@@ -114,6 +127,18 @@ def trim(keep=KEEP_RUNS):
     finally:
         with contextlib.suppress(OSError):  # e.g. antivirus holds the temp file: it's overwritten next time
             tmp.unlink(missing_ok=True)
+
+
+def fallback_newer():
+    """True if nightly.log couldn't be written lately: nightly-fallback.log exists and is newer (or it's all there is)."""
+    try:
+        fb = paths.nightly_fallback_log()
+        if not fb.exists():
+            return False
+        main = paths.nightly_log()
+        return not main.exists() or fb.stat().st_mtime > main.stat().st_mtime
+    except OSError:
+        return False
 
 
 def last_run():
@@ -262,7 +287,9 @@ def backup(today=None):
     folder = paths.backups_dir()
     folder.mkdir(exist_ok=True)
     day = today or datetime.now().strftime("%Y-%m-%d")
-    out, partial = folder / f"vault-{day}.db", folder / f"vault-{day}.db.partial"
+    # The partial copy is named for this process, so two backups on the same day (a rescue and a late nightly
+    # run) can never write or delete each other's half-finished file.
+    out, partial = folder / f"vault-{day}.db", folder / f"vault-{day}.db.{os.getpid()}.partial"
     partial.unlink(missing_ok=True)
     with contextlib.closing(paths.connect_ro(src)) as source:
         with contextlib.closing(sqlite3.connect(partial)) as target:
@@ -277,9 +304,15 @@ def backup(today=None):
     return True
 
 
-def wait_for_pieces():
+def budget_left():
+    """Seconds of this run's budget left for waiting and exporting, after keeping BACKUP_MARGIN for what follows."""
+    began = run_started if run_started is not None else time.monotonic()
+    return began + RUN_BUDGET - BACKUP_MARGIN - time.monotonic()
+
+
+def wait_for_pieces(max_wait=None):
     from .export import PiecesOS
-    deadline = time.monotonic() + PIECES_WAIT
+    deadline = time.monotonic() + (PIECES_WAIT if max_wait is None else min(PIECES_WAIT, max_wait))
     while True:
         pos, _version = PiecesOS.find()
         if pos or time.monotonic() >= deadline:
@@ -290,11 +323,18 @@ def wait_for_pieces():
 
 def step_export():
     from . import export
-    if not wait_for_pieces():
+    if budget_left() <= 0:
+        print("export skipped: no time left after waiting")
+        return False
+    if not wait_for_pieces(max_wait=budget_left()):
         print(f"PiecesOS not reachable on port(s) {', '.join(map(str, export.ports()))}; skipped. "
               "If it uses another port: inkvault --pieces-ports PORT schedule")
         return False
-    return export.run(budget_seconds=EXPORT_BUDGET)
+    left = budget_left()
+    if left <= 0:
+        print("export skipped: no time left after waiting")
+        return False
+    return export.run(budget_seconds=left)
 
 
 def step_index():
@@ -346,9 +386,12 @@ def acquire(stack):
 def run():
     """One nightly run. Returns the exit code: 1 if the backup failed, if nightly.log couldn't be written, or
     if the run never got the lock. Run `inkvault nightly` while another nightly run is going and it exits 0."""
+    global run_started
     started.clear()
     log_failures.clear()
-    code = _run()
+    run_started = time.monotonic()
+    with keep_awake():  # the lock wait counts too: a sleep during it would eat into the run's time
+        code = _run()
     return 1 if log_failures else code
 
 
@@ -364,8 +407,16 @@ def _run():
             return run_steps()
     except Busy as busy:
         if getattr(busy, "timed_out", False):
+            # Backing up only reads vault.db (SQLite's backup API), so it is safe even though someone else
+            # holds the lock, and a vault that grew during a long rescue shouldn't go unprotected.
             log(f"{START} (InkVault {__version__}, pid {os.getpid()}) ===")
-            log(f"{END}: failed (another run held the lock for {LOCK_WAIT / 3600:g} hours) ===")
+            started.append(1)
+            log("backup:")
+            stream = LogStream()
+            outcome = run_step(backup, stream)
+            hours = LOCK_WAIT / 3600
+            held = f"{hours:g} hour" + ("" if hours == 1 else "s")
+            log(f"{END}: failed (another run held the lock for {held}; backup {outcome}) ===")
             return 1
         who = f"pid {busy.args[0]}" if busy.args[0] else "pid unknown"
         log(f"another nightly run is already in progress ({who}); not starting a second one")
@@ -405,29 +456,29 @@ def keep_awake():
                 pass
 
 
+def run_step(step, stream):
+    """Run one step with its output going to the log. Returns "ok", "partial", "skipped" or "failed: ..."."""
+    try:
+        with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
+            done = step()
+        return "partial" if done == "partial" else "ok" if done else "skipped"
+    except Exception as e:  # noqa: BLE001 - one broken step must not stop the backup
+        return f"failed: {type(e).__name__}: {' '.join(str(e).split())}"  # one line, or the END line splits
+    finally:
+        try:
+            stream.finish()
+        except Exception:  # noqa: BLE001 - logging trouble must never stop the backup
+            pass
+
+
 def run_steps():
-    with keep_awake():
-        return _run_steps()
-
-
-def _run_steps():
     log(f"{START} (InkVault {__version__}, pid {os.getpid()}) ===")  # first, so even a killed run shows up
     started.append(1)
     results = {}
     stream = LogStream()
     for name, step in steps():
         log(f"{name}:")
-        try:
-            with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
-                done = step()
-                results[name] = "partial" if done == "partial" else "ok" if done else "skipped"
-        except Exception as e:  # noqa: BLE001 - one broken step must not stop the backup
-            results[name] = f"failed: {type(e).__name__}: {' '.join(str(e).split())}"  # one line, or the END line splits
-        finally:
-            try:
-                stream.finish()
-            except Exception:  # noqa: BLE001 - logging trouble must never stop the backup
-                pass
+        results[name] = run_step(step, stream)
     if results["backup"].startswith("failed"):
         overall = "failed"
     elif results["backup"] == "skipped":  # backup() only skips when there is no vault

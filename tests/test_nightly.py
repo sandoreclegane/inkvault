@@ -509,18 +509,100 @@ def test_nightly_waits_for_a_rescue_then_runs(quick, home, monkeypatch):
     assert "backup ok" in nightly.last_run()[2] and list(paths.backups_dir().glob("vault-*.db"))
 
 
-def test_nightly_gives_up_after_the_lock_wait(quick, home, monkeypatch):
-    from inkvault import nightly
+def test_nightly_gives_up_after_the_lock_wait_but_still_backs_up(quick, home, monkeypatch):
+    from inkvault import nightly, paths
+    make_vault().close()
     monkeypatch.setattr(nightly, "LOCK_POLL", 0.1)
     monkeypatch.setattr(nightly, "LOCK_WAIT", 0.6)
-    calls = []
-    monkeypatch.setattr(nightly, "backup", lambda today=None: calls.append(1))
     with holder(home):
         assert nightly.run() == 1
-    assert not calls
+    assert list(paths.backups_dir().glob("vault-*.db"))  # a rescue holding the lock doesn't stop the backup
     started, finished, result = nightly.last_run()
-    assert finished
-    assert result.startswith("failed (another run held the lock for")
+    assert finished and result.startswith("failed (another run held the lock for") and "backup ok" in result
+    assert "saved vault-" in paths.nightly_log().read_text(encoding="utf-8")
+
+
+def test_a_failing_backup_after_a_lock_timeout_shows_in_the_end_line(quick, home, monkeypatch):
+    from inkvault import nightly
+    monkeypatch.setattr(nightly, "LOCK_POLL", 0.1)
+    monkeypatch.setattr(nightly, "LOCK_WAIT", 0.3)
+
+    def broken(today=None):
+        raise OSError("drive gone")
+    monkeypatch.setattr(nightly, "backup", broken)
+    with holder(home):
+        assert nightly.run() == 1
+    assert "backup failed: OSError: drive gone" in nightly.last_run()[2]
+
+
+def test_each_process_writes_its_own_partial_backup_file(home, monkeypatch):
+    from inkvault import nightly
+    make_vault().close()
+    seen = []
+    monkeypatch.setattr(nightly, "quick_check", lambda path: seen.append(path.name) or "ok")
+    nightly.backup(today="2026-10-01")
+    assert seen == [f"vault-2026-10-01.db.{os.getpid()}.partial"]
+
+
+def test_status_points_at_the_fallback_log_when_it_is_newer(home, monkeypatch, capsys):
+    from inkvault import cli, nightly, paths
+    monkeypatch.setenv("INKVAULT_PIECES_PORTS", "1")
+    nightly.log(f"{nightly.START} (pid 1) ===")
+    paths.nightly_fallback_log().write_text("x", encoding="utf-8")
+    os.utime(paths.nightly_log(), (1_000_000, 1_000_000))
+    assert cli.main(["status"]) == 0
+    assert "nightly.log couldn't be written; see nightly-fallback.log" in capsys.readouterr().out
+    os.utime(paths.nightly_fallback_log(), (500_000, 500_000))  # now the main log is the newer one
+    cli.main(["status"])
+    assert "couldn't be written" not in capsys.readouterr().out
+
+
+def test_status_points_at_the_fallback_log_when_the_main_log_is_missing(home, monkeypatch, capsys):
+    from inkvault import cli, paths
+    monkeypatch.setenv("INKVAULT_PIECES_PORTS", "1")
+    paths.nightly_fallback_log().write_text("x", encoding="utf-8")
+    cli.main(["status"])
+    assert "see nightly-fallback.log" in capsys.readouterr().out
+
+
+def test_trim_also_trims_the_fallback_log(home):
+    from inkvault import nightly, paths
+    paths.nightly_fallback_log().write_text("".join(
+        f"2026-10-0{i} 03:00:00  couldn't write nightly.log (x); logging here instead\n2026-10-0{i} 03:00:01  line\n"
+        for i in range(1, 6)), encoding="utf-8")
+    nightly.trim(keep=2)
+    text = paths.nightly_fallback_log().read_text(encoding="utf-8")
+    assert "2026-10-03" not in text and "2026-10-04" in text and "2026-10-05" in text
+
+
+def test_keep_awake_covers_the_lock_wait(quick, home, monkeypatch):
+    import contextlib
+    from inkvault import nightly
+    events = []
+
+    @contextlib.contextmanager
+    def awake():
+        events.append("awake")
+        yield
+        events.append("asleep")
+    monkeypatch.setattr(nightly, "keep_awake", awake)
+    real = nightly.acquire
+    monkeypatch.setattr(nightly, "acquire", lambda stack: events.append("acquire") or real(stack))
+    nightly.run()
+    assert events == ["awake", "acquire", "asleep"]
+
+
+def test_rescue_backs_up_even_when_it_raises(home, monkeypatch, capsys):
+    from inkvault import cli, nightly
+    make_vault().close()
+
+    def boom(args):
+        raise RuntimeError("export blew up")
+    monkeypatch.setattr(cli, "rescue", boom)
+    with pytest.raises(RuntimeError):
+        cli.main(["rescue", "--no-open"])
+    assert "saved vault-" in capsys.readouterr().out
+    assert not nightly.running()
 
 
 NIGHTLY_HOLD = """
