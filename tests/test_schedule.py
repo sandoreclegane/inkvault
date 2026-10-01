@@ -34,3 +34,20 @@ def test_windows_wake_timer_check():
     assert windows.wake_timers_allowed(off) is False
     assert windows.wake_timers_allowed(on) is True
     assert windows.wake_timers_allowed("(localized output we can't read)") is True  # don't warn on a guess
+
+
+def test_macos_launch_agent():
+    import plistlib
+    from pathlib import Path
+    from inkvault.schedulers import macos
+    plist = plistlib.loads(macos.render(ARGV, 3, 5, Path("/tmp/launchd.log")))
+    assert plist["Label"] == "org.inkvault.nightly"
+    assert plist["ProgramArguments"] == ARGV
+    assert plist["StartCalendarInterval"] == {"Hour": 3, "Minute": 5}
+    assert plist["StandardErrorPath"] == str(Path("/tmp/launchd.log"))
+
+
+def test_macos_wake_note_wakes_two_minutes_early():
+    from inkvault.schedulers import macos
+    assert "sudo pmset repeat wakeorpoweron MTWRFSU 02:58:00" in macos.wake_note(3, 0)
+    assert "23:59:00" in macos.wake_note(0, 1)  # wraps past midnight
