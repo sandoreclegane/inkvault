@@ -34,7 +34,7 @@ def test_windows_task_xml():
     assert s.find("t:ExecutionTimeLimit", NS).text == "PT4H"
     assert s.find("t:DisallowStartIfOnBatteries", NS).text == "false"
     assert root.find(".//t:Principal/t:LogonType", NS).text == "InteractiveToken"
-    assert root.find(".//t:Exec/t:Command", NS).text == ARGV[0]
+    assert root.find(".//t:Exec/t:Command", NS).text == '"' + ARGV[0] + '"'
     assert root.find(".//t:Exec/t:Arguments", NS).text == '-m inkvault --home "D:/My Vault" nightly'
     no_wake = ET.fromstring(windows.render(ARGV, 3, 5, wake=False).split("?>", 1)[1])
     assert no_wake.find("t:Settings/t:WakeToRun", NS).text == "false"
@@ -55,7 +55,7 @@ def test_macos_launch_agent():
     from inkvault.schedulers import macos
     plist = plistlib.loads(macos.render(ARGV, 3, 5, Path("/tmp/launchd.log")))
     assert plist["Label"] == "org.inkvault.nightly"
-    assert plist["ProgramArguments"] == ARGV
+    assert plist["ProgramArguments"] == ["/usr/bin/caffeinate", "-i", *ARGV]
     assert plist["StartCalendarInterval"] == {"Hour": 3, "Minute": 5}
     assert plist["StandardErrorPath"] == str(Path("/tmp/launchd.log"))
 
