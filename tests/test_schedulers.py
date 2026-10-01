@@ -8,6 +8,14 @@ import pytest
 ARGV = ["/home/u/100%/v$x/python", "-m", "inkvault", "--home", "/h/my vault", "nightly"]
 
 
+@pytest.fixture(autouse=True)
+def never_run_real_commands(monkeypatch):
+    """Any subprocess a test hasn't faked fails loudly instead of running (schtasks, launchctl, systemctl, crontab)."""
+    def refuse(cmd, *a, **k):
+        raise AssertionError(f"a test ran a real command: {cmd}")
+    monkeypatch.setattr(subprocess, "run", refuse)
+
+
 def fake_run(monkeypatch, module, results=None):
     """Record every subprocess.run argv. results maps an argv prefix to a result, an exception, or a callable."""
     calls = []
@@ -157,7 +165,8 @@ def test_linux_unit_dir_ignores_empty_xdg(lin, monkeypatch, tmp_path):
 def test_linux_systemd_sequence(lin, monkeypatch):
     calls = fake_run(monkeypatch, lin)
     lin.install(["/p", "nightly"], 3, 5, False)
-    assert [c[2] for c in calls if c[0] == "systemctl"] == ["show-environment", "daemon-reload", "enable", "restart"]
+    assert [c[2] for c in calls if c[0] == "systemctl"] == ["show-environment", "daemon-reload", "enable", "restart",
+                                                                 "is-active"]
     assert next(c for c in calls if c[2] == "enable")[-2:] == ["--now", "inkvault-nightly.timer"]
     assert next(c for c in calls if c[2] == "restart")[-1] == "inkvault-nightly.timer"
     assert (lin.unit_dir() / "inkvault-nightly.timer").exists()
@@ -283,3 +292,173 @@ def test_linux_cleanup_of_the_other_scheduler_never_fails_the_install(lin, monke
         raise RuntimeError("couldn't read your crontab")
     monkeypatch.setattr(lin, "get_crontab", boom)
     assert "systemd" in lin.install(["/p", "nightly"], 3, 5, False)
+
+
+# --- review round 3: health, failures, escaping -----------------------------------------------------------------
+
+def task_xml(argv, enabled=True, encoding="utf-16"):
+    """What `schtasks /Query /XML` prints for our task: the XML we registered, possibly disabled since."""
+    from inkvault.schedulers import windows
+    xml = windows.render(argv, 3, 5, False)
+    if not enabled:
+        xml = xml.replace("    <Enabled>true</Enabled>\n  </Settings>", "    <Enabled>false</Enabled>\n  </Settings>")
+    return xml.encode(encoding)
+
+
+WIN_ARGV = ["C:\\Users\\a b\\uv\\tools\\inkvault\\Scripts\\pythonw.exe", "-m", "inkvault",
+            "--home", "D:\\My Vault\\", "nightly"]
+
+
+def test_windows_query_reads_the_registered_task(monkeypatch):
+    from inkvault.schedulers import windows
+    calls = fake_run(monkeypatch, windows, {("schtasks", "/Query"): proc(0, out=task_xml(WIN_ARGV))})
+    job = windows.query()
+    assert calls[0] == ["schtasks", "/Query", "/TN", "InkVault Nightly", "/XML"]
+    assert job.present and job.enabled is True and job.scheduler == "Task Scheduler"
+    assert job.executable == WIN_ARGV[0] and job.home == "D:\\My Vault\\"
+
+
+def test_windows_query_sees_a_disabled_task_in_any_encoding(monkeypatch):
+    from inkvault.schedulers import windows
+    for enc in ("utf-16", "utf-16-le", "utf-8"):  # with a BOM, without one, or plain bytes
+        fake_run(monkeypatch, windows, {("schtasks", "/Query"): proc(0, out=task_xml(WIN_ARGV, False, enc))})
+        job = windows.query()
+        assert job.present and job.enabled is False and job.home == "D:\\My Vault\\", enc
+
+
+def test_windows_query_absent_and_unreadable(monkeypatch):
+    from inkvault.schedulers import windows
+    fake_run(monkeypatch, windows, {("schtasks",): proc(1, err=b"ERROR: The system cannot find the file")})
+    assert windows.query().present is False and windows.installed() is False
+    fake_run(monkeypatch, windows, {("schtasks",): proc(0, out=b"not xml at all")})
+    job = windows.query()
+    assert job.present and job.enabled is None and job.home is None  # there, but we can't tell more
+
+
+def test_windows_split_args_inverts_list2cmdline():
+    from inkvault.schedulers import windows
+    for argv in (["-m", "inkvault", "--home", "D:\\My Vault\\", "nightly"], ['a "q" b', "c\\\\", "", "x\\y"]):
+        assert windows.split_args(subprocess.list2cmdline(argv)) == argv
+
+
+def test_windows_remove_says_absent_removed_or_fails(monkeypatch):
+    from inkvault.schedulers import windows
+    calls = fake_run(monkeypatch, windows, {("schtasks", "/Query"): proc(1, err=b"not found")})
+    assert windows.remove() is False and not any("/Delete" in c for c in calls)
+    fake_run(monkeypatch, windows, {("schtasks", "/Query"): proc(0, out=task_xml(WIN_ARGV))})
+    assert windows.remove() is True
+    fake_run(monkeypatch, windows, {("schtasks", "/Query"): proc(0, out=task_xml(WIN_ARGV)),
+                                    ("schtasks", "/Delete"): proc(1, err="ERROR: Access is denied.")})
+    with pytest.raises(RuntimeError, match="Access is denied"):
+        windows.remove()
+
+
+def test_windows_restart_comment_is_accurate():
+    import inspect
+    from inkvault.schedulers import windows
+    src = inspect.getsource(windows.render)
+    assert "only if the task fails to start" not in src and "per its own rules" in src
+
+
+def test_macos_query(mac, monkeypatch):
+    mac.plist_path().parent.mkdir(parents=True)
+    calls = fake_run(monkeypatch, mac)
+    assert mac.query().present is False and calls == []
+    mac.plist_path().write_bytes(mac.render(["/u/py", "-m", "inkvault", "--home", "/v", "nightly"], 3, 5, "/l"))
+    job = mac.query()
+    assert calls[-1] == ["launchctl", "print", "gui/501/org.inkvault.nightly"]
+    assert (job.present, job.enabled, job.home, job.executable, job.scheduler) == (True, True, "/v", "/u/py", "launchd")
+    fake_run(monkeypatch, mac, {("launchctl", "print"): proc(113, err="Could not find service")})
+    assert mac.query().enabled is False  # the file is there but launchd isn't running it
+
+
+def test_macos_remove_checks_bootout(mac, monkeypatch):
+    p = mac.plist_path()
+    p.parent.mkdir(parents=True)
+    p.write_bytes(b"x")
+    fake_run(monkeypatch, mac, {("launchctl", "bootout"): proc(5, err="Input/output error")})
+    with pytest.raises(RuntimeError, match="Input/output error"):
+        mac.remove()
+    assert p.exists()  # kept: launchd may still run it
+    for not_loaded in (proc(3, err="whatever"), proc(113, err="x"), proc(1, err="Boot-out failed: 3: No such process")):
+        fake_run(monkeypatch, mac, {("launchctl", "bootout"): not_loaded})
+        p.write_bytes(b"x")
+        assert mac.remove() is True and not p.exists()
+        assert mac.remove() is False  # nothing loaded, no file
+
+
+def test_macos_install_fails_if_the_old_job_wont_unload(mac, monkeypatch):
+    calls = fake_run(monkeypatch, mac, {("launchctl", "bootout"): proc(1, err="Operation not permitted")})
+    with pytest.raises(RuntimeError, match="Operation not permitted"):
+        mac.install(["/u/py", "nightly"], 3, 5, False)
+    assert not any(c[1] == "bootstrap" for c in calls)
+
+
+def test_linux_exec_start_escapes_backslashes_for_systemd():
+    from inkvault.schedulers import linux
+    line = linux.exec_start(["/home/u/notes\\new/python", "nightly"])
+    assert line == "'/home/u/notes\\\\new/python' nightly"
+    assert linux.parse_exec_start(linux.exec_start(ARGV + ["a\\b"])) == ARGV + ["a\\b"]
+    assert "notes\\new" in linux.cron_line(["/home/u/notes\\new/python"], 3, 5)  # cron: shlex only
+
+
+def test_linux_query_systemd_and_cron(lin, monkeypatch):
+    monkeypatch.setattr(lin, "has_systemd", lambda: True)
+    monkeypatch.setattr(lin, "get_crontab", lambda: "")
+    assert lin.query().present is False
+    d = lin.unit_dir()
+    d.mkdir(parents=True)
+    (d / "inkvault-nightly.service").write_text(lin.render_service(ARGV))
+    (d / "inkvault-nightly.timer").write_text(lin.render_timer(3, 5))
+    calls = fake_run(monkeypatch, lin, {("systemctl", "--user", "is-enabled"): proc(1, out="disabled\n")})
+    job = lin.query()
+    assert ["systemctl", "--user", "is-enabled", "inkvault-nightly.timer"] in calls
+    assert (job.present, job.enabled, job.home, job.executable, job.scheduler) == \
+        (True, False, "/h/my vault", ARGV[0], "systemd")
+    fake_run(monkeypatch, lin)
+    assert lin.query().enabled is True
+
+    for f in d.iterdir():
+        f.unlink()
+    monkeypatch.setattr(lin, "get_crontab", lambda: "0 9 * * 1 x\n" + lin.cron_line(ARGV, 3, 5) + "\n")
+    job = lin.query()
+    assert (job.present, job.enabled, job.home, job.executable, job.scheduler) == \
+        (True, True, "/h/my vault", ARGV[0], "cron")
+
+
+@pytest.mark.parametrize("step", ["daemon-reload", "enable", "restart", "is-active"])
+def test_linux_install_fails_on_any_systemctl_failure(lin, monkeypatch, step):
+    fake_run(monkeypatch, lin, {("systemctl", "--user", step): proc(1, err=f"{step} went wrong")})
+    monkeypatch.setattr(lin, "get_crontab", lambda: "")
+    with pytest.raises(RuntimeError, match=f"{step} went wrong"):
+        lin.install(["/p", "nightly"], 3, 5, False)
+
+
+@pytest.mark.parametrize("step", ["disable", "daemon-reload"])
+def test_linux_remove_fails_on_systemctl_failure(lin, monkeypatch, step):
+    d = lin.unit_dir()
+    d.mkdir(parents=True)
+    (d / "inkvault-nightly.timer").write_text("x")
+    monkeypatch.setattr(lin, "has_systemd", lambda: True)
+    monkeypatch.setattr(lin, "get_crontab", lambda: "")
+    fake_run(monkeypatch, lin, {("systemctl", "--user", step): proc(1, err=f"{step} went wrong")})
+    with pytest.raises(RuntimeError, match=f"{step} went wrong"):
+        lin.remove()
+
+
+def test_linux_remove_reports_nothing_there(lin, monkeypatch):
+    monkeypatch.setattr(lin, "has_systemd", lambda: True)
+    monkeypatch.setattr(lin, "get_crontab", lambda: "0 9 * * 1 x\n")
+    calls = fake_run(monkeypatch, lin)
+    assert lin.remove() is False
+    assert not any("disable" in c for c in calls)  # no unit: nothing to disable (it would fail)
+
+
+def test_linux_failed_cleanup_of_the_other_scheduler_warns(lin, monkeypatch, capsys):
+    fake_run(monkeypatch, lin)
+
+    def boom():
+        raise RuntimeError("couldn't read your crontab")
+    monkeypatch.setattr(lin, "get_crontab", boom)
+    lin.install(["/p", "nightly"], 3, 5, False)
+    assert "Warning" in capsys.readouterr().out
