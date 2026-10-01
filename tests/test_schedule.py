@@ -2,9 +2,22 @@
 import json
 
 import pytest
+from conftest import holder  # a real lock held by another process, as the nightly run would hold it
 
 ARGV = ["C:/Users/a b/uv/tools/inkvault/Scripts/pythonw.exe", "-m", "inkvault", "--home", "D:/My Vault", "nightly"]
 NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+
+
+@pytest.fixture(autouse=True)
+def never_touch_the_real_uv_or_schedulers(monkeypatch):
+    """uv sets UV for the process running the tests, which would make the code under test find the real uv.
+    Any subprocess a test hasn't faked fails loudly instead of running (uv tool install, schtasks, ...)."""
+    import subprocess
+    monkeypatch.delenv("UV", raising=False)
+
+    def refuse(cmd, *a, **k):
+        raise AssertionError(f"a test ran a real command: {cmd}")
+    monkeypatch.setattr(subprocess, "run", refuse)
 
 
 def test_windows_task_xml():
@@ -109,19 +122,23 @@ def test_job_argv_carries_home_and_ports(home, monkeypatch):
 
 def test_ask_wake(monkeypatch):
     from inkvault import schedule
-    assert schedule.ask_wake(True, interactive=False) is True
-    assert schedule.ask_wake(False, interactive=True) is False  # a flag wins over asking
-    assert schedule.ask_wake(None, interactive=False) is False  # no terminal: don't wake
-    monkeypatch.setattr("builtins.input", lambda prompt: "y")
-    assert schedule.ask_wake(None, interactive=True) is True
-    monkeypatch.setattr("builtins.input", lambda prompt: "")
-    assert schedule.ask_wake(None, interactive=True) is False  # default is no
+    for platform in ("win32", "darwin"):
+        assert schedule.ask_wake(True, interactive=False, platform=platform) is True
+        assert schedule.ask_wake(False, interactive=True, platform=platform) is False  # a flag wins over asking
+        assert schedule.ask_wake(None, interactive=False, platform=platform) is False  # no terminal: don't wake
+        monkeypatch.setattr("builtins.input", lambda prompt: "y")
+        assert schedule.ask_wake(None, interactive=True, platform=platform) is True
+        monkeypatch.setattr("builtins.input", lambda prompt: "")
+        assert schedule.ask_wake(None, interactive=True, platform=platform) is False  # default is no
+    assert schedule.ask_wake(True, interactive=True, platform="linux") is False  # Linux can't wake
 
 
 class FakeBackend:
-    def __init__(self):
+    PLATFORM = "win32"  # so the wake prompt behaves the same whatever OS runs the tests
+
+    def __init__(self, on=False):
         self.calls = []
-        self.on = False
+        self.on = on
 
     def install(self, argv, hour, minute, wake):
         self.calls.append((argv, hour, minute, wake))
@@ -217,7 +234,168 @@ def test_cli_pieces_ports_flag_sets_the_env(home, monkeypatch):
 
 def test_rescue_refuses_while_nightly_runs(home, capsys):
     from inkvault import cli
-    from test_nightly import holder  # a real lock held by another process, as the nightly run would hold it
     with holder(home):
         assert cli.main(["rescue", "--no-open"]) == 1
     assert "nightly run is in progress" in capsys.readouterr().out
+
+
+def fake_install(monkeypatch, schedule, versions, calls):
+    """Pretend uv works and the tool install reports versions[0] (None: the probe fails); a reinstall installs 0.1.1+."""
+    from pathlib import Path
+    import subprocess
+    exe = Path("/tools/inkvault/bin/python")
+    monkeypatch.delenv("UV", raising=False)
+    monkeypatch.setattr(schedule.shutil, "which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+    monkeypatch.setattr(schedule, "tool_python", lambda: exe)
+    monkeypatch.setattr(schedule, "installed_version", lambda e: versions[0])
+
+    def run(cmd, **k):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+    monkeypatch.setattr(schedule.subprocess, "run", run)
+    return exe
+
+
+def test_ensure_installed_reinstalls_an_outdated_tool(monkeypatch, capsys):
+    from inkvault import schedule
+    calls = []
+    exe = fake_install(monkeypatch, schedule, [(0, 0, 9)], calls)
+    assert schedule.ensure_installed() == exe
+    assert calls == [["/usr/bin/uv", "tool", "install", "--force", schedule.REPO]]
+    assert "Updating the installed InkVault to" in capsys.readouterr().out
+
+
+def test_ensure_installed_leaves_a_current_tool_alone(monkeypatch):
+    from inkvault import __version__, schedule
+    calls = []
+    current = schedule.version_tuple(__version__)
+    exe = fake_install(monkeypatch, schedule, [current], calls)
+    assert schedule.ensure_installed() == exe
+    assert calls == []
+    monkeypatch.setattr(schedule, "installed_version", lambda e: (99, 0))
+    assert schedule.ensure_installed() == exe and calls == []  # newer is fine too
+
+
+def test_ensure_installed_reinstalls_when_the_probe_fails(monkeypatch):
+    from inkvault import schedule
+    calls = []
+    fake_install(monkeypatch, schedule, [None], calls)
+    schedule.ensure_installed()
+    assert calls and "--force" in calls[0]
+
+
+def test_installed_version_reads_the_version_line(tmp_path, monkeypatch):
+    import subprocess
+    from inkvault import schedule
+    exe = tmp_path / "python"
+    monkeypatch.setattr(schedule.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="inkvault 0.1.12\n", stderr=""))
+    assert schedule.installed_version(exe) == (0, 1, 12)
+    monkeypatch.setattr(schedule.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="No module"))
+    assert schedule.installed_version(exe) is None
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(a, 60)
+    monkeypatch.setattr(schedule.subprocess, "run", boom)
+    assert schedule.installed_version(exe) is None
+
+
+def test_uv_path_prefers_the_uv_variable(monkeypatch):
+    from inkvault import schedule
+    monkeypatch.setattr(schedule.shutil, "which", lambda name: "/usr/bin/uv")
+    monkeypatch.setenv("UV", "/opt/uvx/uv")
+    assert schedule.uv_path() == "/opt/uvx/uv"
+    monkeypatch.delenv("UV")
+    assert schedule.uv_path() == "/usr/bin/uv"
+
+
+def test_describe_survives_a_corrupt_schedule_file(home, monkeypatch):
+    from inkvault import schedule
+    monkeypatch.setattr(schedule, "backend", lambda: FakeBackend(on=True))
+    for text in ("{not json", "[]", '{"wake": true}', '{"at": "9pm"}', ""):
+        schedule.paths.schedule_file().write_text(text)
+        assert schedule.describe() == "on, but schedule.json is unreadable (run `inkvault schedule` again)"
+
+
+def test_enable_reports_backend_and_settings_failures(home, monkeypatch):
+    from pathlib import Path
+    from inkvault import schedule
+    fake = FakeBackend()
+    monkeypatch.setattr(schedule, "backend", lambda: fake)
+    monkeypatch.setattr(schedule, "ensure_installed", lambda: Path("/tools/python"))
+    monkeypatch.setattr(schedule, "remember_pieces", lambda: None)
+
+    def broken(*a):
+        raise ValueError("bad schtasks output")
+    monkeypatch.setattr(fake, "install", broken)
+    with pytest.raises(schedule.ScheduleError, match="Couldn't set up the nightly run: bad schtasks output"):
+        schedule.enable("03:00", wake=False)
+
+    monkeypatch.undo()
+    monkeypatch.setenv("INKVAULT_HOME", str(home))
+    monkeypatch.setattr(schedule, "backend", lambda: fake)
+    monkeypatch.setattr(schedule, "ensure_installed", lambda: Path("/tools/python"))
+    monkeypatch.setattr(schedule, "remember_pieces", lambda: None)
+    monkeypatch.setattr(schedule.os, "replace", lambda *a: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(schedule.ScheduleError, match="set up for 03:00, but .*disk full"):
+        schedule.enable("03:00", wake=False)
+
+    def remove_fails():
+        raise RuntimeError("schtasks said no")
+    monkeypatch.setattr(fake, "remove", remove_fails)
+    with pytest.raises(schedule.ScheduleError, match="Couldn't remove the nightly run: schtasks said no"):
+        schedule.disable()
+
+
+def test_linux_never_asks_about_waking_but_still_shows_the_note(home, monkeypatch, capsys):
+    from pathlib import Path
+    from inkvault import schedule
+
+    class LinuxFake(FakeBackend):
+        PLATFORM = "linux"
+    fake = LinuxFake()
+    monkeypatch.setattr(schedule, "backend", lambda: fake)
+    monkeypatch.setattr(schedule, "ensure_installed", lambda: Path("/tools/python"))
+    monkeypatch.setattr(schedule, "remember_pieces", lambda: None)
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("asked"))
+    schedule.enable("03:00", wake=None, interactive=True)
+    assert fake.calls[0][3] is False and "WAKE NOTE" not in capsys.readouterr().out
+    schedule.enable("03:00", wake=True)
+    assert fake.calls[1][3] is False and "WAKE NOTE" in capsys.readouterr().out
+
+
+def test_ask_wake_mentions_the_admin_command_on_a_mac(monkeypatch):
+    from inkvault import schedule
+    seen = []
+    monkeypatch.setattr("builtins.input", lambda prompt: seen.append(prompt) or "n")
+    schedule.ask_wake(None, True, "darwin")
+    schedule.ask_wake(None, True, "win32")
+    assert "administrator" in seen[0] and "administrator" not in seen[1]
+
+
+def test_pieces_ports_must_be_valid_ports(home, capsys):
+    from inkvault import cli
+    for bad in ("abc", "0", "70000", "1,,2", ""):
+        with pytest.raises(SystemExit) as e:
+            cli.main(["--pieces-ports", bad, "status"])
+        assert e.value.code == 2
+    assert cli.ports_arg("39300, 1000") == "39300,1000"
+
+
+def test_wake_and_no_wake_exclude_each_other(home):
+    from inkvault import cli
+    with pytest.raises(SystemExit) as e:
+        cli.main(["schedule", "--wake", "--no-wake"])
+    assert e.value.code == 2
+
+
+def test_rescue_without_lock_support_warns_and_runs(home, monkeypatch, capsys):
+    from inkvault import cli, nightly
+
+    def no_locks():
+        raise OSError("locking not supported")
+    monkeypatch.setattr(nightly, "lock", no_locks)
+    monkeypatch.setattr(cli, "rescue", lambda args: 0)
+    assert cli.main(["rescue", "--no-open"]) == 0
+    assert "continuing without it" in capsys.readouterr().out

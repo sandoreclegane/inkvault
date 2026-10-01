@@ -5,13 +5,14 @@ as a permanent `uv tool`, and the job runs that install's Python.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import paths
+from . import __version__, paths
 
 REPO = "git+https://github.com/sandoreclegane/inkvault"
 
@@ -42,11 +43,17 @@ def backend():
     return linux
 
 
+def uv_path():
+    """uv's own path: uvx sets UV, and a scheduled or minimal environment may not have uv on PATH."""
+    return os.environ.get("UV") or shutil.which("uv")
+
+
 def tool_python():
     """The Python of InkVault installed with `uv tool install`, or None. pythonw on Windows: no console window."""
-    if not shutil.which("uv"):
+    uv = uv_path()
+    if not uv:
         return None
-    r = subprocess.run(["uv", "tool", "dir"], capture_output=True, text=True)
+    r = subprocess.run([uv, "tool", "dir"], capture_output=True, text=True)
     if r.returncode:
         return None
     env = Path(r.stdout.strip()) / "inkvault"
@@ -54,17 +61,45 @@ def tool_python():
     return exe if exe.exists() else None
 
 
+def version_tuple(text):
+    m = re.search(r"\d+(?:\.\d+)*", text or "")
+    return tuple(int(n) for n in m.group().split(".")) if m else None
+
+
+def installed_version(exe):
+    """The version of the tool install at exe, or None if it can't say (a 0.1.0 install has no `-m inkvault`)."""
+    console = exe.with_name("python.exe") if sys.platform == "win32" else exe  # pythonw prints nothing
+    try:
+        r = subprocess.run([str(console), "-m", "inkvault", "--version"], capture_output=True, text=True,
+                           timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return version_tuple(r.stdout) if r.returncode == 0 else None
+
+
 def ensure_installed():
-    if exe := tool_python():
-        return exe
-    if not shutil.which("uv"):
+    uv = uv_path()
+    exe = tool_python()
+    if exe:
+        have = installed_version(exe)
+        if have and have >= version_tuple(__version__):
+            return exe
+        # A tool install from before `nightly` existed would make the job fail silently every night.
+        print(f"Updating the installed InkVault to {__version__}", flush=True)
+        cmd = [uv, "tool", "install", "--force", REPO]
+    elif not uv:
         raise ScheduleError("The nightly run needs uv to install InkVault as a permanent command. Install uv "
                             "(https://docs.astral.sh/uv/getting-started/installation/), then run `inkvault schedule` again.")
-    print(f"Installing InkVault as a permanent command: uv tool install {REPO}", flush=True)
-    r = subprocess.run(["uv", "tool", "install", REPO])
+    else:
+        print(f"Installing InkVault as a permanent command: uv tool install {REPO}", flush=True)
+        cmd = [uv, "tool", "install", REPO]
+    r = subprocess.run(cmd)
     if r.returncode or not (exe := tool_python()):
         raise ScheduleError("`uv tool install` didn't finish; see the message above.")
-    print("Done. `inkvault` is now a normal command; update it anytime with `uv tool upgrade inkvault`.")
+    if shutil.which("inkvault"):
+        print("Done. Update it anytime with `uv tool upgrade inkvault`.")
+    else:
+        print("Done. To type `inkvault` directly, run `uv tool update-shell` and open a new terminal.")
     return exe
 
 
@@ -78,14 +113,26 @@ def job_argv(python):
     return argv + ["nightly"]
 
 
-def ask_wake(wake, interactive):
-    """--wake / --no-wake win; otherwise ask in a terminal (default no); with no terminal, don't wake."""
+def platform_of(b):
+    """sys.platform-style name for a backend module (tests' fakes carry PLATFORM)."""
+    name = getattr(b, "__name__", "").rsplit(".", 1)[-1]
+    return getattr(b, "PLATFORM", None) or {"windows": "win32", "macos": "darwin", "linux": "linux"}.get(name)         or sys.platform
+
+
+def ask_wake(wake, interactive, platform=None):
+    """--wake / --no-wake win; otherwise ask in a terminal (default no); with no terminal, don't wake.
+
+    Linux can't wake for a user's timer, so it never asks (and never wakes)."""
+    platform = platform or sys.platform
+    if platform not in ("win32", "darwin"):
+        return False
     if wake is not None:
         return wake
     if not interactive:
         return False
-    answer = input("If the computer is asleep at that time, wake it for the run? "
-                   "(Otherwise it runs the next time the computer is awake.) [y/N] ")
+    extra = " This needs a one-time administrator command, which I'll show you." if platform == "darwin" else ""
+    answer = input("If the computer is asleep at that time, wake it for the run?" + extra +
+                   " (Otherwise it runs the next time the computer is awake.) [y/N] ")
     return answer.strip().lower() in ("y", "yes")
 
 
@@ -101,17 +148,25 @@ def remember_pieces():
 def enable(at="03:00", wake=None, interactive=False):
     hour, minute = parse_at(at)
     exe = ensure_installed()
-    wake = ask_wake(wake, interactive)
-    remember_pieces()
     b = backend()
+    requested = wake
+    wake = ask_wake(wake, interactive, platform_of(b))
+    remember_pieces()
     try:
         where = b.install(job_argv(exe), hour, minute, wake)
-    except (OSError, RuntimeError, subprocess.CalledProcessError) as e:
+    except Exception as e:  # noqa: BLE001 - whatever the scheduler tool did, the user needs the message
         raise ScheduleError(f"Couldn't set up the nightly run: {e}") from None
     at = f"{hour:02d}:{minute:02d}"
-    paths.schedule_file().write_text(json.dumps({"at": at, "wake": wake}), encoding="utf-8")
+    try:
+        f = paths.schedule_file()
+        tmp = f.with_name(f.name + ".tmp")
+        tmp.write_text(json.dumps({"at": at, "wake": wake}), encoding="utf-8")
+        os.replace(tmp, f)
+    except OSError as e:
+        raise ScheduleError(f"The nightly run is set up for {at}, but InkVault couldn't save its settings "
+                            f"({e}), so `inkvault status` won't show it. Run `inkvault schedule` again.") from None
     print(f"Nightly run set for {at} every day ({where}).")
-    if wake and (note := b.wake_note(hour, minute)):
+    if (wake or requested) and (note := b.wake_note(hour, minute)):
         print(note)
     print(f"Each run is logged in {paths.nightly_log()}.\n"
           "Run it now with `inkvault nightly`, check on it with `inkvault status`, "
@@ -119,7 +174,10 @@ def enable(at="03:00", wake=None, interactive=False):
 
 
 def disable():
-    removed = backend().remove()
+    try:
+        removed = backend().remove()
+    except Exception as e:  # noqa: BLE001
+        raise ScheduleError(f"Couldn't remove the nightly run: {e}") from None
     paths.schedule_file().unlink(missing_ok=True)
     print("Nightly run removed. Your vault, backups and log are untouched." if removed
           else "There was no nightly run set up.")
@@ -130,7 +188,10 @@ def describe(now=None):
     f = paths.schedule_file()
     if not f.exists() or not backend().installed():
         return "off (turn on with `inkvault schedule`)"
-    s = json.loads(f.read_text(encoding="utf-8"))
-    hour, minute = parse_at(s["at"])
-    upcoming = next_run(hour, minute, now or datetime.now())
-    return f"daily at {s['at']}{', wakes the computer' if s.get('wake') else ''}; next {upcoming:%Y-%m-%d %H:%M}"
+    try:
+        s = json.loads(f.read_text(encoding="utf-8"))
+        hour, minute = parse_at(s["at"])
+        upcoming = next_run(hour, minute, now or datetime.now())
+        return f"daily at {s['at']}{', wakes the computer' if s.get('wake') else ''}; next {upcoming:%Y-%m-%d %H:%M}"
+    except (OSError, ValueError, KeyError, TypeError, ScheduleError):
+        return "on, but schedule.json is unreadable (run `inkvault schedule` again)"

@@ -11,6 +11,7 @@
     inkvault nightly     one refresh + backup now (what the schedule runs)
 """
 import argparse
+import contextlib
 import os
 import sqlite3
 import sys
@@ -43,12 +44,15 @@ def open_dashboard(path):
 
 def cmd_rescue(args):
     from . import nightly
-    try:
-        with nightly.lock():
-            return rescue(args)
-    except nightly.Busy:
-        print("A nightly run is in progress right now; try again when it's done (see `inkvault status`).")
-        return 1
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(nightly.lock())
+        except nightly.Busy:
+            print("A nightly run is in progress right now; try again when it's done (see `inkvault status`).")
+            return 1
+        except OSError as e:  # e.g. a drive without file locking: better to rescue unguarded than not at all
+            print(f"Couldn't take the lock that keeps a rescue and the nightly run apart ({e}); continuing without it.")
+        return rescue(args)
 
 
 def rescue(args):
@@ -115,11 +119,23 @@ def cmd_status(_args):
     return 0
 
 
+def ports_arg(text):
+    """argparse type for --pieces-ports: comma-separated port numbers."""
+    try:
+        ports = [int(part) for part in text.split(",")]
+    except ValueError:
+        ports = []
+    if not ports or not all(1 <= n <= 65535 for n in ports):
+        raise argparse.ArgumentTypeError(f"{text!r} isn't a port list; use numbers from 1 to 65535, "
+                                         "comma-separated (for example 39300,1000)")
+    return ",".join(map(str, ports))
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="inkvault", description="Rescue your Pieces memory and search it locally.")
     p.add_argument("--version", action="version", version=f"inkvault {__version__}")
     p.add_argument("--home", help="where to keep the vault (default: your app-data folder; or set INKVAULT_HOME)")
-    p.add_argument("--pieces-ports", help="PiecesOS port(s) to try, comma-separated (or set INKVAULT_PIECES_PORTS)")
+    p.add_argument("--pieces-ports", type=ports_arg, help="PiecesOS port(s) to try, comma-separated (or set INKVAULT_PIECES_PORTS)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     r = sub.add_parser("rescue", help="export + index + digest + dashboard, in one go")
@@ -137,9 +153,10 @@ def main(argv=None):
     sub.add_parser("status", help="what's in the vault and where it lives")
     s = sub.add_parser("schedule", help="refresh and back up the vault every night")
     s.add_argument("--at", default="03:00", help="time of day, 24-hour (default 03:00)")
-    s.add_argument("--wake", dest="wake", action="store_const", const=True, default=None,
+    w = s.add_mutually_exclusive_group()
+    w.add_argument("--wake", dest="wake", action="store_const", const=True, default=None,
                    help="wake the computer for the run")
-    s.add_argument("--no-wake", dest="wake", action="store_const", const=False,
+    w.add_argument("--no-wake", dest="wake", action="store_const", const=False,
                    help="don't wake it; run the next time it's awake")
     s.add_argument("--off", action="store_true", help="stop the nightly run (keeps the vault and backups)")
     sub.add_parser("nightly", help="one refresh + backup now (what the schedule runs)")
