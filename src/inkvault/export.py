@@ -4,6 +4,7 @@ Read-only against PiecesOS. Only adds, never deletes, and skips what it already 
 to stop and re-run at any time (re-running also picks up anything PiecesOS captured since).
 Every record is kept as the raw JSON PiecesOS returned, so nothing is lost to our interpretation.
 """
+import contextlib
 import datetime
 import json
 import os
@@ -52,9 +53,8 @@ def saved_port():
         return []
     try:
         # as_uri() escapes characters like # ? % that would otherwise break a "file:" URI
-        db = sqlite3.connect(paths.vault_db().as_uri() + "?mode=ro", uri=True)
-        row = db.execute("SELECT value FROM meta WHERE key='pieces_url'").fetchone()
-        db.close()
+        with contextlib.closing(sqlite3.connect(paths.vault_db().as_uri() + "?mode=ro", uri=True)) as db:
+            row = db.execute("SELECT value FROM meta WHERE key='pieces_url'").fetchone()
         return [int(row[0].rsplit(":", 1)[1])] if row else []
     except (sqlite3.Error, ValueError, IndexError):
         return []

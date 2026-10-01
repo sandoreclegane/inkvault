@@ -86,13 +86,20 @@ except nightly.Busy:
 def holder(home):
     """Another process holding the nightly lock. A separate process, because that's what the lock is for, and
     it behaves the same on Windows, macOS and Linux (flock and msvcrt locks can be ambiguous within one process)."""
-    p = subprocess.Popen([sys.executable, "-c", HOLD, str(home)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    p = subprocess.Popen([sys.executable, "-c", HOLD, str(home)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True)
     try:
-        assert p.stdout.readline().strip() == "held"
+        assert p.stdout.readline().strip() == "held", p.stderr.read()
         yield p
     finally:
         p.stdin.close()
-        p.wait(timeout=30)
+        try:
+            p.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+        err = p.stderr.read()
+        assert not err, f"lock holder crashed: {err}"
 
 
 def try_in_subprocess(home):
@@ -290,3 +297,68 @@ def test_multiline_step_error_stays_on_one_line(quick, monkeypatch):
     monkeypatch.setattr(index, "build", broken)
     nightly.run()
     assert "index failed: RuntimeError: line one line two" in nightly.last_run()[2]
+
+
+def patch_os_lock(monkeypatch, err):
+    """Make the platform's lock call fail with errno err: whichever one try_lock really uses on this OS."""
+    def fail(*args, **kwargs):
+        raise OSError(err, os.strerror(err))
+    if sys.platform == "win32":
+        import msvcrt
+        monkeypatch.setattr(msvcrt, "locking", fail)
+    else:
+        import fcntl
+        monkeypatch.setattr(fcntl, "flock", fail)
+
+
+def test_filesystem_without_lock_support_is_an_error_not_busy(quick, monkeypatch):
+    import errno
+    from inkvault import nightly, paths
+    patch_os_lock(monkeypatch, errno.ENOLCK)
+    assert nightly.running() is False
+    assert nightly.run() == 1
+    text = paths.nightly_log().read_text(encoding="utf-8")
+    assert "Traceback" in text and "in progress" not in text
+
+
+def test_real_contention_errors_count_as_busy(home, monkeypatch):
+    import errno
+    from inkvault import nightly
+    monkeypatch.setattr(nightly.time, "sleep", lambda s: None)
+    for err in (errno.EACCES, errno.EAGAIN):
+        patch_os_lock(monkeypatch, err)
+        assert nightly.running() is True
+        with pytest.raises(nightly.Busy):
+            with nightly.lock():
+                pass
+
+
+def test_lock_retries_once_before_giving_up(home, monkeypatch):
+    import errno
+    from inkvault import nightly
+    calls = []
+    real = nightly.try_lock
+
+    def flaky(fd):
+        calls.append(1)
+        if len(calls) == 1:
+            return False
+        return real(fd)
+    monkeypatch.setattr(nightly, "try_lock", flaky)
+    monkeypatch.setattr(nightly.time, "sleep", lambda s: calls.append("slept"))
+    with nightly.lock():
+        pass
+    assert calls[:3] == [1, "slept", 1]
+
+
+def test_busy_message_says_when_the_pid_is_unknown(quick, monkeypatch):
+    from inkvault import nightly, paths
+    import contextlib
+
+    @contextlib.contextmanager
+    def busy():
+        raise nightly.Busy(0)
+        yield
+    monkeypatch.setattr(nightly, "lock", busy)
+    assert nightly.run() == 0
+    assert "pid unknown" in paths.nightly_log().read_text(encoding="utf-8")

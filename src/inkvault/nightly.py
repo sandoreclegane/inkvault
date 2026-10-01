@@ -6,6 +6,7 @@ the one file that can't be rebuilt. Everything goes to nightly.log in the vault 
 Windows runs the job) there is no console, so the log is the only record.
 """
 import contextlib
+import errno
 import os
 import sqlite3
 import sys
@@ -99,11 +100,16 @@ class Busy(Exception):
     """Another nightly run or rescue holds the lock. args[0] is its process id."""
 
 
+# The errors a lock call gives when someone else really holds the lock. Anything else (no lock support on a
+# network or FUSE drive, a bad descriptor) is a real problem that must show up, not look like "busy" forever.
+BUSY_ERRNOS = {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, getattr(errno, "EDEADLOCK", errno.EDEADLK)}
 LOCK_BYTE = 1024  # Windows locks this byte, past the pid text, so other processes can still read the pid
 
 
 def try_lock(fd):
-    """Take the kernel's exclusive lock on fd without waiting. False if another process holds it."""
+    """Take the kernel's exclusive lock on fd without waiting. False if another process holds it.
+
+    Raises OSError for anything that isn't contention (see BUSY_ERRNOS)."""
     try:
         if sys.platform == "win32":
             import msvcrt
@@ -113,8 +119,10 @@ def try_lock(fd):
             import fcntl
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return True
-    except OSError:
-        return False
+    except OSError as e:
+        if e.errno in BUSY_ERRNOS:
+            return False
+        raise
 
 
 def unlock(fd):
@@ -140,6 +148,8 @@ def lock_owner():
 
 
 def running():
+    """Is a run going? Call it from a process that does NOT hold the lock: on NFS, Linux emulates flock with
+    per-process locks, so probing from inside lock() would release the holder's own lock."""
     try:
         fd = os.open(paths.nightly_lock(), os.O_RDWR | os.O_CREAT)
     except OSError:
@@ -148,6 +158,8 @@ def running():
         if not try_lock(fd):
             return True
         unlock(fd)
+        return False
+    except OSError:  # can't tell (no lock support): don't claim a run is going
         return False
     finally:
         os.close(fd)
@@ -164,11 +176,13 @@ def lock():
     fd = os.open(paths.nightly_lock(), os.O_RDWR | os.O_CREAT)
     try:
         if not try_lock(fd):
-            raise Busy(lock_owner())
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.ftruncate(fd, 0)
-        os.write(fd, str(os.getpid()).encode())
+            time.sleep(0.5)  # a running() probe from another process holds it for microseconds: try once more
+            if not try_lock(fd):
+                raise Busy(lock_owner())
         try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, str(os.getpid()).encode())
             yield
         finally:
             unlock(fd)
@@ -193,6 +207,7 @@ def backup(today=None):
     out, partial = folder / f"vault-{day}.db", folder / f"vault-{day}.db.partial"
     partial.unlink(missing_ok=True)
     # A URI keeps the source read-only, but SQLite rejects the host part of a network (UNC) path's URI.
+    # resolve() can turn a mapped drive into a UNC (or \\?\) path, so those take the plain-connect branch.
     if str(src).startswith("\\\\"):
         opened = sqlite3.connect(str(src))
     else:
@@ -254,7 +269,8 @@ def run():
         with lock():
             return run_steps()
     except Busy as busy:
-        log(f"another run is in progress (pid {busy.args[0]}); not starting a second one")
+        who = f"pid {busy.args[0]}" if busy.args[0] else "pid unknown"
+        log(f"another run is in progress ({who}); not starting a second one")
         return 0
     except Exception:  # noqa: BLE001 - pythonw has no console, so the log is the only place this can go
         log(traceback.format_exc())
