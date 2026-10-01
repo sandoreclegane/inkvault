@@ -5,6 +5,9 @@ Each step can fail without stopping the others, and only a failed backup fails t
 the one file that can't be rebuilt. Everything goes to nightly.log in the vault folder. Under pythonw (how
 Windows runs the job) there is no console, so the log is the only record.
 """
+import contextlib
+import os
+import sys
 from datetime import datetime
 
 from . import paths
@@ -69,3 +72,63 @@ def last_run():
         elif END in line and started:
             finished, result = line[:19], line.split(END + ": ", 1)[1].rstrip(" =")
     return (started, finished, result) if started else None
+
+
+class Busy(Exception):
+    """Another nightly run or rescue holds the lock. args[0] is its process id."""
+
+
+def pid_alive(pid):
+    if sys.platform == "win32":
+        # os.kill(pid, 0) would send Ctrl+C on Windows, so ask the kernel instead.
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        kernel32.CloseHandle(handle)
+        return code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # exists, owned by someone else
+        return True
+    return True
+
+
+def lock_owner():
+    try:
+        return int(paths.nightly_lock().read_text().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def running():
+    pid = lock_owner()
+    return bool(pid) and pid_alive(pid)
+
+
+@contextlib.contextmanager
+def lock():
+    """Only one nightly run or rescue at a time. A lock left by a process that's gone is taken over."""
+    f = paths.nightly_lock()
+    for _ in range(2):
+        try:
+            fd = os.open(f, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            pid = lock_owner()
+            if pid and pid_alive(pid):
+                raise Busy(pid)
+            f.unlink(missing_ok=True)
+    else:
+        raise Busy(lock_owner())
+    with os.fdopen(fd, "w") as fh:
+        fh.write(str(os.getpid()))
+    try:
+        yield
+    finally:
+        f.unlink(missing_ok=True)

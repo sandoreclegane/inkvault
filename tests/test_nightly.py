@@ -57,3 +57,29 @@ def test_last_run_reports_finished_and_unfinished_runs(home):
     nightly.log(f"{nightly.START} (pid 2) ===")  # killed before it could finish
     started, finished, result = nightly.last_run()
     assert finished is None and result is None
+
+
+def test_lock_blocks_a_second_run_while_the_first_is_alive(home):
+    import os
+    from inkvault import nightly, paths
+    paths.nightly_lock().write_text(str(os.getpid()))  # this test process is certainly alive
+    with pytest.raises(nightly.Busy):
+        with nightly.lock():
+            pass
+    assert nightly.running()
+
+
+def test_stale_lock_is_taken_over_and_released(home, monkeypatch):
+    from inkvault import nightly, paths
+    paths.nightly_lock().write_text("424242")
+    monkeypatch.setattr(nightly, "pid_alive", lambda pid: False)  # its process is gone
+    with nightly.lock():
+        assert paths.nightly_lock().exists()
+    assert not paths.nightly_lock().exists()
+    assert not nightly.running()
+
+
+def test_pid_alive_knows_this_process():
+    import os
+    from inkvault import nightly
+    assert nightly.pid_alive(os.getpid())
