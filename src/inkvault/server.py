@@ -44,7 +44,7 @@ _model = None
 @contextmanager
 def db():
     # Close explicitly (sqlite3's `with` only ends the transaction) so a re-index can replace the file on Windows.
-    conn = sqlite3.connect(f"file:{paths.search_db()}?mode=ro", uri=True)
+    conn = paths.connect_ro(paths.search_db())
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -199,7 +199,7 @@ def timeline(since: str, until: str = "", limit: int = 50) -> str:
             items.append((r["created"] or "", f"{r['id']}  {(r['created'] or '')[:16]}  {r['name']}\n"
                                               f"    {' '.join((r['preview'] or '').split())}"))
     if paths.digests_db().exists():
-        d = sqlite3.connect(f"file:{paths.digests_db()}?mode=ro", uri=True)
+        d = paths.connect_ro(paths.digests_db())
         params = []
         for day, digest in d.execute("SELECT day, digest FROM digests WHERE 1=1" +
                                      date_filter("day", since, until, params), params):

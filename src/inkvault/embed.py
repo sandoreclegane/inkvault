@@ -3,7 +3,6 @@
 potion-retrieval-32M runs fast on CPU (minutes for ~100k records) and needs no GPU. It is
 downloaded once from Hugging Face into the InkVault home; after that, nothing needs the network.
 """
-import sqlite3
 import time
 
 import numpy as np
@@ -33,14 +32,16 @@ def load_model():
 
 def build():
     start = time.time()
-    db = sqlite3.connect(f"file:{paths.search_db()}?mode=ro", uri=True)
+    db = paths.connect_ro(paths.search_db())
     model = load_model()
     kinds, ids, vecs = [], [], []
     for kind, sql in QUERIES.items():
         rows = [(i, t[:MAX_CHARS]) for i, t in db.execute(sql) if t and t.strip()]
         if not rows:
             continue
-        v = model.encode([t for _, t in rows], batch_size=1024, show_progress_bar=False)
+        # No worker processes: they crash under pythonw (how the nightly job runs on Windows), and for a
+        # static model one process is as fast anyway (~15 s for 120k records).
+        v = model.encode([t for _, t in rows], batch_size=1024, show_progress_bar=False, use_multiprocessing=False)
         v /= np.linalg.norm(v, axis=1, keepdims=True) + 1e-9
         vecs.append(v.astype(np.float16))
         kinds += [kind] * len(rows)

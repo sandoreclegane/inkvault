@@ -4,6 +4,7 @@ Read-only against PiecesOS. Only adds, never deletes, and skips what it already 
 to stop and re-run at any time (re-running also picks up anything PiecesOS captured since).
 Every record is kept as the raw JSON PiecesOS returned, so nothing is lost to our interpretation.
 """
+import contextlib
 import datetime
 import json
 import os
@@ -45,11 +46,35 @@ def ports_from_files(dirs):
     return found
 
 
+def saved_port():
+    """The port the last export used (kept in the vault), for when the port file can't be read:
+    macOS may keep a scheduled job out of ~/Documents."""
+    if not paths.vault_db().exists():
+        return []
+    try:
+        with contextlib.closing(paths.connect_ro(paths.vault_db())) as db:
+            row = db.execute("SELECT value FROM meta WHERE key='pieces_url'").fetchone()
+        return [int(row[0].rsplit(":", 1)[1])] if row else []
+    except (sqlite3.Error, ValueError, IndexError):
+        return []
+
+
+def remember(pos, version):
+    """Save where PiecesOS answered, so a later run can find it without the port file."""
+    db = open_vault()
+    db.executemany("INSERT OR REPLACE INTO meta VALUES (?,?)", [("pieces_version", version), ("pieces_url", pos.base)])
+    db.commit()
+    db.close()
+
+
 def ports():
-    """Ports to try: INKVAULT_PIECES_PORTS if set, else PiecesOS's own port file, then the usual defaults."""
+    """Ports to try: INKVAULT_PIECES_PORTS if set, else PiecesOS's own port file, the port that worked last time,
+    then the usual defaults."""
     if os.environ.get("INKVAULT_PIECES_PORTS"):
         return [int(p) for p in os.environ["INKVAULT_PIECES_PORTS"].split(",")]
-    return list(dict.fromkeys(ports_from_files(port_file_dirs()) + DEFAULT_PORTS))
+    return list(dict.fromkeys(ports_from_files(port_file_dirs()) + saved_port() + DEFAULT_PORTS))
+
+
 # Collections fetched as one list. Missing ones are skipped: not every PiecesOS version has all of them.
 LISTED = {
     "summary": "/workstream_summaries",
@@ -111,20 +136,29 @@ def event_row(ev):
     )
 
 
-def fetch_each(pos, db, kind, ids_path, item_path, save, have):
-    """Fetch items one by one (in parallel): scales to collections too big for one list response."""
+def fetch_each(pos, db, kind, ids_path, item_path, save, have, deadline=None):
+    """Fetch items one by one (in parallel): scales to collections too big for one list response.
+
+    Stops cleanly once time.monotonic() passes deadline (everything fetched so far is committed). Returns True
+    if it stopped for that reason, so a later run knows to continue."""
+    if deadline is not None and time.monotonic() >= deadline:
+        return True
     try:
         ids = [x["id"] for x in pos.get(ids_path, timeout=300).get("iterable", [])]
     except OSError as e:
         print(f"{kind}: skipped ({e})")
-        return
+        return False
     todo = [i for i in ids if i not in have]
     print(f"{kind}: {len(ids)} total, {len(ids) - len(todo)} already saved, {len(todo)} to fetch", flush=True)
     start, n = time.time(), 0
+    out_of_time = False
     pool = ThreadPoolExecutor(WORKERS)
     try:
         futures = {pool.submit(pos.get, item_path.format(id=i)): i for i in todo}
         for f in as_completed(futures):
+            if deadline is not None and time.monotonic() >= deadline:
+                out_of_time = True
+                break
             try:
                 save(f.result())
             except Exception as e:  # one bad record must not stop a rescue
@@ -139,6 +173,7 @@ def fetch_each(pos, db, kind, ids_path, item_path, save, have):
         # for all of them (a `with` block would wait, which can mean hours).
         db.commit()
         pool.shutdown(wait=False, cancel_futures=True)
+    return out_of_time
 
 
 def export_listed(pos, db, kind, path):
@@ -153,7 +188,10 @@ def export_listed(pos, db, kind, path):
     print(f"{kind}: {len(items)}", flush=True)
 
 
-def run():
+def run(budget_seconds=None):
+    """Export everything new. Returns False if PiecesOS isn't there, "partial" if budget_seconds ran out first
+    (progress is saved; the next run continues), else True."""
+    deadline = None if budget_seconds is None else time.monotonic() + budget_seconds
     pos, version = PiecesOS.find()
     if not pos:
         print(f"PiecesOS isn't answering on port(s) {', '.join(map(str, ports()))}.\n"
@@ -166,7 +204,6 @@ def run():
     db.execute("DELETE FROM failures")  # failed items are retried below and re-recorded if they still fail
     db.executemany("INSERT OR REPLACE INTO meta VALUES (?,?)", [
         ("pieces_version", version), ("pieces_url", pos.base),
-        ("last_export", datetime.datetime.now().astimezone().isoformat(timespec="seconds")),
     ])
 
     for kind, path in LISTED.items():
@@ -174,14 +211,24 @@ def run():
 
     # Saved snippets: Pieces' original feature, and often what people care about most.
     have = {i for (i,) in db.execute("SELECT id FROM raw_records WHERE kind='asset'")}
-    fetch_each(pos, db, "snippets", "/assets/identifiers", "/asset/{id}",
-               lambda a: db.execute("INSERT OR REPLACE INTO raw_records VALUES ('asset',?,?)", (a["id"], json.dumps(a))), have)
+    out_of_time = fetch_each(pos, db, "snippets", "/assets/identifiers", "/asset/{id}",
+                             lambda a: db.execute("INSERT OR REPLACE INTO raw_records VALUES ('asset',?,?)",
+                                                  (a["id"], json.dumps(a))), have, deadline)
 
     have = {i for (i,) in db.execute("SELECT id FROM events")}
-    fetch_each(pos, db, "events", "/workstream_events/identifiers", "/workstream_event/{id}",
-               lambda ev: db.execute("INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?,?)", event_row(ev)), have)
+    out_of_time = out_of_time or fetch_each(
+        pos, db, "events", "/workstream_events/identifiers", "/workstream_event/{id}",
+        lambda ev: db.execute("INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?,?)", event_row(ev)), have, deadline)
 
+    # Recorded at the end, complete or partial, so "last export" means when the vault was last brought up to date.
+    db.executemany("INSERT OR REPLACE INTO meta VALUES (?,?)", [
+        ("last_export", datetime.datetime.now().astimezone().isoformat(timespec="seconds")),
+        ("last_export_partial", "1" if out_of_time else "0"),
+    ])
+    db.commit()
     fails = db.execute("SELECT kind, COUNT(*) FROM failures GROUP BY kind").fetchall()
     db.close()
+    if out_of_time:
+        print("export stopped after its time budget; the next run continues where it stopped")
     print("export done. failures:", ", ".join(f"{k} {n}" for k, n in fails) if fails else "none")
-    return True
+    return "partial" if out_of_time else True

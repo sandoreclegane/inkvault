@@ -7,8 +7,11 @@
     inkvault dashboard   rebuild and open the Memory Atlas
     inkvault serve       run the MCP server (for Claude Code, Codex, Hermes, …)
     inkvault status      what's in the vault and where it lives
+    inkvault schedule    refresh and back up the vault every night (`--off` to stop)
+    inkvault nightly     one refresh + backup now (what the schedule runs)
 """
 import argparse
+import contextlib
 import os
 import sqlite3
 import sys
@@ -16,7 +19,7 @@ import webbrowser
 
 from . import __version__
 
-REPO = "git+https://github.com/sandoreclegane/inkvault"
+from .schedule import REPO
 
 
 def mcp_instructions():
@@ -40,6 +43,35 @@ def open_dashboard(path):
 
 
 def cmd_rescue(args):
+    from . import nightly
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(nightly.lock())  # the purpose defaults to "rescue"
+        except nightly.Busy:
+            print("A nightly run is in progress right now; try again when it's done (see `inkvault status`).")
+            return 1
+        except OSError as e:  # e.g. a drive without file locking: better to rescue unguarded than not at all
+            print(f"Couldn't take the lock that keeps a rescue and the nightly run apart ({e}); continuing without it.")
+        code = 1
+        try:
+            code = rescue(args)
+        finally:
+            # Back up while the lock is still held, so a nightly run can't start in between and the vault
+            # (which just grew) is protected even if the rescue itself blew up.
+            backed_up = backup_after_rescue(nightly)
+        return code if backed_up else code or 1
+
+
+def backup_after_rescue(nightly):
+    try:
+        nightly.backup()
+        return True
+    except Exception as e:  # noqa: BLE001 - say so and fail, whatever went wrong
+        print(f"Backup failed: {type(e).__name__}: {e}")
+        return False
+
+
+def rescue(args):
     from . import dashboard, digest, export, index
     try:
         if not export.run():
@@ -76,16 +108,22 @@ def cmd_status(_args):
     from .export import PiecesOS
     print(f"InkVault {__version__}\nhome: {paths.home()}")
     if paths.vault_db().exists():
-        db = sqlite3.connect(f"file:{paths.vault_db()}?mode=ro", uri=True)
-        meta = dict(db.execute("SELECT key, value FROM meta"))
-        events = db.execute("SELECT COUNT(*), MIN(created), MAX(created) FROM events").fetchone()
-        kinds = dict(db.execute("SELECT kind, COUNT(*) FROM raw_records GROUP BY kind"))
-        db.close()
-        print(f"vault: {paths.vault_db().stat().st_size / 1e6:,.0f} MB, last export {meta.get('last_export', '?')} "
-              f"from PiecesOS {meta.get('pieces_version', '?')}")
-        print(f"  {events[0]:,} captures ({(events[1] or '')[:10]} → {(events[2] or '')[:10]}), "
-              f"{kinds.get('summary', 0):,} summaries, {kinds.get('message', 0):,} chat messages, "
-              f"{kinds.get('asset', 0):,} snippets")
+        try:  # a damaged vault must not hide the nightly and schedule lines below
+            db = paths.connect_ro(paths.vault_db())
+            try:
+                meta = dict(db.execute("SELECT key, value FROM meta"))
+                events = db.execute("SELECT COUNT(*), MIN(created), MAX(created) FROM events").fetchone()
+                kinds = dict(db.execute("SELECT kind, COUNT(*) FROM raw_records GROUP BY kind"))
+            finally:
+                db.close()
+            print(f"vault: {paths.vault_db().stat().st_size / 1e6:,.0f} MB, last export {meta.get('last_export', '?')}"
+                  f"{' (partial; continues next run)' if meta.get('last_export_partial') == '1' else ''} "
+                  f"from PiecesOS {meta.get('pieces_version', '?')}")
+            print(f"  {events[0]:,} captures ({(events[1] or '')[:10]} → {(events[2] or '')[:10]}), "
+                  f"{kinds.get('summary', 0):,} summaries, {kinds.get('message', 0):,} chat messages, "
+                  f"{kinds.get('asset', 0):,} snippets")
+        except sqlite3.Error as e:
+            print(f"vault: unreadable ({e}); the nightly backups, if any, are in {paths.backups_dir()}")
     else:
         print("vault: empty (run `inkvault rescue`)")
     print(f"search index: {'ready' if paths.search_db().exists() else 'not built'}; "
@@ -93,13 +131,37 @@ def cmd_status(_args):
           f"dashboard: {paths.dashboard() if paths.dashboard().exists() else 'not built'}")
     pos, version = PiecesOS.find()
     print(f"PiecesOS: {'running ' + version + ' at ' + pos.base if pos else 'not reachable'}")
+    from . import nightly, schedule
+    print(f"nightly: {schedule.describe()}")
+    if nightly.fallback_newer():
+        print("  nightly.log couldn't be written; see nightly-fallback.log")
+    if nightly.running():
+        print("  running now")
+    elif (last := nightly.last_run()) == nightly.LOG_UNREADABLE:
+        print(f"  last run: {last[2]}")
+    elif last:
+        started, finished, result = last
+        print(f"  last run {started}: {result if finished else 'started but never finished (see nightly.log)'}")
     return 0
+
+
+def ports_arg(text):
+    """argparse type for --pieces-ports: comma-separated port numbers."""
+    try:
+        ports = [int(part) for part in text.split(",")]
+    except ValueError:
+        ports = []
+    if not ports or not all(1 <= n <= 65535 for n in ports):
+        raise argparse.ArgumentTypeError(f"{text!r} isn't a port list; use numbers from 1 to 65535, "
+                                         "comma-separated (for example 39300,1000)")
+    return ",".join(map(str, ports))
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="inkvault", description="Rescue your Pieces memory and search it locally.")
     p.add_argument("--version", action="version", version=f"inkvault {__version__}")
     p.add_argument("--home", help="where to keep the vault (default: your app-data folder; or set INKVAULT_HOME)")
+    p.add_argument("--pieces-ports", type=ports_arg, help="PiecesOS port(s) to try, comma-separated (or set INKVAULT_PIECES_PORTS)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     r = sub.add_parser("rescue", help="export + index + digest + dashboard, in one go")
@@ -115,10 +177,21 @@ def main(argv=None):
     b.add_argument("--no-open", action="store_true")
     sub.add_parser("serve", help="run the MCP server over stdio")
     sub.add_parser("status", help="what's in the vault and where it lives")
+    s = sub.add_parser("schedule", help="refresh and back up the vault every night")
+    s.add_argument("--at", default="03:00", help="time of day, 24-hour (default 03:00)")
+    w = s.add_mutually_exclusive_group()
+    w.add_argument("--wake", dest="wake", action="store_const", const=True, default=None,
+                   help="wake the computer for the run")
+    w.add_argument("--no-wake", dest="wake", action="store_const", const=False,
+                   help="don't wake it; run the next time it's awake")
+    s.add_argument("--off", action="store_true", help="stop the nightly run (keeps the vault and backups)")
+    sub.add_parser("nightly", help="one refresh + backup now (what the schedule runs)")
     args = p.parse_args(argv)
 
     if args.home:
         os.environ["INKVAULT_HOME"] = args.home
+    if args.pieces_ports:
+        os.environ["INKVAULT_PIECES_PORTS"] = args.pieces_ports
     if getattr(args, "model", None) is None and hasattr(args, "model"):
         from .digest import DEFAULT_MODEL
         args.model = DEFAULT_MODEL
@@ -159,6 +232,20 @@ def dispatch(args):
         return 0
     if args.cmd == "status":
         return cmd_status(args)
+    if args.cmd == "schedule":
+        from . import schedule
+        try:
+            if args.off:
+                schedule.disable()
+            else:
+                schedule.enable(args.at, args.wake, interactive=bool(sys.stdin and sys.stdin.isatty()))
+        except schedule.ScheduleError as e:
+            print(e)
+            return 1
+        return 0
+    if args.cmd == "nightly":
+        from . import nightly
+        return nightly.run()
     return 1
 
 

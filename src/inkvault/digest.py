@@ -102,7 +102,7 @@ def run(model=DEFAULT_MODEL, redo=False):
         print("Nothing to digest yet: run `inkvault rescue` first.")
         return False
 
-    src = sqlite3.connect(f"file:{paths.search_db()}?mode=ro", uri=True)
+    src = paths.connect_ro(paths.search_db())
     material = gather(src)
     src.close()
 

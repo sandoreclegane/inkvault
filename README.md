@@ -50,6 +50,53 @@ args = ["--from", "git+https://github.com/sandoreclegane/inkvault", "inkvault", 
 
 Then ask: *"What was I working on the week of March 10?"*, *"Find that retry helper I saved"*, *"When did I last look at the Stripe dashboard?"*
 
+## Keep it up to date
+
+PiecesOS keeps capturing for as long as it runs on your computer. To pull in what's new every night and back up
+your vault:
+
+```bash
+uvx --from git+https://github.com/sandoreclegane/inkvault inkvault schedule
+```
+
+This installs InkVault as a permanent `inkvault` command (with `uv tool install`, or updates an older one) and sets
+up a nightly run at 03:00 with your system's own scheduler: Task Scheduler on Windows, launchd on macOS, a systemd
+user timer (or cron) on Linux. If uv's tool folder isn't on your PATH, it tells you to run `uv tool update-shell`.
+
+Each run exports new captures (if PiecesOS is running) and saves a dated copy of `vault.db` in `backups/` right
+after (the last 7 are kept). Then it rebuilds search, writes new digests (if Ollama is running) and rebuilds the
+dashboard. One step failing never stops the others. The computer is kept awake while it runs (Windows and macOS).
+The export has a time budget: if a big backlog doesn't fit, the run stops cleanly, backs up what it has, and the
+next night continues where it stopped.
+
+`rescue` won't start while a nightly run is going; it tells you to try again. If a rescue is going when the nightly
+run starts, the run waits for it (up to an hour); the rescue makes its own backup when it finishes.
+
+`inkvault status` shows the schedule and how the last run went. It checks the scheduler itself, and says so if the
+task was disabled, runs a different vault (there's one nightly run per computer user, so scheduling another vault
+replaces it), or points at an InkVault install that's gone, and it flags a run that's overdue (none in 26 hours).
+Each run is logged to `nightly.log` in your InkVault folder (or `nightly-fallback.log` next to it, if `nightly.log`
+can't be written).
+
+The schedule is tied to your vault folder, so if you rescued with `--home`, run `schedule` with the same `--home`.
+
+If the computer is asleep or off at run time:
+
+- **Windows** and **systemd** catch up when the computer is next on.
+- **macOS** catches up after sleep, but not after a power-off.
+- **cron** doesn't catch up.
+
+The Windows task runs only while you're logged in. You can have the computer wake for the run:
+
+- **Windows**: `schedule` asks. Your power plan must allow wake timers, and some laptops (Modern Standby) ignore them.
+- **macOS**: `schedule` asks, then prints a one-time `sudo pmset repeat ...` command for you to run. It replaces any
+  `pmset repeat` schedule you already have.
+- **Linux**: a user timer can't wake the computer. systemd runs the timer while you're logged in;
+  `loginctl enable-linger $USER` keeps it going always.
+
+`inkvault schedule --at 02:30` picks another time, `--wake` or `--no-wake` skips the question, `--off` turns it off,
+and `uv tool upgrade inkvault` updates InkVault.
+
 ## Commands
 
 | Command | Does |
@@ -60,7 +107,9 @@ Then ask: *"What was I working on the week of March 10?"*, *"Find that retry hel
 | `inkvault digest [--model M] [--redo]` | Daily digests with a local model (default `qwen3.5:4b`) |
 | `inkvault dashboard` | Rebuild and open the Memory Atlas |
 | `inkvault serve` | Run the MCP server |
-| `inkvault status` | What's in your vault and where it lives |
+| `inkvault status` | What's in your vault and where it lives, plus the schedule and last nightly run |
+| `inkvault schedule [--at HH:MM] [--wake\|--no-wake] [--off]` | Refresh and back up the vault every night |
+| `inkvault nightly` | One refresh + backup now (what the schedule runs) |
 
 ## Privacy
 
@@ -83,11 +132,14 @@ with `inkvault index`.
 - **Your projects** on the dashboard are detected from recurring phrases in your session titles. To choose your own,
   create `themes.txt` in your InkVault folder with lines like `Website = website|landing page|stripe` and run
   `inkvault dashboard`.
-- **PiecesOS port**: InkVault reads the port PiecesOS saved in its own config (`.port.txt`), then tries 39300 and 1000. To force a port, set `INKVAULT_PIECES_PORTS`.
+- **PiecesOS port**: InkVault reads the port PiecesOS saved in its own config (`.port.txt`), then the port that worked
+  last time, then tries 39300 and 1000. To force a port, set `INKVAULT_PIECES_PORTS` or pass `--pieces-ports`
+  (for the nightly run: `inkvault --pieces-ports 39301 schedule`).
 - **Pieces' own export tool**: Pieces said they'd send one. Use it too; two copies are better than one. Support
   for importing its format into InkVault is planned.
 - Tested on Windows with PiecesOS 12.6.2 and a vault of 120,000 captures. macOS and Linux should work;
-  reports are welcome.
+  reports are welcome. `inkvault schedule` has been tested end to end on Windows; on macOS and Linux it is
+  covered by automated tests only so far, so a report from a real Mac or Linux machine would help a lot.
 
 ## Not affiliated with Pieces
 

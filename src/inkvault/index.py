@@ -25,7 +25,7 @@ def build():
     if not paths.vault_db().exists():
         print("Nothing to index yet: run `inkvault export` first.")
         return False
-    raw = sqlite3.connect(f"file:{paths.vault_db()}?mode=ro", uri=True)
+    raw = paths.connect_ro(paths.vault_db())
 
     def raws(kind):
         for (r,) in raw.execute("SELECT raw FROM raw_records WHERE kind=?", (kind,)):
