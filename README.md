@@ -66,8 +66,17 @@ user timer (or cron) on Linux. If uv's tool folder isn't on your PATH, it tells 
 Each run exports new captures (if PiecesOS is running) and saves a dated copy of `vault.db` in `backups/` right
 after (the last 7 are kept). Then it rebuilds search, writes new digests (if Ollama is running) and rebuilds the
 dashboard. One step failing never stops the others. The computer is kept awake while it runs (Windows and macOS).
-`rescue` won't start while a nightly run is going; it tells you to try again. See how it went with
-`inkvault status`, or read `nightly.log` in your InkVault folder.
+The export has a time budget: if a big backlog doesn't fit, the run stops cleanly, backs up what it has, and the
+next night continues where it stopped.
+
+`rescue` won't start while a nightly run is going; it tells you to try again. If a rescue is going when the nightly
+run starts, the run waits for it (up to an hour); the rescue makes its own backup when it finishes.
+
+`inkvault status` shows the schedule and how the last run went. It checks the scheduler itself, and says so if the
+task was disabled, runs a different vault (there's one nightly run per computer user, so scheduling another vault
+replaces it), or points at an InkVault install that's gone, and it flags a run that's overdue (none in 26 hours).
+Each run is logged to `nightly.log` in your InkVault folder (or `nightly-fallback.log` next to it, if `nightly.log`
+can't be written).
 
 The schedule is tied to your vault folder, so if you rescued with `--home`, run `schedule` with the same `--home`.
 
