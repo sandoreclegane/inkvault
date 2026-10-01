@@ -10,12 +10,15 @@ import os
 import sqlite3
 import sys
 import time
+import traceback
 from datetime import datetime
 
 from . import __version__, paths
 
 KEEP_RUNS = 30
 KEEP_BACKUPS = 7
+STALE_LOCK = 12 * 3600  # a lock older than this is a crash's leftover, whatever its pid is now doing
+FRESH_LOCK = 60  # an empty lock younger than this is another process mid-create
 PIECES_WAIT = 600  # after a wake PiecesOS may still be starting: keep looking this many seconds
 PIECES_POLL = 60
 START, END = "=== started", "=== finished"
@@ -26,13 +29,15 @@ def stamp():
 
 
 def log(msg):
-    with open(paths.nightly_log(), "a", encoding="utf-8") as f:
+    with open(paths.nightly_log(), "a", encoding="utf-8", errors="replace") as f:
         for line in str(msg).splitlines() or [""]:
             f.write(f"{stamp()}  {line}\n")
 
 
 class LogStream:
     """Stands in for stdout/stderr during a run, so whatever a step prints lands in the log."""
+
+    encoding, errors = "utf-8", "replace"
 
     def __init__(self):
         self.buf = ""
@@ -45,8 +50,14 @@ class LogStream:
         return len(s)
 
     def flush(self):
+        """A no-op: tqdm flushes after every redraw, which would log each one instead of the final state."""
+
+    def finish(self):
         self._emit(self.buf)
         self.buf = ""
+
+    def isatty(self):
+        return False
 
     @staticmethod
     def _emit(line):
@@ -59,10 +70,12 @@ def trim(keep=KEEP_RUNS):
     f = paths.nightly_log()
     if not f.exists():
         return
-    lines = f.read_text(encoding="utf-8").splitlines(keepends=True)
+    lines = f.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     starts = [i for i, line in enumerate(lines) if START in line]
     if len(starts) > keep:
-        f.write_text("".join(lines[starts[-keep]:]), encoding="utf-8")
+        tmp = f.with_name(f.name + ".tmp")
+        tmp.write_text("".join(lines[starts[-keep]:]), encoding="utf-8")
+        os.replace(tmp, f)
 
 
 def last_run():
@@ -71,7 +84,7 @@ def last_run():
     if not f.exists():
         return None
     started = finished = result = None
-    for line in f.read_text(encoding="utf-8").splitlines():
+    for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
         if START in line:
             started, finished, result = line[:19], None, None
         elif END in line and started:
@@ -87,14 +100,21 @@ def pid_alive(pid):
     if sys.platform == "win32":
         # os.kill(pid, 0) would send Ctrl+C on Windows, so ask the kernel instead.
         import ctypes
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        k32.GetExitCodeProcess.restype = wintypes.BOOL
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
         if not handle:
-            return False
-        code = ctypes.c_ulong()
-        kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
-        kernel32.CloseHandle(handle)
-        return code.value == 259  # STILL_ACTIVE
+            return ctypes.get_last_error() == 5  # access denied: it exists, it's just not ours
+        try:
+            code = wintypes.DWORD()
+            return bool(k32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -111,28 +131,65 @@ def lock_owner():
         return 0
 
 
-def running():
+def lock_held():
+    """True if the lock file exists and its holder may still be working.
+
+    Stale means: older than STALE_LOCK (a pid can be reused after a crash or reboot), or its pid is gone.
+    An empty lock is another process part-way through creating it, so it counts as held for a minute.
+    """
+    try:
+        age = time.time() - paths.nightly_lock().stat().st_mtime
+    except OSError:
+        return False
+    if age > STALE_LOCK:
+        return False
     pid = lock_owner()
-    return bool(pid) and pid_alive(pid)
+    return pid_alive(pid) if pid else age < FRESH_LOCK
+
+
+def running():
+    return lock_held()
+
+
+def publish_lock():
+    """Create the lock with its pid already inside, atomically. False if someone else holds it.
+
+    The pid goes into a temp file first and is then linked (POSIX) or renamed (Windows) into place; both
+    refuse to replace an existing lock, and a reader never sees a half-written one.
+    """
+    f = paths.nightly_lock()
+    tmp = f.with_name(f"{f.name}.{os.getpid()}.tmp")
+    tmp.write_text(str(os.getpid()))
+    try:
+        if sys.platform == "win32":
+            os.rename(tmp, f)
+        else:
+            os.link(tmp, f)
+        return True
+    except FileExistsError:
+        return False
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 @contextlib.contextmanager
 def lock():
     """Only one nightly run or rescue at a time. A lock left by a process that's gone is taken over."""
     f = paths.nightly_lock()
-    for _ in range(2):
-        try:
-            fd = os.open(f, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    for _ in range(3):
+        if publish_lock():
             break
-        except FileExistsError:
-            pid = lock_owner()
-            if pid and pid_alive(pid):
-                raise Busy(pid)
+        owner = lock_owner()
+        if lock_held():
+            raise Busy(owner)
+        if lock_owner() != owner:  # someone replaced it while we looked: look again
+            continue
+        try:
             f.unlink(missing_ok=True)
+        except OSError:
+            raise Busy(owner)
     else:
         raise Busy(lock_owner())
-    with os.fdopen(fd, "w") as fh:
-        fh.write(str(os.getpid()))
     try:
         yield
     finally:
@@ -155,12 +212,8 @@ def backup(today=None):
     day = today or datetime.now().strftime("%Y-%m-%d")
     out, partial = folder / f"vault-{day}.db", folder / f"vault-{day}.db.partial"
     partial.unlink(missing_ok=True)
-    source = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
-    target = sqlite3.connect(partial)
-    with target:
+    with contextlib.closing(sqlite3.connect(src.as_uri() + "?mode=ro", uri=True)) as source,             contextlib.closing(sqlite3.connect(partial)) as target:
         source.backup(target)
-    source.close()
-    target.close()
     os.replace(partial, out)
     for old in sorted(folder.glob("vault-*.db"))[:-KEEP_BACKUPS]:
         old.unlink()
@@ -217,6 +270,9 @@ def run():
     except Busy as busy:
         log(f"another run is in progress (pid {busy.args[0]}); not starting a second one")
         return 0
+    except Exception:  # noqa: BLE001 - pythonw has no console, so the log is the only place this can go
+        log(traceback.format_exc())
+        return 1
 
 
 def run_steps():
@@ -229,9 +285,12 @@ def run_steps():
             with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
                 results[name] = "ok" if step() else "skipped"
         except Exception as e:  # noqa: BLE001 - one broken step must not stop the backup
-            results[name] = f"failed: {type(e).__name__}: {e}"
+            results[name] = f"failed: {type(e).__name__}: {' '.join(str(e).split())}"  # one line, or the END line splits
         finally:
-            stream.flush()
+            try:
+                stream.finish()
+            except Exception:  # noqa: BLE001 - logging trouble must never stop the backup
+                pass
     overall = "failed" if results["backup"].startswith("failed") else "ok"
     log(f"{END}: {overall} ({', '.join(f'{k} {v}' for k, v in results.items())}) ===")
     trim()

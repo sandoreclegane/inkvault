@@ -32,7 +32,7 @@ def test_log_stream_writes_complete_lines_and_keeps_the_last_progress_update(hom
     s.write("10%\r50%\r100%\n")  # progress bars redraw with \r: keep only the final state
     s.write("\n\n")  # blank lines are dropped
     s.write("unterminated")
-    s.flush()
+    s.finish()
     lines = [l[21:] for l in paths.nightly_log().read_text(encoding="utf-8").splitlines()]  # drop the timestamp
     assert lines == ["  first line", "  second half", "  100%", "  unterminated"]
 
@@ -114,9 +114,10 @@ def test_backup_without_a_vault_is_skipped(home):
 @pytest.fixture
 def quick(home, monkeypatch):
     """No PiecesOS, no waiting, no model download, no Ollama."""
-    from inkvault import digest, embed, nightly
+    from inkvault import digest, embed, export, nightly
     monkeypatch.setenv("INKVAULT_PIECES_PORTS", "1")  # nothing listens there
     monkeypatch.setattr(nightly, "PIECES_WAIT", 0)
+    monkeypatch.setattr(export.PiecesOS, "find", staticmethod(lambda: (None, None)))  # skip the connection-refused delay
     monkeypatch.setattr(embed, "build", lambda: None)
     monkeypatch.setattr(digest, "run", lambda model=None, redo=False: False)
     return home
@@ -176,3 +177,74 @@ def test_waits_for_piecesos_after_a_wake(quick, monkeypatch):
     monkeypatch.setattr(nightly, "PIECES_WAIT", 1000)
     monkeypatch.setattr(nightly.time, "sleep", lambda s: None)
     assert nightly.wait_for_pieces() is not None and len(calls) == 3
+
+
+def test_flush_does_not_defeat_the_progress_bar_collapse(home):
+    from inkvault import nightly, paths
+    s = nightly.LogStream()
+    s.write("10%\r")
+    s.flush()  # tqdm flushes after every redraw
+    s.write("100%\n")
+    lines = [l[21:] for l in paths.nightly_log().read_text(encoding="utf-8").splitlines()]
+    assert lines == ["  100%"]
+    assert s.isatty() is False and s.encoding == "utf-8"
+
+
+def test_old_lock_is_stale_even_if_its_pid_is_alive(home):
+    import os
+    import time
+    from inkvault import nightly, paths
+    f = paths.nightly_lock()
+    f.write_text(str(os.getpid()))  # a reused pid: alive, but not our run
+    old = time.time() - 13 * 3600
+    os.utime(f, (old, old))
+    assert not nightly.running()
+    with nightly.lock():
+        assert nightly.lock_owner() == os.getpid()
+    assert not f.exists()
+
+
+def test_fresh_unreadable_lock_means_someone_is_mid_create(home):
+    from inkvault import nightly, paths
+    paths.nightly_lock().write_text("")
+    with pytest.raises(nightly.Busy):
+        with nightly.lock():
+            pass
+
+
+def test_pid_alive_is_false_for_a_finished_process():
+    from inkvault import nightly
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    assert not nightly.pid_alive(p.pid)
+
+
+def test_unprintable_output_does_not_stop_the_backup(quick, monkeypatch):
+    from inkvault import index, nightly
+    make_vault().close()
+
+    def noisy():
+        print(chr(0xD83D), end="")  # a lone surrogate, no trailing newline
+        return True
+    monkeypatch.setattr(index, "build", noisy)
+    assert nightly.run() == 0
+    assert "backup ok" in nightly.last_run()[2]
+
+
+def test_unexpected_error_outside_the_steps_is_logged(quick, monkeypatch):
+    from inkvault import nightly, paths
+    monkeypatch.setattr(nightly, "run_steps", lambda: 1 / 0)
+    assert nightly.run() == 1
+    assert "ZeroDivisionError" in paths.nightly_log().read_text(encoding="utf-8")
+    assert not paths.nightly_lock().exists()
+
+
+def test_multiline_step_error_stays_on_one_line(quick, monkeypatch):
+    from inkvault import index, nightly
+    make_vault().close()
+
+    def broken():
+        raise RuntimeError("line one\nline two")
+    monkeypatch.setattr(index, "build", broken)
+    nightly.run()
+    assert "index failed: RuntimeError: line one line two" in nightly.last_run()[2]
