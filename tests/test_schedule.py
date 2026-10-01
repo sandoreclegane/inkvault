@@ -51,3 +51,26 @@ def test_macos_wake_note_wakes_two_minutes_early():
     from inkvault.schedulers import macos
     assert "sudo pmset repeat wakeorpoweron MTWRFSU 02:58:00" in macos.wake_note(3, 0)
     assert "23:59:00" in macos.wake_note(0, 1)  # wraps past midnight
+
+
+def test_linux_systemd_units():
+    from inkvault.schedulers import linux
+    service = linux.render_service(ARGV)
+    timer = linux.render_timer(3, 5)
+    assert "Type=oneshot" in service
+    assert "'C:/Users/a b/uv/tools/inkvault/Scripts/pythonw.exe'" in service
+    assert "OnCalendar=*-*-* 03:05:00" in timer
+    assert "Persistent=true" in timer
+    assert "WantedBy=timers.target" in timer
+
+
+def test_linux_crontab_merge_replaces_only_our_line():
+    from inkvault.schedulers import linux
+    line = linux.cron_line(["/home/u/.local/share/uv/tools/inkvault/bin/python", "-m", "inkvault", "nightly"], 3, 5)
+    assert line.startswith("5 3 * * * ") and line.endswith(linux.TAG)
+    theirs = "0 9 * * 1 backup.sh\n"
+    merged = linux.merge_crontab(theirs, line)
+    assert merged == theirs + line + "\n"
+    assert linux.merge_crontab(merged, line) == merged  # running schedule twice doesn't duplicate it
+    assert linux.merge_crontab(merged, None) == theirs  # --off removes only ours
+    assert linux.merge_crontab(line + "\n", None) == ""
