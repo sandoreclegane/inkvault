@@ -109,3 +109,70 @@ def test_backup_copies_an_open_vault_and_keeps_seven(home):
 def test_backup_without_a_vault_is_skipped(home):
     from inkvault import nightly
     assert nightly.backup() is False
+
+
+@pytest.fixture
+def quick(home, monkeypatch):
+    """No PiecesOS, no waiting, no model download, no Ollama."""
+    from inkvault import digest, embed, nightly
+    monkeypatch.setenv("INKVAULT_PIECES_PORTS", "1")  # nothing listens there
+    monkeypatch.setattr(nightly, "PIECES_WAIT", 0)
+    monkeypatch.setattr(embed, "build", lambda: None)
+    monkeypatch.setattr(digest, "run", lambda model=None, redo=False: False)
+    return home
+
+
+def test_failed_step_does_not_stop_the_backup(quick, monkeypatch):
+    from inkvault import index, nightly, paths
+    make_vault().close()
+
+    def broken():
+        raise RuntimeError("disk on fire")
+    monkeypatch.setattr(index, "build", broken)
+    assert nightly.run() == 0
+    started, finished, result = nightly.last_run()
+    assert result.startswith("ok (")
+    assert "export skipped" in result and "index failed: RuntimeError: disk on fire" in result
+    assert "backup ok" in result
+    assert list(paths.backups_dir().glob("vault-*.db"))
+    assert not paths.nightly_lock().exists()
+
+
+def test_failed_backup_fails_the_run(quick, monkeypatch):
+    from inkvault import nightly
+    make_vault().close()
+
+    def broken(today=None):
+        raise OSError("backup drive gone")
+    monkeypatch.setattr(nightly, "backup", broken)
+    assert nightly.run() == 1
+    assert nightly.last_run()[2].startswith("failed (")
+
+
+def test_step_output_goes_to_the_log(quick):
+    from inkvault import nightly, paths
+    nightly.run()
+    text = paths.nightly_log().read_text(encoding="utf-8")
+    assert "PiecesOS not reachable" in text and "no vault yet" in text
+
+
+def test_second_run_while_one_is_going_exits_quietly(quick):
+    import os
+    from inkvault import nightly, paths
+    paths.nightly_lock().write_text(str(os.getpid()))
+    assert nightly.run() == 0
+    assert "another run is in progress" in paths.nightly_log().read_text(encoding="utf-8")
+    assert nightly.last_run() is None  # it never started
+
+
+def test_waits_for_piecesos_after_a_wake(quick, monkeypatch):
+    from inkvault import export, nightly
+    calls = []
+
+    def find():
+        calls.append(1)
+        return (object(), "12.6.2") if len(calls) == 3 else (None, None)
+    monkeypatch.setattr(export.PiecesOS, "find", staticmethod(find))
+    monkeypatch.setattr(nightly, "PIECES_WAIT", 1000)
+    monkeypatch.setattr(nightly.time, "sleep", lambda s: None)
+    assert nightly.wait_for_pieces() is not None and len(calls) == 3

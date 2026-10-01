@@ -9,12 +9,15 @@ import contextlib
 import os
 import sqlite3
 import sys
+import time
 from datetime import datetime
 
-from . import paths
+from . import __version__, paths
 
 KEEP_RUNS = 30
 KEEP_BACKUPS = 7
+PIECES_WAIT = 600  # after a wake PiecesOS may still be starting: keep looking this many seconds
+PIECES_POLL = 60
 START, END = "=== started", "=== finished"
 
 
@@ -163,3 +166,73 @@ def backup(today=None):
         old.unlink()
     print(f"saved {out.name} ({out.stat().st_size / 1e6:,.0f} MB)")
     return True
+
+
+def wait_for_pieces():
+    from .export import PiecesOS
+    deadline = time.monotonic() + PIECES_WAIT
+    while True:
+        pos, _version = PiecesOS.find()
+        if pos or time.monotonic() >= deadline:
+            return pos
+        print(f"PiecesOS isn't answering yet; trying again in {PIECES_POLL}s")
+        time.sleep(PIECES_POLL)
+
+
+def step_export():
+    from . import export
+    if not wait_for_pieces():
+        print(f"PiecesOS not reachable on port(s) {', '.join(map(str, export.ports()))}; skipped. "
+              "If it uses another port: inkvault --pieces-ports PORT schedule")
+        return False
+    return export.run()
+
+
+def step_index():
+    from . import index
+    return index.build()
+
+
+def step_digest():
+    from . import digest
+    return digest.run(model=digest.DEFAULT_MODEL)
+
+
+def step_dashboard():
+    from . import dashboard
+    return bool(dashboard.build())
+
+
+def steps():
+    # Looked up at call time, so a test can replace any one of them.
+    return [("export", step_export), ("index", step_index), ("digest", step_digest),
+            ("dashboard", step_dashboard), ("backup", backup)]
+
+
+def run():
+    """One nightly run. Returns the exit code: 1 only if the backup failed."""
+    try:
+        with lock():
+            return run_steps()
+    except Busy as busy:
+        log(f"another run is in progress (pid {busy.args[0]}); not starting a second one")
+        return 0
+
+
+def run_steps():
+    log(f"{START} (InkVault {__version__}, pid {os.getpid()}) ===")  # first, so even a killed run shows up
+    results = {}
+    stream = LogStream()
+    for name, step in steps():
+        log(f"{name}:")
+        try:
+            with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
+                results[name] = "ok" if step() else "skipped"
+        except Exception as e:  # noqa: BLE001 - one broken step must not stop the backup
+            results[name] = f"failed: {type(e).__name__}: {e}"
+        finally:
+            stream.flush()
+    overall = "failed" if results["backup"].startswith("failed") else "ok"
+    log(f"{END}: {overall} ({', '.join(f'{k} {v}' for k, v in results.items())}) ===")
+    trim()
+    return 1 if overall == "failed" else 0
