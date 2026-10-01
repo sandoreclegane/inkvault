@@ -667,3 +667,19 @@ def test_a_failed_backup_makes_rescue_fail(home, monkeypatch, capsys):
     monkeypatch.setattr(nightly, "backup", broken)
     assert cli.main(["rescue", "--no-open"]) == 1
     assert "Backup failed" in capsys.readouterr().out
+
+
+def test_backup_clears_partials_left_by_runs_that_died(home):
+    import os
+    import time
+    from inkvault import nightly, paths
+    make_vault().close()
+    folder = paths.backups_dir()
+    folder.mkdir()
+    old, fresh = folder / "vault-2026-09-30.db.4242.partial", folder / "vault-2026-10-01.db.4343.partial"
+    old.write_bytes(b"half a vault")
+    fresh.write_bytes(b"another run's copy in progress")
+    past = time.time() - nightly.STALE_PARTIAL - 60
+    os.utime(old, (past, past))
+    assert nightly.backup(today="2026-10-01")
+    assert not old.exists() and fresh.exists()  # only the abandoned one goes

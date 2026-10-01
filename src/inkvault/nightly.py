@@ -29,6 +29,7 @@ LOCK_POLL = 30
 # time limit would kill the run. The export gets whatever is left; the backup always runs.
 RUN_BUDGET = 3 * 3600
 BACKUP_MARGIN = 600
+STALE_PARTIAL = 6 * 3600  # an unfinished backup copy this old belongs to a run that died
 run_started = None  # time.monotonic() when this run began, before it asked for the lock
 START, END = "=== started", "=== finished"
 # A record is a line that begins with its timestamp. Step output is indented under it, so a step that happens to
@@ -107,8 +108,9 @@ FALLBACK_RE = re.compile(STAMP + "couldn't write nightly.log")  # first line of 
 
 
 def trim(keep=KEEP_RUNS):
-    trim_file(paths.nightly_log(), START_RE, keep)
+    # The fallback log first: trimming it last would make it look newer than nightly.log to `status`.
     trim_file(paths.nightly_fallback_log(), FALLBACK_RE, keep)
+    trim_file(paths.nightly_log(), START_RE, keep)
 
 
 def trim_file(f, marker, keep):
@@ -291,6 +293,11 @@ def backup(today=None):
     # run) can never write or delete each other's half-finished file.
     out, partial = folder / f"vault-{day}.db", folder / f"vault-{day}.db.{os.getpid()}.partial"
     partial.unlink(missing_ok=True)
+    # A backup killed mid-copy (reboot, Ctrl+C, the scheduler's time limit) leaves a vault-sized partial behind.
+    for stale in folder.glob("vault-*.db.*.partial"):
+        if time.time() - stale.stat().st_mtime > STALE_PARTIAL:
+            with contextlib.suppress(OSError):
+                stale.unlink()
     with contextlib.closing(paths.connect_ro(src)) as source:
         with contextlib.closing(sqlite3.connect(partial)) as target:
             source.backup(target)
@@ -299,7 +306,7 @@ def backup(today=None):
         raise RuntimeError("backup copy failed its integrity check; older backups kept")
     os.replace(partial, out)
     for old in sorted(folder.glob("vault-*.db"))[:-KEEP_BACKUPS]:
-        old.unlink()
+        old.unlink(missing_ok=True)  # a rescue's backup may have rotated it a moment ago
     print(f"saved {out.name} ({out.stat().st_size / 1e6:,.0f} MB)")
     return True
 
@@ -318,7 +325,7 @@ def wait_for_pieces(max_wait=None):
         if pos or time.monotonic() >= deadline:
             return pos
         print(f"PiecesOS isn't answering yet; trying again in {PIECES_POLL}s")
-        time.sleep(PIECES_POLL)
+        time.sleep(min(PIECES_POLL, max(0, deadline - time.monotonic())))
 
 
 def step_export():
