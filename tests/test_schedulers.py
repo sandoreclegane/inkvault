@@ -212,3 +212,41 @@ def test_keep_awake_never_raises():
     from inkvault import nightly
     with nightly.keep_awake():
         pass
+
+
+# --- review round 2 --------------------------------------------------------------------------------------------
+
+def test_windows_wake_check_is_language_independent():
+    from inkvault.schedulers import windows
+    german = ("    Moegliche Einstellung, Index: 000\n"
+              "    Moegliche Einstellung, Beschreibung: Deaktivieren\n"
+              "    Moegliche Einstellung, Index: 001\n"
+              "    Moegliche Einstellung, Beschreibung: Aktivieren\n"
+              "\n"
+              "    Aktueller Wechselstrom-Energieeinstellungsindex: 0x00000002\n"
+              "    Aktueller Gleichstrom-Energieeinstellungsindex: 0x00000001\n")
+    assert windows.wake_timers_allowed(german) is False
+    assert windows.wake_timers_allowed(german.replace("0x00000002", "0x00000001")) is True
+    # AC is the second-to-last value, not the last
+    assert windows.wake_timers_allowed("AC: 0x00000001\nDC: 0x00000000\n") is True
+    assert windows.wake_timers_allowed("AC: 0x00000000\nDC: 0x00000001\n") is False
+    assert windows.wake_timers_allowed("Possible Setting Index: 000\n") is True
+
+
+def test_get_crontab_busybox_no_crontab(lin, monkeypatch):
+    fake_run(monkeypatch, lin, {("crontab", "-l"): proc(1, err="cat: can't open 'tmatt': No such file or directory")})
+    assert lin.get_crontab() == ""
+
+
+def test_linux_remove_survives_unreadable_crontab_after_removing_units(lin, monkeypatch):
+    d = lin.unit_dir()
+    d.mkdir(parents=True)
+    (d / "inkvault-nightly.timer").write_text("x")
+    monkeypatch.setattr(lin, "has_systemd", lambda: False)
+
+    def boom():
+        raise RuntimeError("couldn't read your crontab: permission denied")
+    monkeypatch.setattr(lin, "get_crontab", boom)
+    assert lin.remove() is True  # the units went; the crontab problem doesn't fail --off
+    with pytest.raises(RuntimeError):  # but with nothing else removed it is reported
+        lin.remove()

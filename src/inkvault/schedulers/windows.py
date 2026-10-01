@@ -87,9 +87,15 @@ def installed():
 def wake_timers_allowed(powercfg_output):
     """From `powercfg /query`: False unless 'Allow wake timers' is clearly Enable (1) on AC power.
 
-    0 is Disable and 2 is "Important Wake Timers Only", which blocks an ordinary task's wake too."""
-    m = re.search(r"Current AC Power Setting Index:\s*0x([0-9a-fA-F]+)", powercfg_output)
-    return m is None or int(m.group(1), 16) == 1
+    0 is Disable and 2 is "Important Wake Timers Only", which blocks an ordinary task's wake too.
+    powercfg translates its labels, so this doesn't look for English: the current AC and DC values are the last
+    two lines ending in 0x plus eight hex digits (the "possible settings" lines above them have no 0x), AC first.
+    """
+    values = re.findall(r"0x([0-9a-fA-F]{8})[ 	]*$", powercfg_output, re.MULTILINE)
+    if not values:
+        return True  # can't read it: don't warn on a guess
+    ac = values[-2] if len(values) >= 2 else values[-1]
+    return int(ac, 16) == 1
 
 
 def wake_note(hour, minute):

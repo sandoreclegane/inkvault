@@ -66,7 +66,8 @@ def get_crontab():
     r = subprocess.run(["crontab", "-l"], capture_output=True, text=True, errors="replace")
     if r.returncode == 0:
         return r.stdout
-    if r.returncode == 1 and "no crontab" in r.stderr.lower():
+    err = r.stderr.lower()
+    if r.returncode == 1 and ("no crontab" in err or "no such file" in err):  # busybox says the latter
         return ""  # an empty crontab; any other failure must not be mistaken for it, or we'd overwrite theirs
     raise RuntimeError(f"couldn't read your crontab: {(r.stderr or r.stdout).strip()}")
 
@@ -110,10 +111,14 @@ def remove():
     if systemd:
         systemctl("daemon-reload")
     if shutil.which("crontab"):
-        current = get_crontab()
-        if TAG in current:
-            set_crontab(merge_crontab(current, None))
-            removed = True
+        try:
+            current = get_crontab()
+            if TAG in current:
+                set_crontab(merge_crontab(current, None))
+                removed = True
+        except RuntimeError:
+            if not removed:  # if the units were removed, an unreadable crontab mustn't turn --off into a failure
+                raise
     return removed
 
 
