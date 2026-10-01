@@ -19,7 +19,7 @@ inkvault nightly               the job itself; safe to run by hand
 inkvault status                also shows: schedule on/off, time, next run, last run time and result
 ```
 
-Running `inkvault schedule` again replaces the existing schedule (it is idempotent). If `--home` / `INKVAULT_HOME` is set, the scheduled job is given the same `INKVAULT_HOME`.
+Running `inkvault schedule` again replaces the existing schedule (it is idempotent). If `--home` / `INKVAULT_HOME` or `INKVAULT_PIECES_PORTS` is set, the scheduled job gets the same settings as command-line flags (`--home`, and a new global `--pieces-ports`), because Task Scheduler can't give a task environment variables.
 
 ## Installing a permanent command
 
@@ -70,9 +70,9 @@ On Windows, `schedule` also checks `powercfg` "Allow wake timers". If wake was c
 
 PiecesOS writes `.port.txt` under `~/Documents`, which macOS privacy controls (TCC) may block for a background job. `ports_from_files` already ignores unreadable files (`OSError`). Additions:
 
-- `schedule` (run interactively, where access is normally allowed) finds the current port and saves it to the vault's `meta` table as `pieces_port`. `export` also saves it after every successful connection.
-- `ports()` order becomes: `INKVAULT_PIECES_PORTS` → port files → saved `pieces_port` → defaults.
-- If no port file could be read and the defaults fail, the log line says so and suggests setting `INKVAULT_PIECES_PORTS` in the schedule (`schedule` passes it through like `INKVAULT_HOME`).
+- `schedule` (run interactively, where access is normally allowed) finds PiecesOS and saves where it answered in the vault's `meta` table (`pieces_url`, which `export` already saves on every run).
+- `ports()` order becomes: `INKVAULT_PIECES_PORTS` → port files → port from the saved `pieces_url` → defaults.
+- If no port file could be read and the defaults fail, the log line says so and suggests `inkvault --pieces-ports PORT schedule`.
 
 Ask the Pieces team (Anthony) to confirm the TCC behavior and the Linux port-file location.
 
@@ -83,14 +83,14 @@ Ask the Pieces team (Anthony) to confirm the TCC behavior and the Linux port-fil
 - `src/inkvault/schedulers/{windows,macos,linux}.py`: render and install/remove for each OS.
 - `cli.py`: `schedule` and `nightly` subcommands; `status` additions; `rescue` takes the lock.
 - `paths.py`: `nightly_log()`, `backups_dir()`, `nightly_lock()`.
-- `export.py`: save and read `pieces_port`.
+- `export.py`: `saved_port()` (read `pieces_url`) and `remember()` (write it).
 - Version → 0.1.1; README section "Keep it up to date"; CHANGELOG entry crediting the Pieces team's port-file help.
 
 ## Testing
 
 - **Renderers (all OSes, run on every CI OS):** the Windows XML parses and has the trigger time, `StartWhenAvailable`, `WakeToRun` matching the flag, the restart policy, the command and env. The plist parses with `plistlib` and has Hour/Minute and ProgramArguments. The systemd units have `OnCalendar` and `Persistent=true`. The cron line round-trips its tag.
 - **nightly:** with the synthetic vault and PiecesOS absent (retry wait patched to 0): a failing index step still produces a backup; backup rotation keeps 7; the lock blocks a second run and a stale lock is taken over; the log trims to 30 runs; `status` reports "never finished" for a run that only has `started`.
-- **ports:** the saved `pieces_port` is tried after port files and before defaults.
+- **ports:** the saved port is tried after port files and before defaults.
 - **Manual:** real `schtasks` on Windows, including a sleep-through-trigger catch-up; `launchctl` on a Mac (Pieces team or a Discord user); `systemctl --user` on Linux if a tester turns up.
 
 ## Out of scope (v0.1.1)
