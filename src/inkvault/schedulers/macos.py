@@ -84,7 +84,12 @@ def query():
     try:
         r = subprocess.run(["launchctl", "print", f"{domain()}/{LABEL}"], capture_output=True, text=True,
                            errors="replace")
-        enabled = r.returncode == 0
+        if r.returncode == 0:
+            enabled = True
+        elif r.returncode == 113 or "could not find" in (r.stderr or r.stdout or "").lower():
+            enabled = False  # the plist is there, but launchd isn't running it
+        else:
+            enabled = None  # can't look (no GUI session over SSH, say): that says nothing about our job
     except OSError:
         enabled = None
     return Job(True, enabled=enabled, home=home_of(argv), executable=argv[0] if argv else None, scheduler="launchd")

@@ -9,15 +9,23 @@ NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
 
 
 @pytest.fixture(autouse=True)
-def never_touch_the_real_uv_or_schedulers(monkeypatch):
+def never_touch_the_real_uv(monkeypatch):
     """uv sets UV for the process running the tests, which would make the code under test find the real uv.
-    Any subprocess a test hasn't faked fails loudly instead of running (uv tool install, schtasks, ...)."""
-    import subprocess
+    (conftest makes any other command a test hasn't faked fail loudly: uv tool install, schtasks, ...)"""
     monkeypatch.delenv("UV", raising=False)
 
-    def refuse(cmd, *a, **k):
-        raise AssertionError(f"a test ran a real command: {cmd}")
-    monkeypatch.setattr(subprocess, "run", refuse)
+
+def test_the_conftest_guard_blocks_real_commands_but_not_python():
+    import subprocess
+    import sys
+    with pytest.raises(AssertionError, match="a test ran a real command"):
+        subprocess.run(["schtasks", "/Query"])
+    assert subprocess.run([sys.executable, "-c", "print(1)"], capture_output=True, text=True).stdout.strip() == "1"
+
+
+def test_pieces_probe_is_stubbed_for_every_test():
+    from inkvault import export
+    assert export.PiecesOS.find() == (None, None)
 
 
 def test_windows_task_xml():
@@ -31,7 +39,7 @@ def test_windows_task_xml():
     assert s.find("t:WakeToRun", NS).text == "true"
     assert s.find("t:RestartOnFailure/t:Count", NS).text == "3"
     assert s.find("t:RestartOnFailure/t:Interval", NS).text == "PT15M"
-    assert s.find("t:ExecutionTimeLimit", NS).text == "PT4H"
+    assert s.find("t:ExecutionTimeLimit", NS).text == "PT8H"
     assert s.find("t:DisallowStartIfOnBatteries", NS).text == "false"
     assert root.find(".//t:Principal/t:LogonType", NS).text == "InteractiveToken"
     assert root.find(".//t:Exec/t:Command", NS).text == '"' + ARGV[0] + '"'
@@ -485,6 +493,12 @@ def test_describe_flags_an_overdue_run(home, monkeypatch):
     from inkvault import nightly
     schedule = scheduled(home, monkeypatch)
     now = datetime(2026, 10, 1, 12, 0)
+    f = schedule.paths.schedule_file()
+
+    def set_up(hours_ago):
+        t = (now - timedelta(hours=hours_ago)).timestamp()
+        os.utime(f, (t, t))
+    set_up(30 * 24)  # scheduled a month ago
     log = schedule.paths.nightly_log()
     log.write_text(f"2026-09-28 03:00:01  {nightly.START} (pid 1) ===\n", encoding="utf-8")
     assert schedule.describe(now) == "daily at 03:00; next 2026-10-02 03:00; overdue: no run since 2026-09-28 03:00"
@@ -492,13 +506,54 @@ def test_describe_flags_an_overdue_run(home, monkeypatch):
     assert schedule.describe(now) == "daily at 03:00; next 2026-10-02 03:00"
 
     log.unlink()  # never ran: overdue once it was set up more than 26 hours ago
-    f = schedule.paths.schedule_file()
-    recent = (now - timedelta(hours=2)).timestamp()
-    os.utime(f, (recent, recent))
+    set_up(2)
     assert "overdue" not in schedule.describe(now)
-    old = (now - timedelta(hours=30)).timestamp()
-    os.utime(f, (old, old))
+    set_up(30)
     assert schedule.describe(now).endswith("; overdue: no run since it was set up on 2026-09-30 06:00")
+
+
+def test_overdue_counts_from_the_latest_schedule_change(home, monkeypatch):
+    import os
+    from datetime import datetime, timedelta
+    from inkvault import nightly
+    schedule = scheduled(home, monkeypatch)
+    now = datetime(2026, 10, 1, 12, 0)
+    # the last run was days ago, but the schedule was turned back on (or moved) two hours ago
+    schedule.paths.nightly_log().write_text(f"2026-09-20 03:00:01  {nightly.START} (pid 1) ===\n", encoding="utf-8")
+    t = (now - timedelta(hours=2)).timestamp()
+    os.utime(schedule.paths.schedule_file(), (t, t))
+    assert "overdue" not in schedule.describe(now)
+    t = (now - timedelta(hours=27)).timestamp()
+    os.utime(schedule.paths.schedule_file(), (t, t))
+    assert schedule.describe(now).endswith("; overdue: no run since it was set up on 2026-09-30 09:00")
+
+
+def test_overdue_says_nothing_when_the_log_cant_be_read(home, monkeypatch):
+    import os
+    from datetime import datetime, timedelta
+    from inkvault import nightly
+    schedule = scheduled(home, monkeypatch)
+    now = datetime(2026, 10, 1, 12, 0)
+    t = (now - timedelta(days=30)).timestamp()
+    os.utime(schedule.paths.schedule_file(), (t, t))
+    monkeypatch.setattr(nightly, "last_run", lambda: nightly.LOG_UNREADABLE)
+    assert schedule.describe(now) == "daily at 03:00; next 2026-10-02 03:00"  # status shows the log problem itself
+
+
+@pytest.mark.parametrize("platform, same",[("win32", True), ("darwin", True), ("linux", False)])
+def test_same_path_ignores_case_where_the_file_system_does(monkeypatch, tmp_path, platform, same):
+    from inkvault import schedule
+    monkeypatch.setattr(schedule.sys, "platform", platform)
+    a, b = tmp_path / "My Vault", tmp_path / "my vault"
+    if platform == "linux" and schedule.os.path.normcase("A") == "a":
+        pytest.skip("normcase folds case on this OS whatever sys.platform says")
+    assert schedule.same_path(a, b) is same
+    assert schedule.same_path(a, str(a) + "/")
+
+
+def test_describe_doesnt_call_unknown_launchd_state_disabled(home, monkeypatch):
+    schedule = scheduled(home, monkeypatch, enabled=None)
+    assert schedule.describe().startswith("daily at 03:00")
 
 
 def test_ensure_installed_checks_the_version_of_a_fresh_install(monkeypatch):

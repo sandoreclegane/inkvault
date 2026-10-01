@@ -228,24 +228,37 @@ OVERDUE = timedelta(hours=26)  # a daily run, plus slack for a late start or a l
 
 
 def same_path(a, b):
-    return os.path.normcase(str(Path(a).resolve())) == os.path.normcase(str(Path(b).resolve()))
+    """The same folder? Case-insensitive on Windows and macOS, whose default file systems (NTFS, APFS) are."""
+    def norm(p):
+        p = os.path.normcase(str(Path(p).resolve()))
+        return p.casefold() if sys.platform in ("win32", "darwin") else p
+    return norm(a) == norm(b)
 
 
 def overdue(now):
-    """"; overdue: ..." if the healthy-looking job hasn't started a run in OVERDUE, else ""."""
+    """"; overdue: ..." if the healthy-looking job hasn't started a run in OVERDUE, else "".
+
+    Counted from the later of the newest run's start and the last `inkvault schedule` (schedule.json's time), so
+    turning the schedule back on or moving its time doesn't raise a false alarm."""
     from . import nightly
+    started = set_up = None
     last = nightly.last_run()
+    if last == getattr(nightly, "LOG_UNREADABLE", object()):
+        return ""  # can't tell when it last ran; status reports the unreadable log itself
     if last:
         try:
             started = datetime.strptime(last[0], "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            return ""
-        return f"; overdue: no run since {started:%Y-%m-%d %H:%M}" if now - started > OVERDUE else ""
+        except (TypeError, ValueError):
+            pass
     try:
-        since = datetime.fromtimestamp(paths.schedule_file().stat().st_mtime)
+        set_up = datetime.fromtimestamp(paths.schedule_file().stat().st_mtime)
     except OSError:
-        return ""
-    return f"; overdue: no run since it was set up on {since:%Y-%m-%d %H:%M}" if now - since > OVERDUE else ""
+        pass
+    if started and (not set_up or started >= set_up):
+        return f"; overdue: no run since {started:%Y-%m-%d %H:%M}" if now - started > OVERDUE else ""
+    if set_up:
+        return f"; overdue: no run since it was set up on {set_up:%Y-%m-%d %H:%M}" if now - set_up > OVERDUE else ""
+    return ""
 
 
 def describe(now=None):

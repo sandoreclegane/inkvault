@@ -23,6 +23,8 @@ def render(argv, hour, minute, wake):
     # log make a restart safe. A sleep suspends the run rather than killing it, and nightly asks Windows to stay
     # awake while it works.
     # InteractiveToken: runs only while you're logged in, so no password is stored.
+    # ExecutionTimeLimit: nightly's own 3-hour deadline covers waiting for a rescue plus the export; the backup,
+    # search, digests and dashboard after it need room too, so Windows only stops a run that's truly stuck.
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -49,7 +51,7 @@ def render(argv, hour, minute, wake):
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <StartWhenAvailable>true</StartWhenAvailable>
     <WakeToRun>{"true" if wake else "false"}</WakeToRun>
-    <ExecutionTimeLimit>PT4H</ExecutionTimeLimit>
+    <ExecutionTimeLimit>PT8H</ExecutionTimeLimit>
     <RestartOnFailure>
       <Interval>PT15M</Interval>
       <Count>3</Count>
@@ -148,8 +150,14 @@ def query():
     command = root.findtext(".//t:Exec/t:Command", None, ns)
     arguments = root.findtext(".//t:Exec/t:Arguments", "", ns)
     return Job(True, enabled=None if enabled is None else enabled.strip().lower() == "true",
-               home=home_of(split_args(arguments)),
-               executable=command.strip().strip('"') if command else None, scheduler="Task Scheduler")
+               home=trusted(home_of(split_args(arguments))),
+               executable=trusted(command.strip().strip('"') if command else None), scheduler="Task Scheduler")
+
+
+def trusted(path):
+    """None ("couldn't tell") for a path the OEM code page mangled: piped schtasks output is single-byte text, so
+    characters it can't show come back as "?" (or U+FFFD). Windows paths can't contain "?", so it's a sure sign."""
+    return None if path is None or "?" in path or "�" in path else path
 
 
 def installed():

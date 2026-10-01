@@ -1,4 +1,5 @@
-"""Backend behavior beyond rendering: exact commands issued, escaping, retries. subprocess.run is always faked."""
+"""Backend behavior beyond rendering: exact commands issued, escaping, retries. subprocess.run is always faked
+(conftest fails any test that runs a real scheduler command)."""
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -6,14 +7,6 @@ from types import SimpleNamespace
 import pytest
 
 ARGV = ["/home/u/100%/v$x/python", "-m", "inkvault", "--home", "/h/my vault", "nightly"]
-
-
-@pytest.fixture(autouse=True)
-def never_run_real_commands(monkeypatch):
-    """Any subprocess a test hasn't faked fails loudly instead of running (schtasks, launchctl, systemctl, crontab)."""
-    def refuse(cmd, *a, **k):
-        raise AssertionError(f"a test ran a real command: {cmd}")
-    monkeypatch.setattr(subprocess, "run", refuse)
 
 
 def fake_run(monkeypatch, module, results=None):
@@ -370,6 +363,30 @@ def test_macos_query(mac, monkeypatch):
     assert (job.present, job.enabled, job.home, job.executable, job.scheduler) == (True, True, "/v", "/u/py", "launchd")
     fake_run(monkeypatch, mac, {("launchctl", "print"): proc(113, err="Could not find service")})
     assert mac.query().enabled is False  # the file is there but launchd isn't running it
+
+
+def test_macos_query_unknown_when_launchctl_cant_say(mac, monkeypatch):
+    mac.plist_path().parent.mkdir(parents=True)
+    mac.plist_path().write_bytes(mac.render(["/u/py", "-m", "inkvault", "nightly"], 3, 5, "/l"))
+    # over SSH there's no GUI session to look in: that says nothing about our job
+    fake_run(monkeypatch, mac, {("launchctl", "print"): proc(125, err="Domain does not support specified action")})
+    assert mac.query().present and mac.query().enabled is None
+    fake_run(monkeypatch, mac, {("launchctl", "print"): proc(1, err="Could not find service \"x\" in domain")})
+    assert mac.query().enabled is False
+
+
+def test_windows_query_distrusts_paths_the_oem_code_page_mangled(monkeypatch):
+    from inkvault.schedulers import windows
+    argv = ["C:\\Users\\Zoë\\uv\\tools\\inkvault\\Scripts\\pythonw.exe", "-m", "inkvault",
+            "--home", "C:\\Users\\Zoë\\Vault 工具", "nightly"]
+    # piped schtasks output is single-byte OEM text: characters it can't show come back as "?"
+    mangled = windows.render(argv, 3, 5, False).replace("ë", "?").replace("工具", "??").encode("ascii")
+    fake_run(monkeypatch, windows, {("schtasks", "/Query"): proc(0, out=mangled)})
+    job = windows.query()
+    assert job.present and job.enabled is True and job.home is None and job.executable is None
+    replaced = windows.render(argv, 3, 5, False).replace("ë", "\ufffd").encode("utf-16")
+    fake_run(monkeypatch, windows, {("schtasks", "/Query"): proc(0, out=replaced)})
+    assert windows.query().executable is None
 
 
 def test_macos_remove_checks_bootout(mac, monkeypatch):
