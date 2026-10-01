@@ -7,12 +7,14 @@ Windows runs the job) there is no console, so the log is the only record.
 """
 import contextlib
 import os
+import sqlite3
 import sys
 from datetime import datetime
 
 from . import paths
 
 KEEP_RUNS = 30
+KEEP_BACKUPS = 7
 START, END = "=== started", "=== finished"
 
 
@@ -132,3 +134,32 @@ def lock():
         yield
     finally:
         f.unlink(missing_ok=True)
+
+
+def backup(today=None):
+    """Copy vault.db to backups/vault-YYYY-MM-DD.db and keep the newest KEEP_BACKUPS.
+
+    SQLite's backup API gives a consistent copy even while the vault is open in WAL mode, which a plain file
+    copy doesn't. The copy is written beside its final name first, so a crash never leaves a half-written
+    backup that looks complete.
+    """
+    src = paths.vault_db()
+    if not src.exists():
+        print("no vault yet, nothing to back up")
+        return False
+    folder = paths.backups_dir()
+    folder.mkdir(exist_ok=True)
+    day = today or datetime.now().strftime("%Y-%m-%d")
+    out, partial = folder / f"vault-{day}.db", folder / f"vault-{day}.db.partial"
+    partial.unlink(missing_ok=True)
+    source = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+    target = sqlite3.connect(partial)
+    with target:
+        source.backup(target)
+    source.close()
+    target.close()
+    os.replace(partial, out)
+    for old in sorted(folder.glob("vault-*.db"))[:-KEEP_BACKUPS]:
+        old.unlink()
+    print(f"saved {out.name} ({out.stat().st_size / 1e6:,.0f} MB)")
+    return True

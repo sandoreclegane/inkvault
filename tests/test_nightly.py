@@ -83,3 +83,29 @@ def test_pid_alive_knows_this_process():
     import os
     from inkvault import nightly
     assert nightly.pid_alive(os.getpid())
+
+
+def make_vault():
+    from inkvault import export
+    db = export.open_vault()
+    db.execute("INSERT INTO events (id, created, raw) VALUES ('e1', '2026-02-26T18:00:00Z', '{}')")
+    db.commit()
+    return db  # left open, in WAL mode, like a vault being written to
+
+
+def test_backup_copies_an_open_vault_and_keeps_seven(home):
+    import sqlite3
+    from inkvault import nightly, paths
+    db = make_vault()
+    for day in range(1, 10):
+        assert nightly.backup(today=f"2026-10-0{day}")
+    db.close()
+    names = sorted(p.name for p in paths.backups_dir().iterdir())
+    assert names == [f"vault-2026-10-0{d}.db" for d in range(3, 10)]
+    copy = sqlite3.connect(paths.backups_dir() / "vault-2026-10-09.db")
+    assert copy.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
+
+
+def test_backup_without_a_vault_is_skipped(home):
+    from inkvault import nightly
+    assert nightly.backup() is False
