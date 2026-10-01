@@ -120,6 +120,29 @@ def test_job_argv_carries_home_and_ports(home, monkeypatch):
     assert "--pieces-ports" in schedule.job_argv(exe) and "39301" in schedule.job_argv(exe)
 
 
+def test_job_argv_always_pins_the_vault_folder(tmp_path, monkeypatch):
+    from pathlib import Path
+    from inkvault import schedule
+    monkeypatch.delenv("INKVAULT_HOME", raising=False)  # a default location: cron wouldn't find it by itself
+    monkeypatch.setattr(schedule.paths, "home", lambda: tmp_path)
+    assert schedule.job_argv(Path("/p"))[3:5] == ["--home", str(tmp_path)]
+
+
+def test_enable_says_when_there_is_no_vault_yet(home, monkeypatch, capsys):
+    from pathlib import Path
+    from inkvault import export, schedule
+    fake = FakeBackend()
+    monkeypatch.setattr(schedule, "backend", lambda: fake)
+    monkeypatch.setattr(schedule, "ensure_installed", lambda: Path("/tools/python"))
+    monkeypatch.setattr(schedule, "remember_pieces", lambda: None)
+    schedule.enable("03:00", wake=False)
+    out = capsys.readouterr().out
+    assert f"No vault at {home.resolve()} yet" in out and "same --home" in out and fake.on  # still scheduled
+    export.open_vault().close()
+    schedule.enable("03:00", wake=False)
+    assert "No vault" not in capsys.readouterr().out
+
+
 def test_ask_wake(monkeypatch):
     from inkvault import schedule
     for platform in ("win32", "darwin"):
@@ -239,7 +262,7 @@ def test_rescue_refuses_while_nightly_runs(home, capsys):
     assert "nightly run is in progress" in capsys.readouterr().out
 
 
-def fake_install(monkeypatch, schedule, versions, calls):
+def fake_install(monkeypatch, schedule, versions, calls, stays_old=False):
     """Pretend uv works and the tool install reports versions[0] (None: the probe fails); a reinstall installs 0.1.1+."""
     from pathlib import Path
     import subprocess
@@ -251,6 +274,8 @@ def fake_install(monkeypatch, schedule, versions, calls):
 
     def run(cmd, **k):
         calls.append(cmd)
+        if not stays_old:
+            versions[0] = schedule.version_tuple(schedule.__version__)  # the install worked
         return subprocess.CompletedProcess(cmd, 0)
     monkeypatch.setattr(schedule.subprocess, "run", run)
     return exe
@@ -282,6 +307,14 @@ def test_ensure_installed_reinstalls_when_the_probe_fails(monkeypatch):
     fake_install(monkeypatch, schedule, [None], calls)
     schedule.ensure_installed()
     assert calls and "--force" in calls[0]
+
+
+def test_ensure_installed_fails_clearly_if_the_update_did_not_take(monkeypatch):
+    from inkvault import schedule
+    calls = []
+    fake_install(monkeypatch, schedule, [(0, 0, 9)], calls, stays_old=True)  # still reports old after --force
+    with pytest.raises(schedule.ScheduleError, match="--force --reinstall"):
+        schedule.ensure_installed()
 
 
 def test_installed_version_reads_the_version_line(tmp_path, monkeypatch):

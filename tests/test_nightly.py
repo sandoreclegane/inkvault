@@ -1,5 +1,4 @@
 """The nightly run: lock, log, backup, and steps that fail without stopping the others."""
-import contextlib
 import os
 import subprocess
 import sys
@@ -257,7 +256,39 @@ def test_unexpected_error_outside_the_steps_is_logged(quick, monkeypatch):
     monkeypatch.setattr(nightly, "run_steps", lambda: 1 / 0)
     assert nightly.run() == 1
     assert "ZeroDivisionError" in paths.nightly_log().read_text(encoding="utf-8")
+    started, finished, result = nightly.last_run()  # status must show it, not "never started"
+    assert finished and result == "failed (ZeroDivisionError: division by zero)"
     assert not nightly.running()
+
+
+def test_a_failure_after_the_start_line_does_not_log_a_second_one(quick, monkeypatch):
+    from inkvault import nightly, paths
+    monkeypatch.setattr(nightly, "steps", lambda: 1 / 0)  # blows up inside run_steps, after START
+    assert nightly.run() == 1
+    text = paths.nightly_log().read_text(encoding="utf-8")
+    assert text.count(nightly.START) == 1 and "Traceback" in text
+    assert nightly.last_run()[2].startswith("failed (ZeroDivisionError")
+
+
+def test_backup_runs_right_after_export(quick, monkeypatch):
+    from inkvault import nightly
+    assert [name for name, _ in nightly.steps()] == ["export", "backup", "index", "digest", "dashboard"]
+
+
+def test_no_vault_is_not_a_plain_ok(quick):
+    from inkvault import nightly
+    assert nightly.run() == 0
+    assert nightly.last_run()[2].startswith("ok, nothing to back up yet (")
+
+
+def test_backup_that_fails_its_integrity_check_keeps_the_older_ones(home, monkeypatch):
+    from inkvault import nightly, paths
+    make_vault().close()
+    assert nightly.backup(today="2026-10-01")
+    monkeypatch.setattr(nightly, "quick_check", lambda path: "*** in database main ***")
+    with pytest.raises(RuntimeError, match="integrity check; older backups kept"):
+        nightly.backup(today="2026-10-02")
+    assert [p.name for p in paths.backups_dir().iterdir()] == ["vault-2026-10-01.db"]  # no partial, none rotated
 
 
 def test_multiline_step_error_stays_on_one_line(quick, monkeypatch):
@@ -283,14 +314,17 @@ def patch_os_lock(monkeypatch, err):
         monkeypatch.setattr(fcntl, "flock", fail)
 
 
-def test_filesystem_without_lock_support_is_an_error_not_busy(quick, monkeypatch):
+def test_filesystem_without_lock_support_runs_unguarded_with_a_warning(quick, monkeypatch):
     import errno
     from inkvault import nightly, paths
+    make_vault().close()
     patch_os_lock(monkeypatch, errno.ENOLCK)
     assert nightly.running() is False
-    assert nightly.run() == 1
+    assert nightly.run() == 0
     text = paths.nightly_log().read_text(encoding="utf-8")
-    assert "Traceback" in text and "in progress" not in text
+    assert "warning: couldn't take the lock" in text and "in progress" not in text
+    assert "backup ok" in nightly.last_run()[2]
+    assert list(paths.backups_dir().glob("vault-*.db"))
 
 
 def test_real_contention_errors_count_as_busy(home, monkeypatch):
@@ -306,7 +340,6 @@ def test_real_contention_errors_count_as_busy(home, monkeypatch):
 
 
 def test_lock_retries_once_before_giving_up(home, monkeypatch):
-    import errno
     from inkvault import nightly
     calls = []
     real = nightly.try_lock

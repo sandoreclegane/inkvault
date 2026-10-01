@@ -96,6 +96,9 @@ def ensure_installed():
     r = subprocess.run(cmd)
     if r.returncode or not (exe := tool_python()):
         raise ScheduleError("`uv tool install` didn't finish; see the message above.")
+    if "--force" in cmd and not ((v := installed_version(exe)) and v >= version_tuple(__version__)):
+        raise ScheduleError(f"The installed InkVault is still older than {__version__} after updating. Run "
+                            f"`uv tool install --force --reinstall {REPO}` and then `inkvault schedule` again.")
     if shutil.which("inkvault"):
         print("Done. Update it anytime with `uv tool upgrade inkvault`.")
     else:
@@ -105,9 +108,8 @@ def ensure_installed():
 
 def job_argv(python):
     """The scheduled command. Settings go as flags: Task Scheduler can't give a task environment variables."""
-    argv = [str(python), "-m", "inkvault"]
-    if os.environ.get("INKVAULT_HOME"):
-        argv += ["--home", str(paths.home())]
+    # Always pin the vault folder: cron and systemd don't see this shell's XDG_DATA_HOME or a --home used to rescue.
+    argv = [str(python), "-m", "inkvault", "--home", str(paths.home())]
     if os.environ.get("INKVAULT_PIECES_PORTS"):
         argv += ["--pieces-ports", os.environ["INKVAULT_PIECES_PORTS"]]
     return argv + ["nightly"]
@@ -116,7 +118,7 @@ def job_argv(python):
 def platform_of(b):
     """sys.platform-style name for a backend module (tests' fakes carry PLATFORM)."""
     name = getattr(b, "__name__", "").rsplit(".", 1)[-1]
-    return getattr(b, "PLATFORM", None) or {"windows": "win32", "macos": "darwin", "linux": "linux"}.get(name)         or sys.platform
+    return getattr(b, "PLATFORM", None) or {"windows": "win32", "macos": "darwin", "linux": "linux"}.get(name) or sys.platform
 
 
 def ask_wake(wake, interactive, platform=None):
@@ -152,6 +154,8 @@ def enable(at="03:00", wake=None, interactive=False):
     requested = wake
     wake = ask_wake(wake, interactive, platform_of(b))
     remember_pieces()
+    if not paths.vault_db().exists():
+        print(f"No vault at {paths.home()} yet. If you rescued with --home, run schedule with the same --home.")
     try:
         where = b.install(job_argv(exe), hour, minute, wake)
     except Exception as e:  # noqa: BLE001 - whatever the scheduler tool did, the user needs the message

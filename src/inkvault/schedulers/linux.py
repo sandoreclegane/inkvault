@@ -79,6 +79,30 @@ def set_crontab(text):
         raise RuntimeError(f"couldn't write your crontab: {(e.stderr or '').strip()}") from e
 
 
+def drop_cron_line():
+    """Best-effort: remove our crontab line, so switching to a systemd timer doesn't leave a second job."""
+    try:
+        if shutil.which("crontab"):
+            current = get_crontab()
+            if TAG in current:
+                set_crontab(merge_crontab(current, None))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def drop_units():
+    """Best-effort: remove our systemd units, so switching to cron doesn't leave a second job."""
+    try:
+        if has_systemd():
+            systemctl("disable", "--now", f"{UNIT}.timer")
+        for ext in ("timer", "service"):
+            (unit_dir() / f"{UNIT}.{ext}").unlink(missing_ok=True)
+        if has_systemd():
+            systemctl("daemon-reload")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def install(argv, hour, minute, wake):
     if has_systemd():
         d = unit_dir()
@@ -90,11 +114,13 @@ def install(argv, hour, minute, wake):
         if r.returncode:
             raise RuntimeError(f"systemctl couldn't enable the timer: {(r.stderr or r.stdout).strip()}")
         systemctl("restart", f"{UNIT}.timer")  # enable --now doesn't re-read a timer that was already running
+        drop_cron_line()
         return (f"systemd user timer {UNIT}.timer; it runs while you're logged in "
                 "(`loginctl enable-linger $USER` keeps it running when you're not)")
     if not shutil.which("crontab"):
         raise RuntimeError("Neither systemd (user) nor crontab is available, so there's nothing to schedule with.")
     set_crontab(merge_crontab(get_crontab(), cron_line(argv, hour, minute)))
+    drop_units()
     return "crontab entry (note: cron doesn't catch up on a run missed while the computer was off or asleep)"
 
 

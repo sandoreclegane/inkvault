@@ -1,6 +1,7 @@
 """`inkvault nightly`: the scheduled refresh.
 
-Export new captures from PiecesOS, rebuild search, digests and the dashboard, then back up the vault.
+Export new captures from PiecesOS, back up the vault right away (only export writes vault.db, so a slow digest
+can never starve the backup), then rebuild search, digests and the dashboard.
 Each step can fail without stopping the others, and only a failed backup fails the run, because vault.db is
 the one file that can't be rebuilt. Everything goes to nightly.log in the vault folder. Under pythonw (how
 Windows runs the job) there is no console, so the log is the only record.
@@ -190,6 +191,12 @@ def lock():
         os.close(fd)
 
 
+def quick_check(path):
+    """SQLite's `PRAGMA quick_check` on the file: "ok", or what it found."""
+    with contextlib.closing(sqlite3.connect(path)) as db:
+        return db.execute("PRAGMA quick_check").fetchone()[0]
+
+
 def backup(today=None):
     """Copy vault.db to backups/vault-YYYY-MM-DD.db and keep the newest KEEP_BACKUPS.
 
@@ -215,6 +222,9 @@ def backup(today=None):
     with contextlib.closing(opened) as source:
         with contextlib.closing(sqlite3.connect(partial)) as target:
             source.backup(target)
+    if quick_check(partial) != "ok":  # never rotate good backups out for a bad copy
+        partial.unlink(missing_ok=True)
+        raise RuntimeError("backup copy failed its integrity check; older backups kept")
     os.replace(partial, out)
     for old in sorted(folder.glob("vault-*.db"))[:-KEEP_BACKUPS]:
         old.unlink()
@@ -259,21 +269,36 @@ def step_dashboard():
 
 def steps():
     # Looked up at call time, so a test can replace any one of them.
-    return [("export", step_export), ("index", step_index), ("digest", step_digest),
-            ("dashboard", step_dashboard), ("backup", backup)]
+    # Only export writes vault.db, so the backup follows it directly: a slow digest can't starve it.
+    return [("export", step_export), ("backup", backup), ("index", step_index), ("digest", step_digest),
+            ("dashboard", step_dashboard)]
+
+
+started = []  # non-empty once this run has written its START line
 
 
 def run():
     """One nightly run. Returns the exit code: 1 only if the backup failed."""
+    started.clear()
     try:
-        with lock():
+        with contextlib.ExitStack() as stack:
+            try:
+                stack.enter_context(lock())
+            except Busy:
+                raise
+            except OSError as e:  # e.g. a drive without file locking: better to run unguarded than not at all
+                log(f"warning: couldn't take the lock ({e}); running without it")
             return run_steps()
     except Busy as busy:
         who = f"pid {busy.args[0]}" if busy.args[0] else "pid unknown"
         log(f"another run is in progress ({who}); not starting a second one")
         return 0
-    except Exception:  # noqa: BLE001 - pythonw has no console, so the log is the only place this can go
-        log(traceback.format_exc())
+    except Exception as e:  # noqa: BLE001 - pythonw has no console, so the log is the only place this can go
+        trace = traceback.format_exc()
+        if not started:
+            log(f"{START} (InkVault {__version__}, pid {os.getpid()}) ===")
+        log(f"{END}: failed ({type(e).__name__}: {' '.join(str(e).split())}) ===")
+        log(trace)
         return 1
 
 
@@ -310,6 +335,7 @@ def run_steps():
 
 def _run_steps():
     log(f"{START} (InkVault {__version__}, pid {os.getpid()}) ===")  # first, so even a killed run shows up
+    started.append(1)
     results = {}
     stream = LogStream()
     for name, step in steps():
@@ -324,7 +350,12 @@ def _run_steps():
                 stream.finish()
             except Exception:  # noqa: BLE001 - logging trouble must never stop the backup
                 pass
-    overall = "failed" if results["backup"].startswith("failed") else "ok"
+    if results["backup"].startswith("failed"):
+        overall = "failed"
+    elif results["backup"] == "skipped":  # backup() only skips when there is no vault
+        overall = "ok, nothing to back up yet"
+    else:
+        overall = "ok"
     log(f"{END}: {overall} ({', '.join(f'{k} {v}' for k, v in results.items())}) ===")
     trim()
     return 1 if overall == "failed" else 0

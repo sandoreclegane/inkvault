@@ -91,7 +91,7 @@ def wake_timers_allowed(powercfg_output):
     powercfg translates its labels, so this doesn't look for English: the current AC and DC values are the last
     two lines ending in 0x plus eight hex digits (the "possible settings" lines above them have no 0x), AC first.
     """
-    values = re.findall(r"0x([0-9a-fA-F]{8})[ 	]*$", powercfg_output, re.MULTILINE)
+    values = re.findall(r"0x([0-9a-fA-F]{8})[ \t]*$", powercfg_output, re.MULTILINE)
     if not values:
         return True  # can't read it: don't warn on a guess
     ac = values[-2] if len(values) >= 2 else values[-1]

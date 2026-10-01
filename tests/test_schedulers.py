@@ -157,7 +157,7 @@ def test_linux_unit_dir_ignores_empty_xdg(lin, monkeypatch, tmp_path):
 def test_linux_systemd_sequence(lin, monkeypatch):
     calls = fake_run(monkeypatch, lin)
     lin.install(["/p", "nightly"], 3, 5, False)
-    assert [c[2] for c in calls] == ["show-environment", "daemon-reload", "enable", "restart"]
+    assert [c[2] for c in calls if c[0] == "systemctl"] == ["show-environment", "daemon-reload", "enable", "restart"]
     assert next(c for c in calls if c[2] == "enable")[-2:] == ["--now", "inkvault-nightly.timer"]
     assert next(c for c in calls if c[2] == "restart")[-1] == "inkvault-nightly.timer"
     assert (lin.unit_dir() / "inkvault-nightly.timer").exists()
@@ -250,3 +250,36 @@ def test_linux_remove_survives_unreadable_crontab_after_removing_units(lin, monk
     assert lin.remove() is True  # the units went; the crontab problem doesn't fail --off
     with pytest.raises(RuntimeError):  # but with nothing else removed it is reported
         lin.remove()
+
+
+def test_linux_systemd_install_removes_our_old_cron_line(lin, monkeypatch):
+    fake_run(monkeypatch, lin)
+    written = {}
+    monkeypatch.setattr(lin, "get_crontab", lambda: "0 9 * * 1 x\n" + lin.cron_line(["/p"], 3, 5) + "\n")
+    monkeypatch.setattr(lin, "set_crontab", lambda text: written.setdefault("t", text))
+    lin.install(["/p", "nightly"], 3, 5, False)
+    assert written["t"] == "0 9 * * 1 x\n"  # theirs stays, ours is gone
+
+
+def test_linux_cron_install_removes_our_old_systemd_units(lin, monkeypatch):
+    d = lin.unit_dir()
+    d.mkdir(parents=True)
+    (d / "inkvault-nightly.timer").write_text("x")
+    (d / "inkvault-nightly.service").write_text("x")
+    states = iter([False, True, True])  # install's own check, then drop_units' two
+    monkeypatch.setattr(lin, "has_systemd", lambda: next(states, True))
+    calls = fake_run(monkeypatch, lin)
+    monkeypatch.setattr(lin, "get_crontab", lambda: "")
+    monkeypatch.setattr(lin, "set_crontab", lambda text: None)
+    lin.install(["/p", "nightly"], 3, 5, False)
+    assert not list(d.iterdir())
+    assert ["systemctl", "--user", "disable", "--now", "inkvault-nightly.timer"] in calls
+
+
+def test_linux_cleanup_of_the_other_scheduler_never_fails_the_install(lin, monkeypatch):
+    fake_run(monkeypatch, lin)
+
+    def boom():
+        raise RuntimeError("couldn't read your crontab")
+    monkeypatch.setattr(lin, "get_crontab", boom)
+    assert "systemd" in lin.install(["/p", "nightly"], 3, 5, False)
