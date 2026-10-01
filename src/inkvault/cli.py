@@ -7,6 +7,8 @@
     inkvault dashboard   rebuild and open the Memory Atlas
     inkvault serve       run the MCP server (for Claude Code, Codex, Hermes, …)
     inkvault status      what's in the vault and where it lives
+    inkvault schedule    refresh and back up the vault every night (`--off` to stop)
+    inkvault nightly     one refresh + backup now (what the schedule runs)
 """
 import argparse
 import os
@@ -40,6 +42,16 @@ def open_dashboard(path):
 
 
 def cmd_rescue(args):
+    from . import nightly
+    try:
+        with nightly.lock():
+            return rescue(args)
+    except nightly.Busy:
+        print("A nightly run is in progress right now; try again when it's done (see `inkvault status`).")
+        return 1
+
+
+def rescue(args):
     from . import dashboard, digest, export, index
     try:
         if not export.run():
@@ -93,6 +105,13 @@ def cmd_status(_args):
           f"dashboard: {paths.dashboard() if paths.dashboard().exists() else 'not built'}")
     pos, version = PiecesOS.find()
     print(f"PiecesOS: {'running ' + version + ' at ' + pos.base if pos else 'not reachable'}")
+    from . import nightly, schedule
+    print(f"nightly: {schedule.describe()}")
+    if nightly.running():
+        print("  running now")
+    elif last := nightly.last_run():
+        started, finished, result = last
+        print(f"  last run {started}: {result if finished else 'started but never finished (see nightly.log)'}")
     return 0
 
 
@@ -100,6 +119,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog="inkvault", description="Rescue your Pieces memory and search it locally.")
     p.add_argument("--version", action="version", version=f"inkvault {__version__}")
     p.add_argument("--home", help="where to keep the vault (default: your app-data folder; or set INKVAULT_HOME)")
+    p.add_argument("--pieces-ports", help="PiecesOS port(s) to try, comma-separated (or set INKVAULT_PIECES_PORTS)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     r = sub.add_parser("rescue", help="export + index + digest + dashboard, in one go")
@@ -115,10 +135,20 @@ def main(argv=None):
     b.add_argument("--no-open", action="store_true")
     sub.add_parser("serve", help="run the MCP server over stdio")
     sub.add_parser("status", help="what's in the vault and where it lives")
+    s = sub.add_parser("schedule", help="refresh and back up the vault every night")
+    s.add_argument("--at", default="03:00", help="time of day, 24-hour (default 03:00)")
+    s.add_argument("--wake", dest="wake", action="store_const", const=True, default=None,
+                   help="wake the computer for the run")
+    s.add_argument("--no-wake", dest="wake", action="store_const", const=False,
+                   help="don't wake it; run the next time it's awake")
+    s.add_argument("--off", action="store_true", help="stop the nightly run (keeps the vault and backups)")
+    sub.add_parser("nightly", help="one refresh + backup now (what the schedule runs)")
     args = p.parse_args(argv)
 
     if args.home:
         os.environ["INKVAULT_HOME"] = args.home
+    if args.pieces_ports:
+        os.environ["INKVAULT_PIECES_PORTS"] = args.pieces_ports
     if getattr(args, "model", None) is None and hasattr(args, "model"):
         from .digest import DEFAULT_MODEL
         args.model = DEFAULT_MODEL
@@ -159,6 +189,20 @@ def dispatch(args):
         return 0
     if args.cmd == "status":
         return cmd_status(args)
+    if args.cmd == "schedule":
+        from . import schedule
+        try:
+            if args.off:
+                schedule.disable()
+            else:
+                schedule.enable(args.at, args.wake, interactive=bool(sys.stdin and sys.stdin.isatty()))
+        except schedule.ScheduleError as e:
+            print(e)
+            return 1
+        return 0
+    if args.cmd == "nightly":
+        from . import nightly
+        return nightly.run()
     return 1
 
 

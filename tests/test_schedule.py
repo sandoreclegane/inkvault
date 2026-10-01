@@ -181,3 +181,43 @@ def test_tool_python_points_into_uv_tool_dir(tmp_path, monkeypatch):
     exe.parent.mkdir(parents=True)
     exe.touch()
     assert schedule.tool_python() == exe
+
+
+def test_cli_schedule_and_status(home, monkeypatch, capsys):
+    from pathlib import Path
+    from inkvault import cli, nightly, schedule
+    fake = FakeBackend()
+    monkeypatch.setattr(schedule, "backend", lambda: fake)
+    monkeypatch.setattr(schedule, "ensure_installed", lambda: Path("/tools/python"))
+    monkeypatch.setattr(schedule, "remember_pieces", lambda: None)
+    monkeypatch.setenv("INKVAULT_PIECES_PORTS", "1")
+
+    assert cli.main(["schedule", "--at", "04:15", "--no-wake"]) == 0
+    assert fake.calls[0][1:] == (4, 15, False)
+    assert cli.main(["schedule", "--at", "4pm"]) == 1
+    assert "24-hour time" in capsys.readouterr().out
+
+    nightly.log(f"{nightly.START} (pid 1) ===")
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "nightly: daily at 04:15; next " in out
+    assert "started but never finished" in out
+
+    assert cli.main(["schedule", "--off"]) == 0
+    assert not fake.on
+
+
+def test_cli_pieces_ports_flag_sets_the_env(home, monkeypatch):
+    import os
+    from inkvault import cli
+    monkeypatch.setenv("INKVAULT_PIECES_PORTS", "9")  # so monkeypatch restores the original after the test
+    cli.main(["--pieces-ports", "1", "status"])
+    assert os.environ["INKVAULT_PIECES_PORTS"] == "1"
+
+
+def test_rescue_refuses_while_nightly_runs(home, capsys):
+    from inkvault import cli
+    from test_nightly import holder  # a real lock held by another process, as the nightly run would hold it
+    with holder(home):
+        assert cli.main(["rescue", "--no-open"]) == 1
+    assert "nightly run is in progress" in capsys.readouterr().out
