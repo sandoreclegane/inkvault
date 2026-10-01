@@ -138,7 +138,8 @@ with `inkvault index`.
 - **Pieces' own export tool**: Pieces said they'd send one. Use it too; two copies are better than one. Support
   for importing its format into InkVault is planned.
 - Tested on Windows with PiecesOS 12.6.2 and a vault of 120,000 captures. macOS and Linux should work;
-  reports are welcome.
+  reports are welcome. `inkvault schedule` has been tested end to end on Windows; on macOS and Linux it is
+  covered by automated tests only so far, so a report from a real Mac or Linux machine would help a lot.
 
 ## Not affiliated with Pieces
 

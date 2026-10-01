@@ -2,6 +2,8 @@
 
 ## 0.1.1
 
+- Scheduling is tested end to end on Windows. On macOS and Linux it is covered by automated tests only so far;
+  reports from real machines are welcome.
 - **`inkvault schedule`**: a nightly refresh and backup, using Task Scheduler (Windows), launchd (macOS) or a systemd
   user timer / cron (Linux). The backup happens right after the export, then search, digests and the dashboard.
   Missed runs: Windows and systemd catch up after sleep or power-off, macOS after sleep (not power-off), cron
