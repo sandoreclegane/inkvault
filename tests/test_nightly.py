@@ -1,4 +1,6 @@
 """The nightly run: lock, log, backup, and steps that fail without stopping the others."""
+import contextlib
+import os
 import subprocess
 import sys
 
@@ -13,10 +15,10 @@ def home(tmp_path, monkeypatch):
 
 def test_nightly_paths_live_in_the_vault_folder(home):
     from inkvault import paths
-    assert paths.nightly_log() == home / "nightly.log"
-    assert paths.nightly_lock() == home / "nightly.lock"
-    assert paths.backups_dir() == home / "backups"
-    assert paths.schedule_file() == home / "schedule.json"
+    assert paths.nightly_log() == home.resolve() / "nightly.log"
+    assert paths.nightly_lock() == home.resolve() / "nightly.lock"
+    assert paths.backups_dir() == home.resolve() / "backups"
+    assert paths.schedule_file() == home.resolve() / "schedule.json"
 
 
 def test_python_dash_m_runs_the_cli():
@@ -59,30 +61,100 @@ def test_last_run_reports_finished_and_unfinished_runs(home):
     assert finished is None and result is None
 
 
-def test_lock_blocks_a_second_run_while_the_first_is_alive(home):
-    import os
-    from inkvault import nightly, paths
-    paths.nightly_lock().write_text(str(os.getpid()))  # this test process is certainly alive
-    with pytest.raises(nightly.Busy):
-        with nightly.lock():
-            pass
-    assert nightly.running()
+HOLD = """
+import os, sys
+os.environ["INKVAULT_HOME"] = sys.argv[1]
+from inkvault import nightly
+with nightly.lock():
+    print("held", flush=True)
+    sys.stdin.read()  # hold until the test closes our stdin
+"""
+
+TRY = """
+import os, sys
+os.environ["INKVAULT_HOME"] = sys.argv[1]
+from inkvault import nightly
+try:
+    with nightly.lock():
+        print("TOOK")
+except nightly.Busy:
+    print("BUSY")
+"""
 
 
-def test_stale_lock_is_taken_over_and_released(home, monkeypatch):
+@contextlib.contextmanager
+def holder(home):
+    """Another process holding the nightly lock. A separate process, because that's what the lock is for, and
+    it behaves the same on Windows, macOS and Linux (flock and msvcrt locks can be ambiguous within one process)."""
+    p = subprocess.Popen([sys.executable, "-c", HOLD, str(home)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert p.stdout.readline().strip() == "held"
+        yield p
+    finally:
+        p.stdin.close()
+        p.wait(timeout=30)
+
+
+def try_in_subprocess(home):
+    r = subprocess.run([sys.executable, "-c", TRY, str(home)], capture_output=True, text=True, timeout=60)
+    return r.stdout.strip()
+
+
+def test_lock_blocks_a_second_run_while_another_process_holds_it(home):
+    from inkvault import nightly
+    assert not nightly.running()
+    with holder(home):
+        assert nightly.running()
+        assert nightly.lock_owner() not in (0, os.getpid())  # the holder's pid (not p.pid: a venv launcher may sit in between)
+        with pytest.raises(nightly.Busy):
+            with nightly.lock():
+                pass
+    assert not nightly.running()  # released the moment the holder ended
+    with nightly.lock():
+        pass
+
+
+def test_lock_held_here_keeps_another_process_out(home):
+    from inkvault import nightly
+    with nightly.lock():
+        assert try_in_subprocess(home) == "BUSY"
+    assert try_in_subprocess(home) == "TOOK"
+
+
+def test_a_lock_file_left_by_a_dead_process_does_not_block(home):
     from inkvault import nightly, paths
     paths.nightly_lock().write_text("424242")
-    monkeypatch.setattr(nightly, "pid_alive", lambda pid: False)  # its process is gone
-    with nightly.lock():
-        assert paths.nightly_lock().exists()
-    assert not paths.nightly_lock().exists()
     assert not nightly.running()
+    with nightly.lock():
+        pass
 
 
-def test_pid_alive_knows_this_process():
-    import os
-    from inkvault import nightly
-    assert nightly.pid_alive(os.getpid())
+def test_lock_owner_ignores_garbage(home):
+    from inkvault import nightly, paths
+    for text in ("", "abc", "0", str(2**32)):
+        paths.nightly_lock().write_text(text)
+        assert nightly.lock_owner() == 0
+
+
+def test_relative_home_is_made_absolute_and_backs_up(tmp_path, monkeypatch):
+    from inkvault import export, nightly, paths
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("INKVAULT_HOME", "rel")
+    assert paths.home().is_absolute() and paths.home() == (tmp_path / "rel").resolve()
+    export.open_vault().close()
+    assert nightly.backup(today="2026-10-01")
+
+
+def test_trim_survives_an_unwritable_log(home, monkeypatch):
+    from inkvault import nightly, paths
+    for i in range(3):
+        nightly.log(f"{nightly.START} run {i} ===")
+
+    def deny(a, b):
+        raise PermissionError("log is open elsewhere")
+    monkeypatch.setattr(nightly.os, "replace", deny)
+    nightly.trim(keep=1)  # must not raise
+    assert not paths.nightly_log().with_name("nightly.log.tmp").exists()
 
 
 def make_vault():
@@ -136,7 +208,7 @@ def test_failed_step_does_not_stop_the_backup(quick, monkeypatch):
     assert "export skipped" in result and "index failed: RuntimeError: disk on fire" in result
     assert "backup ok" in result
     assert list(paths.backups_dir().glob("vault-*.db"))
-    assert not paths.nightly_lock().exists()
+    assert not nightly.running()
 
 
 def test_failed_backup_fails_the_run(quick, monkeypatch):
@@ -157,11 +229,10 @@ def test_step_output_goes_to_the_log(quick):
     assert "PiecesOS not reachable" in text and "no vault yet" in text
 
 
-def test_second_run_while_one_is_going_exits_quietly(quick):
-    import os
+def test_second_run_while_one_is_going_exits_quietly(quick, home):
     from inkvault import nightly, paths
-    paths.nightly_lock().write_text(str(os.getpid()))
-    assert nightly.run() == 0
+    with holder(home):
+        assert nightly.run() == 0
     assert "another run is in progress" in paths.nightly_log().read_text(encoding="utf-8")
     assert nightly.last_run() is None  # it never started
 
@@ -190,35 +261,6 @@ def test_flush_does_not_defeat_the_progress_bar_collapse(home):
     assert s.isatty() is False and s.encoding == "utf-8"
 
 
-def test_old_lock_is_stale_even_if_its_pid_is_alive(home):
-    import os
-    import time
-    from inkvault import nightly, paths
-    f = paths.nightly_lock()
-    f.write_text(str(os.getpid()))  # a reused pid: alive, but not our run
-    old = time.time() - 13 * 3600
-    os.utime(f, (old, old))
-    assert not nightly.running()
-    with nightly.lock():
-        assert nightly.lock_owner() == os.getpid()
-    assert not f.exists()
-
-
-def test_fresh_unreadable_lock_means_someone_is_mid_create(home):
-    from inkvault import nightly, paths
-    paths.nightly_lock().write_text("")
-    with pytest.raises(nightly.Busy):
-        with nightly.lock():
-            pass
-
-
-def test_pid_alive_is_false_for_a_finished_process():
-    from inkvault import nightly
-    p = subprocess.Popen([sys.executable, "-c", "pass"])
-    p.wait()
-    assert not nightly.pid_alive(p.pid)
-
-
 def test_unprintable_output_does_not_stop_the_backup(quick, monkeypatch):
     from inkvault import index, nightly
     make_vault().close()
@@ -236,7 +278,7 @@ def test_unexpected_error_outside_the_steps_is_logged(quick, monkeypatch):
     monkeypatch.setattr(nightly, "run_steps", lambda: 1 / 0)
     assert nightly.run() == 1
     assert "ZeroDivisionError" in paths.nightly_log().read_text(encoding="utf-8")
-    assert not paths.nightly_lock().exists()
+    assert not nightly.running()
 
 
 def test_multiline_step_error_stays_on_one_line(quick, monkeypatch):

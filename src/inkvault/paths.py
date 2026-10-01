@@ -17,7 +17,7 @@ def home() -> Path:
     else:
         base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "inkvault"
     base.mkdir(parents=True, exist_ok=True)
-    return base
+    return base.resolve()  # absolute, so a relative --home works after a chdir and in file: URIs
 
 
 def vault_db() -> Path:
