@@ -317,3 +317,28 @@ def test_status_says_when_the_last_export_was_partial(tmp_path, monkeypatch, cap
     monkeypatch.setattr(export.PiecesOS, "find", staticmethod(lambda: (None, None)))
     assert cli.main(["status"]) == 0
     assert "(partial; continues next run)" in capsys.readouterr().out
+
+
+def add_tagged_summaries(tags, summaries):
+    """Extra tag records and summaries for the topic tests. tags: {id: text}; summaries: [(id, created, [tag ids])]."""
+    from inkvault import export
+    db = export.open_vault()
+    db.executemany("INSERT INTO raw_records VALUES (?,?,?)",
+                   [rec("tag", i, text=text) for i, text in tags.items()] +
+                   [rec("summary", sid, name=f"Session {sid}", created={"value": created},
+                        tags={"indices": {t: n for n, t in enumerate(ids)}}) for sid, created, ids in summaries])
+    db.commit()
+    db.close()
+
+
+def test_index_stores_each_summarys_normalized_tags_once(vault):
+    from inkvault import index, paths
+    from inkvault.times import local
+    add_tagged_summaries({"t1": "Stripe-Integration", "t2": "stripe integration ", "t3": "   ", "t4": "Billing"},
+                         [("s20", "2026-03-02T00:30:00Z", ["t1", "t2", "t3", "t4", "missing"])])
+    index.build()
+    db = paths.connect_ro(paths.search_db())
+    rows = db.execute("SELECT summary_id, day, tag FROM summary_tags ORDER BY tag").fetchall()
+    db.close()
+    day = local("2026-03-02T00:30:00Z").date().isoformat()  # the user's local day, not the UTC date
+    assert rows == [("s20", day, "billing"), ("s20", day, "stripe integration")]
