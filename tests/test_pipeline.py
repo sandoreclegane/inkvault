@@ -342,3 +342,15 @@ def test_index_stores_each_summarys_normalized_tags_once(vault):
     db.close()
     day = local("2026-03-02T00:30:00Z").date().isoformat()  # the user's local day, not the UTC date
     assert rows == [("s20", day, "billing"), ("s20", day, "stripe integration")]
+
+
+def test_tags_land_on_the_users_local_day_not_the_utc_date(vault, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from inkvault import index, paths
+    utc_minus_8 = timezone(timedelta(hours=-8))  # a fixed zone, so this runs the same on any machine (CI is UTC)
+    monkeypatch.setattr(index, "local", lambda ts: datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(utc_minus_8))
+    add_tagged_summaries({"t1": "Billing"}, [("s21", "2026-03-02T00:30:00Z", ["t1"])])
+    index.build()
+    db = paths.connect_ro(paths.search_db())
+    assert db.execute("SELECT day FROM summary_tags WHERE summary_id='s21'").fetchone() == ("2026-03-01",)
+    db.close()
