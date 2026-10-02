@@ -87,7 +87,8 @@ On the real vault these thresholds give 64 ongoing and 109 burst tags before the
 ### 4. Page (`atlas.html`)
 
 - New card **Topics over time**, directly after **Projects over time**, with `data-table="topics"`.
-- Description: *Pieces' own topic tags on your sessions. Ongoing topics recur across months; bursts are concentrated in a few weeks.*
+- Description: *Pieces' own topic tags on your sessions. Ongoing topics recur across months; bursts are concentrated in a few weeks. Each group has its own color scale.* (Separate scales are deliberate: ongoing topics recur at low weekly counts, and a shared scale would wash them out.)
+- Long topic names are truncated on the axis (`width: 160, overflow: "truncate"`); the tooltip shows the full name.
 - The weekly heatmap drawing in `renderThemes` moves into a shared helper used by both cards (rows, weeks, colors, tooltip, table). The Projects card must look and behave exactly as before.
 - The card holds two heatmaps drawn by the shared helper, each under a small heading: **Ongoing** first, then **Bursts**. Both use the same weeks on the x-axis so they line up.
 - Date range, light/dark theme and the "show as table" toggle work as for Projects. The table has a Group column.
