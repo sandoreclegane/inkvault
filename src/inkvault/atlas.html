@@ -115,7 +115,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
 
   <section class="card" data-table="topics" id="topics-card">
     <div class="head"><div><h2>Topics over time</h2>
-      <p class="desc">Pieces' own topic tags on your sessions. Ongoing topics recur across months; bursts are concentrated in a few weeks.</p></div>
+      <p class="desc">Pieces' own topic tags on your sessions. Ongoing topics recur across months; bursts are concentrated in a few weeks. Each group has its own color scale.</p></div>
       <button class="tbl">Show table</button></div>
     <div id="topics-ongoing-box"><h3 class="group">Ongoing</h3><div class="chart" id="topics-ongoing"></div></div>
     <div id="topics-bursts-box"><h3 class="group">Bursts</h3><div class="chart" id="topics-bursts"></div></div>
@@ -342,7 +342,7 @@ function drawWeekly(id, names, {weeks, grid, order}, t) {
     xAxis: {type: "category", data: weeks.map(w => new Date(w + "T12:00:00").toLocaleDateString(undefined, {month: "short", day: "numeric"})),
             axisTick: {show: false}, axisLine: {lineStyle: {color: t.axis}}, axisLabel: {color: t.muted, fontSize: 10}},
     yAxis: {type: "category", data: order.map(i => names[i]), inverse: true, axisTick: {show: false},
-            axisLine: {show: false}, axisLabel: {color: t.ink2, fontSize: 12}},
+            axisLine: {show: false}, axisLabel: {color: t.ink2, fontSize: 12, width: 160, overflow: "truncate"}},
     visualMap: {min: 1, max, orient: "horizontal", left: "center", bottom: 0, itemWidth: 10, itemHeight: 120,
                 inRange: {color: t.seq}, textStyle: {color: t.muted, fontSize: 11}, text: [String(max), "1"]},
     series: [{type: "heatmap", data: pts, itemStyle: {borderColor: t.surface, borderWidth: 2, borderRadius: 2},
