@@ -6,12 +6,13 @@ and no data is sent anywhere.
 """
 import json
 import re
+import sqlite3
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import paths
+from . import paths, topics
 from .times import local
 
 MAX_THEMES = 14
@@ -75,6 +76,30 @@ def auto_themes(titles):
     return {t: r"\b" + re.escape(t) + r"\b" for t in picked}
 
 
+def topic_data(db):
+    """Pieces' topic tags -> the Topics card: the shown topics, and per tagged summary [day, [topic indices]].
+
+    Indices refer to ongoing + bursts, in that order. A search.db built before topics existed has no
+    summary_tags table; that reads as "no topics" until the next `inkvault index`.
+    """
+    try:
+        rows = db.execute("SELECT summary_id, day, tag FROM summary_tags").fetchall()
+    except sqlite3.OperationalError as e:
+        if "no such table" not in str(e):
+            raise
+        return {"ongoing": [], "bursts": []}, []
+    tag_days = defaultdict(list)
+    for _, day, tag in rows:
+        tag_days[tag].append(date.fromisoformat(day))
+    groups = topics.classify(tag_days)
+    pos = {name: i for i, name in enumerate(groups["ongoing"] + groups["bursts"])}
+    per_summary = {}
+    for sid, day, tag in rows:
+        if tag in pos:
+            per_summary.setdefault(sid, [day, []])[1].append(pos[tag])
+    return groups, sorted([day, sorted(found)] for day, found in per_summary.values())
+
+
 def collect(db):
     days = defaultdict(lambda: {"captures": 0, "sessions": 0, "chats": 0, "hours": 0})
     apps, sites = defaultdict(Counter), defaultdict(Counter)
@@ -120,6 +145,8 @@ def collect(db):
         if found:
             docs.append([day, found])
 
+    topic_groups, topic_docs = topic_data(db)
+
     digests = {}
     if paths.digests_db().exists():
         ddb = paths.connect_ro(paths.digests_db())
@@ -132,6 +159,8 @@ def collect(db):
         "apps": {d: dict(c) for d, c in apps.items()},
         "sites": {d: dict(c) for d, c in sites.items()},
         "docs": docs,
+        "topics": topic_groups,
+        "topic_docs": topic_docs,
         "digests": digests,
         "highlights": {d: h[:3] for d, h in highlights.items()},
         "snippets": db.execute("SELECT COUNT(*) FROM snippets").fetchone()[0],
@@ -152,7 +181,9 @@ def build():
     payload = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
     out = paths.dashboard()
     out.write_text(TEMPLATE.read_text(encoding="utf-8").replace("/*DATA*/null", payload), encoding="utf-8")
-    print(f"dashboard: {len(data['days'])} days, {len(data['themes'])} projects, {len(data['digests'])} digests -> {out}")
+    n_topics = len(data["topics"]["ongoing"]) + len(data["topics"]["bursts"])
+    print(f"dashboard: {len(data['days'])} days, {len(data['themes'])} projects, {n_topics} topics, "
+          f"{len(data['digests'])} digests -> {out}")
     return out
 
 

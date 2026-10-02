@@ -354,3 +354,36 @@ def test_tags_land_on_the_users_local_day_not_the_utc_date(vault, monkeypatch):
     db = paths.connect_ro(paths.search_db())
     assert db.execute("SELECT day FROM summary_tags WHERE summary_id='s21'").fetchone() == ("2026-03-01",)
     db.close()
+
+
+def test_dashboard_topics_card_data(vault):
+    from inkvault import dashboard, index, paths
+    week = [f"2026-03-0{d}T12:00:00Z" for d in range(2, 9)]  # 7 sessions in one week: a burst
+    add_tagged_summaries({"t1": "Harbor Launch", "t2": "rare"},
+                         [(f"s{30 + n}", ts, ["t1"] + (["t2"] if n == 0 else [])) for n, ts in enumerate(week)])
+    index.build()
+    db = paths.connect_ro(paths.search_db())
+    data = dashboard.collect(db)
+    db.close()
+    assert data["topics"] == {"ongoing": [], "bursts": ["harbor launch"]}
+    assert len(data["topic_docs"]) == 7 and all(found == [0] for _, found in data["topic_docs"])
+    assert [day for day, _ in data["topic_docs"]] == sorted(day for day, _ in data["topic_docs"])
+    html = dashboard.build().read_text(encoding="utf-8")
+    assert '"bursts":["harbor launch"]' in html and "/*DATA*/null" not in html
+
+
+def test_dashboard_without_tags_or_with_an_old_index_has_no_topics(vault):
+    import sqlite3
+    from inkvault import dashboard, index, paths
+    index.build()
+    db = paths.connect_ro(paths.search_db())
+    assert dashboard.topic_data(db) == ({"ongoing": [], "bursts": []}, [])  # the vault has no tags
+    db.close()
+    rw = sqlite3.connect(paths.search_db())
+    rw.execute("DROP TABLE summary_tags")  # as built by InkVault 0.1.x
+    rw.commit()
+    rw.close()
+    db = paths.connect_ro(paths.search_db())
+    assert dashboard.collect(db)["topics"] == {"ongoing": [], "bursts": []}
+    db.close()
+    assert dashboard.build() is not None
