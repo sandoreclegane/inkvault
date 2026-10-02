@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased (0.2.0)
+
+- **Topics over time** on the Memory Atlas: Pieces' own topic tags on your session summaries, in two groups:
+  *ongoing* (recurring across months) and *bursts* (concentrated in a few weeks). Tags that differ only in case,
+  hyphens or spacing are merged. Built by the next `inkvault index`; until then the card stays hidden. Idea from
+  Anthony at Pieces.
+- `inkvault nightly`: the export's time budget is computed from elapsed time, fixing an intermittent off-by-a-hair
+  budget on Windows.
+
 ## 0.1.1
 
 - Scheduling is tested end to end on Windows. On macOS and Linux it is covered by automated tests only so far;

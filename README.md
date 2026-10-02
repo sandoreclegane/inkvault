@@ -26,7 +26,8 @@ a dashboard of what you have. Run the same command again later and it picks up w
 - **Search for your AI tools**: an MCP server with `search_memories` (keyword + meaning, merged), `timeline`
   ("what was I doing in March?"), `get_memory`, and `memory_stats`.
 - **Memory Atlas**: a dashboard of your year. Active hours per day (hover a day for what it was about), when you work,
-  how your projects connect, projects over time, top apps and sites. Every chart has a table view.
+  how your projects connect, projects over time, topics over time (from Pieces' own topic tags: ongoing interests
+  and short bursts), top apps and sites. Every chart has a table view.
 - **Daily digests** (optional): a 2-3 sentence summary of each day, written by a *local* model through
   [Ollama](https://ollama.com). Pieces stopped writing summaries; this picks up where it left off.
 
@@ -132,6 +133,9 @@ with `inkvault index`.
 - **Your projects** on the dashboard are detected from recurring phrases in your session titles. To choose your own,
   create `themes.txt` in your InkVault folder with lines like `Website = website|landing page|stripe` and run
   `inkvault dashboard`.
+- **Topics** come from the topic tags Pieces wrote on each session summary. *Ongoing* topics recur across months;
+  *bursts* are concentrated in a few weeks. They appear after the next `inkvault index` (part of `rescue` and the
+  nightly run). Thanks to Anthony at Pieces for the idea.
 - **PiecesOS port**: InkVault reads the port PiecesOS saved in its own config (`.port.txt`), then the port that worked
   last time, then tries 39300 and 1000. To force a port, set `INKVAULT_PIECES_PORTS` or pass `--pieces-ports`
   (for the nightly run: `inkvault --pieces-ports 39301 schedule`).
