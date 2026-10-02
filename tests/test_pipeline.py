@@ -386,4 +386,19 @@ def test_dashboard_without_tags_or_with_an_old_index_has_no_topics(vault):
     db = paths.connect_ro(paths.search_db())
     assert dashboard.collect(db)["topics"] == {"ongoing": [], "bursts": []}
     db.close()
-    assert dashboard.build() is not None
+    assert '"topics":{"ongoing":[],"bursts":[]}' in dashboard.build().read_text(encoding="utf-8")
+
+
+def test_topic_docs_index_ongoing_then_bursts():
+    import sqlite3
+    from inkvault import dashboard
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE summary_tags (summary_id TEXT, day TEXT, tag TEXT)")
+    steady = [(f"m{n}", f"2026-0{n}-05", "steady") for n in range(1, 7)]       # one a month, Jan-Jun: ongoing
+    sprint = [(f"w{n}", f"2026-08-0{n}", "sprint") for n in range(1, 7)]       # six in one week: a burst
+    db.executemany("INSERT INTO summary_tags VALUES (?,?,?)", steady + sprint + [("w1", "2026-08-01", "steady")])
+    groups, docs = dashboard.topic_data(db)
+    assert groups == {"ongoing": ["steady"], "bursts": ["sprint"]}
+    assert ["2026-01-05", [0]] in docs and ["2026-08-02", [1]] in docs
+    assert ["2026-08-01", [0, 1]] in docs  # a summary with both topics
+    assert len(docs) == 12
