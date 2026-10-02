@@ -18,7 +18,8 @@ def normalize(text):
 
 
 def peak_share(days):
-    """Largest share of the dates that fit in one WINDOW_DAYS-day span (first and last at most WINDOW_DAYS-1 apart)."""
+    """Largest share of the dates falling in any one WINDOW_DAYS-day span (inclusive). Needs at least one date;
+    classify only calls it with MIN_SESSIONS or more."""
     ds = sorted(days)
     best = start = 0
     for end, d in enumerate(ds):

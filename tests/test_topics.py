@@ -20,6 +20,7 @@ def test_normalize_merges_case_punctuation_and_spacing():
 def test_peak_window_is_21_days_inclusive():
     assert topics.peak_share([D0, D0 + timedelta(days=20)]) == 1.0
     assert topics.peak_share([D0, D0 + timedelta(days=21)]) == 0.5
+    assert topics.peak_share([D0 + timedelta(days=20), D0]) == 1.0  # input order doesn't matter
 
 
 def test_several_summaries_on_one_day_count_separately():
@@ -56,6 +57,9 @@ def test_in_between_and_too_rare_tags_are_dropped():
 def test_groups_are_capped_and_ordered_by_count_then_name():
     tags = {f"t{i:02}": every(6 + i % 3, 1) for i in range(20)}
     got = topics.classify(tags)["bursts"]
-    assert len(got) == topics.MAX_PER_GROUP
-    assert got[:3] == ["t02", "t05", "t08"]  # 8 sessions each, alphabetical
-    assert got == sorted(got, key=lambda t: (-len(tags[t]), t))
+    # 8 sessions first, then 7; alphabetical within each; capped at 12
+    assert got == ["t02", "t05", "t08", "t11", "t14", "t17", "t01", "t04", "t07", "t10", "t13", "t16"]
+
+
+def test_exactly_min_sessions_counts():
+    assert topics.classify({"six": every(6, 1)})["bursts"] == ["six"]
