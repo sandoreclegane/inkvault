@@ -419,8 +419,11 @@ function render() {
     `Built ${DATA.built} by InkVault from your local vault. Nothing on this page was sent anywhere.`;
 }
 
+// Keep both ends inside the vault's days: clamping only from-up and to-down could leave a range picked wholly
+// before (or after) the data backwards, e.g. Nov 11 -> Nov 3.
+const clampDay = d => d < FIRST ? FIRST : d > LAST ? LAST : d;
 function setRange(from, to, preset) {
-  range = {from: from < FIRST ? FIRST : from, to: to > LAST ? LAST : to};
+  range = {from: clampDay(from), to: clampDay(to)};
   document.getElementById("from").value = range.from;
   document.getElementById("to").value = range.to;
   document.querySelectorAll("[data-range]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.range === preset)));
@@ -432,6 +435,7 @@ const presets = {
   365: () => [addDays(LAST, -364), LAST],
 };
 document.querySelectorAll("[data-range]").forEach(b => b.addEventListener("click", () => setRange(...presets[b.dataset.range](), b.dataset.range)));
+for (const id of ["from", "to"]) Object.assign(document.getElementById(id), {min: FIRST, max: LAST});
 for (const id of ["from", "to"]) document.getElementById(id).addEventListener("change", () => {
   const f = document.getElementById("from").value, t = document.getElementById("to").value;
   if (f && t && f <= t) setRange(f, t, null);
