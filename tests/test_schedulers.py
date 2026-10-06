@@ -189,7 +189,7 @@ def test_linux_remove_deletes_units_even_without_systemctl(lin, monkeypatch):
 
 
 def test_get_crontab_error_handling(lin, monkeypatch):
-    fake_run(monkeypatch, lin, {("crontab", "-l"): proc(1, err="no crontab for tmatt")})
+    fake_run(monkeypatch, lin, {("crontab", "-l"): proc(1, err="no crontab for alex")})
     assert lin.get_crontab() == ""
     fake_run(monkeypatch, lin, {("crontab", "-l"): proc(0, out="0 9 * * 1 x\n")})
     assert lin.get_crontab() == "0 9 * * 1 x\n"
@@ -236,7 +236,7 @@ def test_windows_wake_check_is_language_independent():
 
 
 def test_get_crontab_busybox_no_crontab(lin, monkeypatch):
-    fake_run(monkeypatch, lin, {("crontab", "-l"): proc(1, err="cat: can't open 'tmatt': No such file or directory")})
+    fake_run(monkeypatch, lin, {("crontab", "-l"): proc(1, err="cat: can't open 'alex': No such file or directory")})
     assert lin.get_crontab() == ""
 
 
