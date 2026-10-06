@@ -80,7 +80,7 @@ On the real vault these thresholds give 64 ongoing and 109 burst tags before the
 ```
 
 - Topic indices refer to the combined list `ongoing + bursts`, in that order.
-- Each summary's day is `times.local(created).date().isoformat()`, computed here. A timestamp that won't parse leaves that summary out of the topics; it doesn't fail the build.
+- Each summary's day is `times.local(created).date().isoformat()`, computed here. A timestamp that won't parse leaves that summary out of the topics rather than failing topic collection. (The rest of `collect()`, which predates this feature, still stops on such a timestamp; making the whole dashboard tolerate one is a separate change.)
 - One `topic_docs` entry per summary that has at least one shown topic. This is the same shape as `docs`, so week counting on the page works the same.
 - If `search.db` has no `summary_tags` table (an index built by an older InkVault), both keys are empty and nothing fails. The next `inkvault index` adds the table.
 - The `build()` summary line adds the topic count, e.g. `... 14 projects, 24 topics, 299 digests -> ...`.
@@ -107,7 +107,7 @@ Export, `themes.txt`, Projects detection, search, the MCP server, digests and th
 | Vault with no tag records, or no summaries | Topics card hidden |
 | Tag id on a summary with no matching tag record, blank text, or text that isn't a string | Skipped |
 | Summary without a created time | Skipped |
-| Summary whose created time won't parse | Still indexed for search; left out of topics |
+| Summary whose created time won't parse | Still indexed for search; left out of topics (the dashboard's older session counting still stops on it, as on main) |
 | Time zone changes after indexing | Topic days follow the current zone, like the rest of the page |
 | Same tag twice on one summary (after normalizing) | Counted once |
 | One group empty | Only the other group is drawn |
