@@ -32,14 +32,14 @@ Tags in neither group are not shown. Classification is done in Python when the d
 `build()` adds one table to `search.db`:
 
 ```sql
-CREATE TABLE summary_tags (summary_id TEXT, day TEXT, tag TEXT);
+CREATE TABLE summary_tags (summary_id TEXT, created TEXT, tag TEXT);
 CREATE INDEX summary_tags_tag ON summary_tags(tag);
 ```
 
 - One row per (summary, normalized tag). A summary lists each normalized tag at most once.
-- Tag text comes from the summary's `tags.indices` keys, looked up in the `tag` raw records by id. Missing ids and blank texts are skipped.
-- `normalize(text)`: lowercase, strip, and collapse every run of whitespace, `-` and `_` into one space. So `Work-Life-Balance`, `work_life balance` and `work life  balance` are all `work life balance`.
-- `day` is the summary's created time converted with `times.local(...).date().isoformat()`, the same local day the dashboard uses. Summaries without a created time are skipped.
+- Tag text comes from the summary's `tags.indices` keys, looked up in the `tag` raw records by id. Missing ids, blank texts and texts that aren't strings (numbers, lists, ...) are skipped; a malformed tag must never stop the search index from building.
+- `normalize(text)`: lowercase, strip, and collapse every run of whitespace, `-` and `_` into one space. So `Work-Life-Balance`, `work_life balance` and `work life  balance` are all `work life balance`. Non-strings give `""`.
+- `created` is the summary's timestamp as recorded (UTC). It is not turned into a day here: the dashboard picks the local day when it builds, like every other day it counts, so the two never disagree after a time-zone change (travel, a vault moved to another machine). Indexing never parses timestamps, so a malformed one can't break it. Summaries without a created time are skipped. (Changed after review on 2026-10-06; the first version stored a local `day`.)
 - No migration: `search.db` is rebuilt from scratch on every `index` run.
 
 ### 2. Classification (new `topics.py`)
@@ -80,6 +80,7 @@ On the real vault these thresholds give 64 ongoing and 109 burst tags before the
 ```
 
 - Topic indices refer to the combined list `ongoing + bursts`, in that order.
+- Each summary's day is `times.local(created).date().isoformat()`, computed here. A timestamp that won't parse leaves that summary out of the topics; it doesn't fail the build.
 - One `topic_docs` entry per summary that has at least one shown topic. This is the same shape as `docs`, so week counting on the page works the same.
 - If `search.db` has no `summary_tags` table (an index built by an older InkVault), both keys are empty and nothing fails. The next `inkvault index` adds the table.
 - The `build()` summary line adds the topic count, e.g. `... 14 projects, 24 topics, 299 digests -> ...`.
@@ -88,8 +89,8 @@ On the real vault these thresholds give 64 ongoing and 109 burst tags before the
 
 - New card **Topics over time**, directly after **Projects over time**, with `data-table="topics"`.
 - Description: *Pieces' own topic tags on your sessions. Ongoing topics recur across months; bursts are concentrated in a few weeks. Each group has its own color scale.* (Separate scales are deliberate: ongoing topics recur at low weekly counts, and a shared scale would wash them out.)
-- Long topic names are truncated on the axis (`width: 160, overflow: "truncate"`); the tooltip shows the full name.
-- The weekly heatmap drawing in `renderThemes` moves into a shared helper used by both cards (rows, weeks, colors, tooltip, table). The Projects card must look and behave exactly as before.
+- Long names are truncated on the axis (`width: 160, overflow: "truncate"`); the tooltip shows the full name.
+- The weekly heatmap drawing in `renderThemes` moves into a shared helper used by both cards (rows, weeks, colors, tooltip, table). The Projects card must look and behave as before, with one deliberate exception: the truncation above applies to Projects too, because the helper is shared and a long name would otherwise spill out of the label column.
 - The card holds two heatmaps drawn by the shared helper, each under a small heading: **Ongoing** first, then **Bursts**. Both use the same weeks on the x-axis so they line up.
 - Date range, light/dark theme and the "show as table" toggle work as for Projects. The table has a Group column.
 - If `topics` is empty in both groups, the card is hidden (not shown empty). If one group is empty, only the other is drawn. If the selected range has no tagged sessions, the card says *No tagged sessions in this range*.
@@ -104,8 +105,10 @@ Export, `themes.txt`, Projects detection, search, the MCP server, digests and th
 | Case | Behavior |
 |---|---|
 | Vault with no tag records, or no summaries | Topics card hidden |
-| Tag id on a summary with no matching tag record, or blank text | Skipped |
+| Tag id on a summary with no matching tag record, blank text, or text that isn't a string | Skipped |
 | Summary without a created time | Skipped |
+| Summary whose created time won't parse | Still indexed for search; left out of topics |
+| Time zone changes after indexing | Topic days follow the current zone, like the rest of the page |
 | Same tag twice on one summary (after normalizing) | Counted once |
 | One group empty | Only the other group is drawn |
 | Selected date range has no tagged sessions | Message in the card instead of a chart |

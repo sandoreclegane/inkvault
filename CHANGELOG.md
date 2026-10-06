@@ -6,6 +6,7 @@
   *ongoing* (recurring across months) and *bursts* (concentrated in a few weeks). Tags that differ only in case,
   hyphens or spacing are merged. Built by the next `inkvault index`; until then the card stays hidden. Idea from
   Anthony at Pieces.
+- Long names on the Projects and Topics heatmaps are shortened with "…"; hover a cell for the full name.
 - `inkvault nightly`: the export's time budget is computed from elapsed time, fixing an intermittent off-by-a-hair
   budget on Windows.
 
