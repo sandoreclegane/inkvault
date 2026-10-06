@@ -8,7 +8,6 @@ import os
 import sqlite3
 
 from . import embed, paths, topics
-from .times import local
 
 
 def indices(obj, key):
@@ -40,7 +39,7 @@ def build():
         CREATE TABLE summaries (id TEXT PRIMARY KEY, created TEXT, name TEXT, text TEXT, event_ids TEXT);
         CREATE TABLE messages (id TEXT PRIMARY KEY, created TEXT, conversation_id TEXT, conversation_name TEXT, role TEXT, text TEXT);
         CREATE TABLE snippets (id TEXT PRIMARY KEY, created TEXT, name TEXT, language TEXT, text TEXT);
-        CREATE TABLE summary_tags (summary_id TEXT, day TEXT, tag TEXT);
+        CREATE TABLE summary_tags (summary_id TEXT, created TEXT, tag TEXT);
     """)
 
     db.executemany("INSERT INTO events VALUES (?,?,?,?,?,?)",
@@ -55,11 +54,11 @@ def build():
         text = "\n\n".join(annotations[a] for a in indices(s, "annotations") if annotations.get(a))
         db.execute("INSERT INTO summaries VALUES (?,?,?,?,?)", (
             s["id"], created, s.get("name"), text, json.dumps(indices(s, "events"))))
-        # Pieces' topic tags: normalized, once per summary, on the user's local day (the day the dashboard counts).
+        # Pieces' topic tags: normalized, once per summary. The timestamp is kept as recorded; the dashboard picks
+        # the local day when it builds, like every other day it counts (so a time-zone change needs no re-index).
         tags = {tag_texts.get(i) for i in indices(s, "tags")} - {None, ""}
         if created and tags:
-            day = local(created).date().isoformat()
-            db.executemany("INSERT INTO summary_tags VALUES (?,?,?)", ((s["id"], day, t) for t in sorted(tags)))
+            db.executemany("INSERT INTO summary_tags VALUES (?,?,?)", ((s["id"], created, t) for t in sorted(tags)))
     for m in raws("message"):
         conv = (m.get("conversation") or {}).get("id")
         text = (((m.get("fragment") or {}).get("string") or {}).get("raw")) or ""

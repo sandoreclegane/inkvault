@@ -331,29 +331,56 @@ def add_tagged_summaries(tags, summaries):
     db.close()
 
 
+def fixed_zone(monkeypatch, module, hours):
+    """Make `module.local` convert into a fixed UTC offset, so day tests run the same on any machine (CI is UTC)."""
+    from datetime import datetime, timedelta, timezone
+    zone = timezone(timedelta(hours=hours))
+    monkeypatch.setattr(module, "local", lambda ts: datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(zone))
+
+
+def topic_db(rows):
+    """An in-memory search.db holding just summary_tags rows (summary_id, created, tag)."""
+    import sqlite3
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE summary_tags (summary_id TEXT, created TEXT, tag TEXT)")
+    db.executemany("INSERT INTO summary_tags VALUES (?,?,?)", rows)
+    return db
+
+
 def test_index_stores_each_summarys_normalized_tags_once(vault):
     from inkvault import index, paths
-    from inkvault.times import local
     add_tagged_summaries({"t1": "Stripe-Integration", "t2": "stripe integration ", "t3": "   ", "t4": "Billing"},
                          [("s20", "2026-03-02T00:30:00Z", ["t1", "t2", "t3", "t4", "missing"])])
     index.build()
     db = paths.connect_ro(paths.search_db())
-    rows = db.execute("SELECT summary_id, day, tag FROM summary_tags ORDER BY tag").fetchall()
+    rows = db.execute("SELECT summary_id, created, tag FROM summary_tags ORDER BY tag").fetchall()
     db.close()
-    day = local("2026-03-02T00:30:00Z").date().isoformat()  # the user's local day, not the UTC date
-    assert rows == [("s20", day, "billing"), ("s20", day, "stripe integration")]
+    ts = "2026-03-02T00:30:00Z"  # stored as recorded; the dashboard picks the local day when it builds
+    assert rows == [("s20", ts, "billing"), ("s20", ts, "stripe integration")]
 
 
-def test_tags_land_on_the_users_local_day_not_the_utc_date(vault, monkeypatch):
-    from datetime import datetime, timedelta, timezone
-    from inkvault import index, paths
-    utc_minus_8 = timezone(timedelta(hours=-8))  # a fixed zone, so this runs the same on any machine (CI is UTC)
-    monkeypatch.setattr(index, "local", lambda ts: datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(utc_minus_8))
-    add_tagged_summaries({"t1": "Billing"}, [("s21", "2026-03-02T00:30:00Z", ["t1"])])
-    index.build()
+def test_malformed_tags_and_timestamps_never_stop_the_search_index(vault):
+    from inkvault import dashboard, index, paths, server
+    add_tagged_summaries({"num": 123, "list": ["x"], "obj": {"a": 1}, "flag": True, "t1": "Billing"},
+                         [("s40", "bad timestamp", ["t1"]), ("s41", "2026-03-02T12:00:00Z", ["num", "list", "t1"])])
+    assert index.build()
+    assert "[summaries] s40" in server.search_memories("s40", mode="keyword")
     db = paths.connect_ro(paths.search_db())
-    assert db.execute("SELECT day FROM summary_tags WHERE summary_id='s21'").fetchone() == ("2026-03-01",)
+    assert db.execute("SELECT summary_id, tag FROM summary_tags ORDER BY summary_id").fetchall() == \
+        [("s40", "billing"), ("s41", "billing")]
+    assert dashboard.topic_data(db) == ({"ongoing": [], "bursts": []}, [])  # the bad timestamp is skipped, not fatal
     db.close()
+
+
+def test_topics_use_the_local_day_when_the_dashboard_is_built(monkeypatch):
+    from inkvault import dashboard
+    rows = [(f"s{d}", f"2026-03-0{d}T00:30:00Z", "night") for d in range(2, 8)]  # 6 sessions just after UTC midnight
+    fixed_zone(monkeypatch, dashboard, -8)
+    groups, docs = dashboard.topic_data(topic_db(rows))
+    assert groups["bursts"] == ["night"]
+    assert [day for day, _ in docs] == [f"2026-03-0{d}" for d in range(1, 7)]  # the evening before, in UTC-8
+    fixed_zone(monkeypatch, dashboard, 5.5)  # same index, viewed after moving: the days follow, no re-index needed
+    assert [day for day, _ in dashboard.topic_data(topic_db(rows))[1]] == [f"2026-03-0{d}" for d in range(2, 8)]
 
 
 def test_dashboard_topics_card_data(vault):
@@ -389,15 +416,12 @@ def test_dashboard_without_tags_or_with_an_old_index_has_no_topics(vault):
     assert '"topics":{"ongoing":[],"bursts":[]}' in dashboard.build().read_text(encoding="utf-8")
 
 
-def test_topic_docs_index_ongoing_then_bursts():
-    import sqlite3
+def test_topic_docs_index_ongoing_then_bursts(monkeypatch):
     from inkvault import dashboard
-    db = sqlite3.connect(":memory:")
-    db.execute("CREATE TABLE summary_tags (summary_id TEXT, day TEXT, tag TEXT)")
-    steady = [(f"m{n}", f"2026-0{n}-05", "steady") for n in range(1, 7)]       # one a month, Jan-Jun: ongoing
-    sprint = [(f"w{n}", f"2026-08-0{n}", "sprint") for n in range(1, 7)]       # six in one week: a burst
-    db.executemany("INSERT INTO summary_tags VALUES (?,?,?)", steady + sprint + [("w1", "2026-08-01", "steady")])
-    groups, docs = dashboard.topic_data(db)
+    fixed_zone(monkeypatch, dashboard, 0)
+    steady = [(f"m{n}", f"2026-0{n}-05T12:00:00Z", "steady") for n in range(1, 7)]  # one a month, Jan-Jun: ongoing
+    sprint = [(f"w{n}", f"2026-08-0{n}T12:00:00Z", "sprint") for n in range(1, 7)]  # six in one week: a burst
+    groups, docs = dashboard.topic_data(topic_db(steady + sprint + [("w1", "2026-08-01T12:00:00Z", "steady")]))
     assert groups == {"ongoing": ["steady"], "bursts": ["sprint"]}
     assert ["2026-01-05", [0]] in docs and ["2026-08-02", [1]] in docs
     assert ["2026-08-01", [0, 1]] in docs  # a summary with both topics

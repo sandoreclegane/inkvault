@@ -79,15 +79,25 @@ def auto_themes(titles):
 def topic_data(db):
     """Pieces' topic tags -> the Topics card: the shown topics, and per tagged summary [day, [topic indices]].
 
-    Indices refer to ongoing + bursts, in that order. A search.db built before topics existed has no
+    Indices refer to ongoing + bursts, in that order. Days are local, worked out here like every other day on the
+    page; a timestamp that won't parse just leaves that summary out. A search.db built before topics existed has no
     summary_tags table; that reads as "no topics" until the next `inkvault index`.
     """
     try:
-        rows = db.execute("SELECT summary_id, day, tag FROM summary_tags").fetchall()
+        stored = db.execute("SELECT summary_id, created, tag FROM summary_tags").fetchall()
     except sqlite3.OperationalError as e:
         if "no such table" not in str(e):
             raise
         return {"ongoing": [], "bursts": []}, []
+    days, rows = {}, []
+    for sid, created, tag in stored:
+        if sid not in days:
+            try:
+                days[sid] = local(created).date().isoformat()
+            except (TypeError, ValueError):
+                days[sid] = None
+        if days[sid]:
+            rows.append((sid, days[sid], tag))
     tag_days = defaultdict(list)
     for _, day, tag in rows:
         tag_days[tag].append(date.fromisoformat(day))

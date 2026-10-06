@@ -14,7 +14,9 @@ MAX_PER_GROUP = 12
 
 def normalize(text):
     """'Work-Life-Balance', 'work_life  balance' -> 'work life balance'."""
-    return re.sub(r"[\s_-]+", " ", (text or "").lower()).strip()
+    if not isinstance(text, str):
+        return ""  # a malformed record (number, list, ...) is no topic, and must never stop indexing
+    return re.sub(r"[\s_-]+", " ", text.lower()).strip()
 
 
 def peak_share(days):

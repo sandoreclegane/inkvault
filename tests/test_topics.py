@@ -17,6 +17,10 @@ def test_normalize_merges_case_punctuation_and_spacing():
     assert topics.normalize("") == "" and topics.normalize(None) == "" and topics.normalize(" - ") == ""
 
 
+def test_normalize_ignores_text_that_is_not_a_string():
+    assert [topics.normalize(v) for v in [123, True, ["x"], {"a": 1}]] == ["", "", "", ""]
+
+
 def test_peak_window_is_21_days_inclusive():
     assert topics.peak_share([D0, D0 + timedelta(days=20)]) == 1.0
     assert topics.peak_share([D0, D0 + timedelta(days=21)]) == 0.5
