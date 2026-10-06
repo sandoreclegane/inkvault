@@ -1,12 +1,16 @@
 # Changelog
 
-## Unreleased (0.2.0)
+## 0.1.2
 
 - **Topics over time** on the Memory Atlas: Pieces' own topic tags on your session summaries, in two groups:
   *ongoing* (recurring across months) and *bursts* (concentrated in a few weeks). Tags that differ only in case,
   hyphens or spacing are merged. Built by the next `inkvault index`; until then the card stays hidden. Idea from
   Anthony at Pieces.
 - Long names on the Projects and Topics heatmaps are shortened with "…"; hover a cell for the full name.
+- Dashboard weeks are right in every time zone. From UTC+13 on (New Zealand in summer, Tonga, Kiribati) they were
+  shifted by a day and some heatmap counts went missing.
+- A custom date range picked wholly before or after your data no longer comes out backwards; the date pickers stay
+  within your data's first and last day.
 - `inkvault nightly`: the export's time budget is computed from elapsed time, fixing an intermittent off-by-a-hair
   budget on Windows.
 
