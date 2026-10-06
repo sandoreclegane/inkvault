@@ -7,7 +7,7 @@ import json
 import os
 import sqlite3
 
-from . import embed, paths
+from . import embed, paths, topics
 
 
 def indices(obj, key):
@@ -39,6 +39,7 @@ def build():
         CREATE TABLE summaries (id TEXT PRIMARY KEY, created TEXT, name TEXT, text TEXT, event_ids TEXT);
         CREATE TABLE messages (id TEXT PRIMARY KEY, created TEXT, conversation_id TEXT, conversation_name TEXT, role TEXT, text TEXT);
         CREATE TABLE snippets (id TEXT PRIMARY KEY, created TEXT, name TEXT, language TEXT, text TEXT);
+        CREATE TABLE summary_tags (summary_id TEXT, created TEXT, tag TEXT);
     """)
 
     db.executemany("INSERT INTO events VALUES (?,?,?,?,?,?)",
@@ -47,10 +48,17 @@ def build():
     # A summary's text lives in its annotations; a chat message's conversation has the name.
     annotations = {a["id"]: a.get("text") or "" for a in raws("annotation")}
     conv_names = {c["id"]: c.get("name") or "" for c in raws("conversation")}
+    tag_texts = {t["id"]: topics.normalize(t.get("text")) for t in raws("tag")}
     for s in raws("summary"):
+        created = (s.get("created") or {}).get("value")
         text = "\n\n".join(annotations[a] for a in indices(s, "annotations") if annotations.get(a))
         db.execute("INSERT INTO summaries VALUES (?,?,?,?,?)", (
-            s["id"], (s.get("created") or {}).get("value"), s.get("name"), text, json.dumps(indices(s, "events"))))
+            s["id"], created, s.get("name"), text, json.dumps(indices(s, "events"))))
+        # Pieces' topic tags: normalized, once per summary. The timestamp is kept as recorded; the dashboard picks
+        # the local day when it builds, like every other day it counts (so a time-zone change needs no re-index).
+        tags = {tag_texts.get(i) for i in indices(s, "tags")} - {None, ""}
+        if created and tags:
+            db.executemany("INSERT INTO summary_tags VALUES (?,?,?)", ((s["id"], created, t) for t in sorted(tags)))
     for m in raws("message"):
         conv = (m.get("conversation") or {}).get("id")
         text = (((m.get("fragment") or {}).get("string") or {}).get("raw")) or ""
@@ -72,6 +80,7 @@ def build():
         CREATE INDEX summaries_created ON summaries(created);
         CREATE INDEX messages_created ON messages(created);
         CREATE INDEX snippets_created ON snippets(created);
+        CREATE INDEX summary_tags_tag ON summary_tags(tag);
     """)
     db.commit()
     counts = {t: db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("events", "summaries", "messages", "snippets")}

@@ -317,3 +317,112 @@ def test_status_says_when_the_last_export_was_partial(tmp_path, monkeypatch, cap
     monkeypatch.setattr(export.PiecesOS, "find", staticmethod(lambda: (None, None)))
     assert cli.main(["status"]) == 0
     assert "(partial; continues next run)" in capsys.readouterr().out
+
+
+def add_tagged_summaries(tags, summaries):
+    """Extra tag records and summaries for the topic tests. tags: {id: text}; summaries: [(id, created, [tag ids])]."""
+    from inkvault import export
+    db = export.open_vault()
+    db.executemany("INSERT INTO raw_records VALUES (?,?,?)",
+                   [rec("tag", i, text=text) for i, text in tags.items()] +
+                   [rec("summary", sid, name=f"Session {sid}", created={"value": created},
+                        tags={"indices": {t: n for n, t in enumerate(ids)}}) for sid, created, ids in summaries])
+    db.commit()
+    db.close()
+
+
+def fixed_zone(monkeypatch, module, hours):
+    """Make `module.local` convert into a fixed UTC offset, so day tests run the same on any machine (CI is UTC)."""
+    from datetime import datetime, timedelta, timezone
+    zone = timezone(timedelta(hours=hours))
+    monkeypatch.setattr(module, "local", lambda ts: datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(zone))
+
+
+def topic_db(rows):
+    """An in-memory search.db holding just summary_tags rows (summary_id, created, tag)."""
+    import sqlite3
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE summary_tags (summary_id TEXT, created TEXT, tag TEXT)")
+    db.executemany("INSERT INTO summary_tags VALUES (?,?,?)", rows)
+    return db
+
+
+def test_index_stores_each_summarys_normalized_tags_once(vault):
+    from inkvault import index, paths
+    add_tagged_summaries({"t1": "Stripe-Integration", "t2": "stripe integration ", "t3": "   ", "t4": "Billing"},
+                         [("s20", "2026-03-02T00:30:00Z", ["t1", "t2", "t3", "t4", "missing"])])
+    index.build()
+    db = paths.connect_ro(paths.search_db())
+    rows = db.execute("SELECT summary_id, created, tag FROM summary_tags ORDER BY tag").fetchall()
+    db.close()
+    ts = "2026-03-02T00:30:00Z"  # stored as recorded; the dashboard picks the local day when it builds
+    assert rows == [("s20", ts, "billing"), ("s20", ts, "stripe integration")]
+
+
+def test_malformed_tags_and_timestamps_never_stop_the_search_index(vault):
+    from inkvault import dashboard, index, paths, server
+    add_tagged_summaries({"num": 123, "list": ["x"], "obj": {"a": 1}, "flag": True, "t1": "Billing"},
+                         [("s40", "bad timestamp", ["t1"]), ("s41", "2026-03-02T12:00:00Z", ["num", "list", "t1"])])
+    assert index.build()
+    assert "[summaries] s40" in server.search_memories("s40", mode="keyword")
+    db = paths.connect_ro(paths.search_db())
+    assert db.execute("SELECT summary_id, tag FROM summary_tags ORDER BY summary_id").fetchall() == \
+        [("s40", "billing"), ("s41", "billing")]
+    assert dashboard.topic_data(db) == ({"ongoing": [], "bursts": []}, [])  # the bad timestamp is skipped, not fatal
+    db.close()
+
+
+def test_topics_use_the_local_day_when_the_dashboard_is_built(monkeypatch):
+    from inkvault import dashboard
+    rows = [(f"s{d}", f"2026-03-0{d}T00:30:00Z", "night") for d in range(2, 8)]  # 6 sessions just after UTC midnight
+    fixed_zone(monkeypatch, dashboard, -8)
+    groups, docs = dashboard.topic_data(topic_db(rows))
+    assert groups["bursts"] == ["night"]
+    assert [day for day, _ in docs] == [f"2026-03-0{d}" for d in range(1, 7)]  # the evening before, in UTC-8
+    fixed_zone(monkeypatch, dashboard, 5.5)  # same index, viewed after moving: the days follow, no re-index needed
+    assert [day for day, _ in dashboard.topic_data(topic_db(rows))[1]] == [f"2026-03-0{d}" for d in range(2, 8)]
+
+
+def test_dashboard_topics_card_data(vault):
+    from inkvault import dashboard, index, paths
+    week = [f"2026-03-0{d}T12:00:00Z" for d in range(2, 9)]  # 7 sessions in one week: a burst
+    add_tagged_summaries({"t1": "Harbor Launch", "t2": "rare"},
+                         [(f"s{30 + n}", ts, ["t1"] + (["t2"] if n == 0 else [])) for n, ts in enumerate(week)])
+    index.build()
+    db = paths.connect_ro(paths.search_db())
+    data = dashboard.collect(db)
+    db.close()
+    assert data["topics"] == {"ongoing": [], "bursts": ["harbor launch"]}
+    assert len(data["topic_docs"]) == 7 and all(found == [0] for _, found in data["topic_docs"])
+    assert [day for day, _ in data["topic_docs"]] == sorted(day for day, _ in data["topic_docs"])
+    html = dashboard.build().read_text(encoding="utf-8")
+    assert '"bursts":["harbor launch"]' in html and "/*DATA*/null" not in html
+
+
+def test_dashboard_without_tags_or_with_an_old_index_has_no_topics(vault):
+    import sqlite3
+    from inkvault import dashboard, index, paths
+    index.build()
+    db = paths.connect_ro(paths.search_db())
+    assert dashboard.topic_data(db) == ({"ongoing": [], "bursts": []}, [])  # the vault has no tags
+    db.close()
+    rw = sqlite3.connect(paths.search_db())
+    rw.execute("DROP TABLE summary_tags")  # as built by InkVault 0.1.x
+    rw.commit()
+    rw.close()
+    db = paths.connect_ro(paths.search_db())
+    assert dashboard.collect(db)["topics"] == {"ongoing": [], "bursts": []}
+    db.close()
+    assert '"topics":{"ongoing":[],"bursts":[]}' in dashboard.build().read_text(encoding="utf-8")
+
+
+def test_topic_docs_index_ongoing_then_bursts(monkeypatch):
+    from inkvault import dashboard
+    fixed_zone(monkeypatch, dashboard, 0)
+    steady = [(f"m{n}", f"2026-0{n}-05T12:00:00Z", "steady") for n in range(1, 7)]  # one a month, Jan-Jun: ongoing
+    sprint = [(f"w{n}", f"2026-08-0{n}T12:00:00Z", "sprint") for n in range(1, 7)]  # six in one week: a burst
+    groups, docs = dashboard.topic_data(topic_db(steady + sprint + [("w1", "2026-08-01T12:00:00Z", "steady")]))
+    assert groups == {"ongoing": ["steady"], "bursts": ["sprint"]}
+    assert ["2026-01-05", [0]] in docs and ["2026-08-02", [1]] in docs
+    assert ["2026-08-01", [0, 1]] in docs  # a summary with both topics
+    assert len(docs) == 12

@@ -56,6 +56,7 @@ h1 { font-size: 22px; font-weight: 600; margin: 0 0 2px; }
 .head button { font: inherit; font-size: 12px; color: var(--ink-2); background: none; border: 1px solid var(--ring);
   border-radius: 6px; padding: 3px 8px; cursor: pointer; white-space: nowrap; }
 .chart { width: 100%; }
+.card h3.group { font-size: 13px; font-weight: 600; color: var(--ink-2); margin: 12px 0 0; }
 .multiples { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
 .multiples .mini h3 { font-size: 13px; font-weight: 600; margin: 0; }
 .multiples .mini .total { color: var(--ink-2); font-size: 12px; }
@@ -110,6 +111,15 @@ footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
       <p class="desc">Sessions per week that mention each project, found automatically in your session and chat titles. To choose your own, write <code>Name = pattern</code> lines in <code>themes.txt</code> in your InkVault folder.</p></div>
       <button class="tbl">Show table</button></div>
     <div class="chart" id="themes" style="height:460px"></div>
+  </section>
+
+  <section class="card" data-table="topics" id="topics-card">
+    <div class="head"><div><h2>Topics over time</h2>
+      <p class="desc">Pieces' own topic tags on your sessions. Ongoing topics recur across months; bursts are concentrated in a few weeks. Each group has its own color scale.</p></div>
+      <button class="tbl">Show table</button></div>
+    <div id="topics-ongoing-box"><h3 class="group">Ongoing</h3><div class="chart" id="topics-ongoing"></div></div>
+    <div id="topics-bursts-box"><h3 class="group">Bursts</h3><div class="chart" id="topics-bursts"></div></div>
+    <p class="empty" id="topics-none" hidden>No tagged sessions in this range</p>
   </section>
 
   <section class="card" data-table="sources">
@@ -304,32 +314,67 @@ function renderGraph(t) {
   }, true);
 }
 
-function renderThemes(t) {
+// Sessions per week for each name. docs: [[day, [name indices]]]; only: the indices into names (no duplicates) that may become rows.
+// Rows with no sessions in range are left out; the rest are ordered by total, most first.
+function weeklyGrid(names, docs, only) {
   const weeks = weeksBetween(range.from, range.to);
   const idx = Object.fromEntries(weeks.map((w, i) => [w, i]));
-  const grid = DATA.themes.map(() => new Array(weeks.length).fill(0));
-  for (const [day, th] of themedDocs()) { const w = idx[weekOf(day)]; if (w !== undefined) for (const i of th) grid[i][w]++; }
-  const order = DATA.themes.map((_, i) => i).filter(i => grid[i].some(v => v))
+  const grid = names.map(() => new Array(weeks.length).fill(0));
+  for (const [day, found] of docs) {
+    if (!inRange(day)) continue;
+    const w = idx[weekOf(day)];
+    if (w !== undefined) for (const i of found) grid[i][w]++;
+  }
+  const order = (only || names.map((_, i) => i)).filter(i => grid[i].some(v => v))
     .sort((a, b) => grid[b].reduce((x, y) => x + y) - grid[a].reduce((x, y) => x + y));
+  return {weeks, grid, order};
+}
+
+// One weekly heatmap into #id, sized to its rows. Callers skip it when g.order is empty.
+function drawWeekly(id, names, {weeks, grid, order}, t) {
   const pts = [];
   let max = 1;
   order.forEach((ti, row) => grid[ti].forEach((v, w) => { pts.push([w, row, v || null]); max = Math.max(max, v); }));
-  tables.themes = {head: ["Project", ...weeks.map(w => "wk " + w)], rows: order.map(i => [DATA.themes[i], ...grid[i]])};
-  document.getElementById("themes").style.height = (order.length * 26 + 80) + "px";
-  chart("themes").resize();
-  chart("themes").setOption({
+  document.getElementById(id).style.height = (order.length * 26 + 80) + "px";
+  chart(id).resize();
+  chart(id).setOption({
     tooltip: {...tooltipBase(t), formatter: p => `<b>${fmt(p.value[2] || 0)} sessions</b><br>` +
-              `<span style="color:${t.ink2}">${esc(DATA.themes[order[p.value[1]]])} · week of ${esc(weeks[p.value[0]])}</span>`},
+              `<span style="color:${t.ink2}">${esc(names[order[p.value[1]]])} · week of ${esc(weeks[p.value[0]])}</span>`},
     grid: {top: 8, left: 170, right: 12, bottom: 56},
     xAxis: {type: "category", data: weeks.map(w => new Date(w + "T12:00:00").toLocaleDateString(undefined, {month: "short", day: "numeric"})),
             axisTick: {show: false}, axisLine: {lineStyle: {color: t.axis}}, axisLabel: {color: t.muted, fontSize: 10}},
-    yAxis: {type: "category", data: order.map(i => DATA.themes[i]), inverse: true, axisTick: {show: false},
-            axisLine: {show: false}, axisLabel: {color: t.ink2, fontSize: 12}},
+    yAxis: {type: "category", data: order.map(i => names[i]), inverse: true, axisTick: {show: false},
+            axisLine: {show: false}, axisLabel: {color: t.ink2, fontSize: 12, width: 160, overflow: "truncate"}},
     visualMap: {min: 1, max, orient: "horizontal", left: "center", bottom: 0, itemWidth: 10, itemHeight: 120,
                 inRange: {color: t.seq}, textStyle: {color: t.muted, fontSize: 11}, text: [String(max), "1"]},
     series: [{type: "heatmap", data: pts, itemStyle: {borderColor: t.surface, borderWidth: 2, borderRadius: 2},
               emphasis: {itemStyle: {borderColor: t.ink, borderWidth: 1}}}],
   }, true);
+}
+
+function renderThemes(t) {
+  const g = weeklyGrid(DATA.themes, DATA.docs);
+  tables.themes = {head: ["Project", ...g.weeks.map(w => "wk " + w)], rows: g.order.map(i => [DATA.themes[i], ...g.grid[i]])};
+  drawWeekly("themes", DATA.themes, g, t);
+}
+
+// Pieces' topic tags in two groups. The card is hidden when the vault has none; an empty group is left out.
+function renderTopics(t) {
+  const {ongoing, bursts} = DATA.topics;
+  const names = [...ongoing, ...bursts];
+  document.getElementById("topics-card").hidden = !names.length;
+  let weeks = weeksBetween(range.from, range.to);
+  const rows = [];
+  for (const [key, label, only] of [["ongoing", "Ongoing", ongoing.map((_, i) => i)],
+                                    ["bursts", "Bursts", bursts.map((_, i) => ongoing.length + i)]]) {
+    const g = weeklyGrid(names, DATA.topic_docs, only);
+    weeks = g.weeks;
+    document.getElementById(`topics-${key}-box`).hidden = !g.order.length;
+    if (g.order.length) drawWeekly(`topics-${key}`, names, g, t);
+    rows.push(...g.order.map(i => [label, names[i], ...g.grid[i]]));
+  }
+  document.getElementById("topics-none").hidden = !names.length || rows.length > 0;
+  tables.topics = {head: ["Group", "Topic", ...weeks.map(w => "wk " + w)], rows};
 }
 
 function renderSources(t) {
@@ -414,7 +459,7 @@ function render() {
   document.getElementById("sub").textContent =
     `Everything your vault holds, ${range.from} to ${range.to}. Private: built from files on this PC.`;
   renderTiles();
-  renderCalendar(t); renderRhythm(t); renderGraph(t); renderThemes(t); renderSources(t);
+  renderCalendar(t); renderRhythm(t); renderGraph(t); renderThemes(t); renderTopics(t); renderSources(t);
   renderBars("apps", DATA.apps, t, "App"); renderBars("sites", DATA.sites, t, "Site");
   document.querySelectorAll(".card[data-table]").forEach(renderTableFor);
   document.getElementById("foot").textContent =

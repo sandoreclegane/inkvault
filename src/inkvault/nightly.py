@@ -314,7 +314,9 @@ def backup(today=None):
 def budget_left():
     """Seconds of this run's budget left for waiting and exporting, after keeping BACKUP_MARGIN for what follows."""
     began = run_started if run_started is not None else time.monotonic()
-    return began + RUN_BUDGET - BACKUP_MARGIN - time.monotonic()
+    # Elapsed first: (began + RUN_BUDGET) - now isn't exact in floating point, and Windows' coarse clock often
+    # returns the same reading twice, which made the budget come out a hair over RUN_BUDGET - BACKUP_MARGIN.
+    return RUN_BUDGET - BACKUP_MARGIN - (time.monotonic() - began)
 
 
 def wait_for_pieces(max_wait=None):
