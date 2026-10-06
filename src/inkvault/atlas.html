@@ -146,8 +146,10 @@ const esc = s => String(s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;",
 const fmt = n => n.toLocaleString();
 const compact = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? Math.round(n / 1e3) + "K" : n.toLocaleString();
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-const addDays = (iso, n) => { const d = new Date(iso + "T12:00:00"); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
-const weekOf = iso => { const d = new Date(iso + "T12:00:00"); d.setDate(d.getDate() - (d.getDay() + 6) % 7); return d.toISOString().slice(0, 10); };
+// Day arithmetic on "YYYY-MM-DD" strings, done in UTC so it's pure calendar math in every time zone. (Local noon
+// read back with toISOString() was the previous UTC day from UTC+13 on, e.g. New Zealand in summer.)
+const addDays = (iso, n) => { const d = new Date(iso + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+const weekOf = iso => { const d = new Date(iso + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() - (d.getUTCDay() + 6) % 7); return d.toISOString().slice(0, 10); };
 const bits = m => { let n = 0; for (; m; m &= m - 1) n++; return n; };
 const weeksBetween = (a, b) => { const out = []; for (let w = weekOf(a); w <= b; w = addDays(w, 7)) out.push(w); return out; };
 
