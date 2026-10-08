@@ -1,4 +1,5 @@
 """Claude Code and Codex sessions: what sync keeps, reading only what's new, and the messages index builds."""
+import hashlib
 import json
 import os
 import sqlite3
@@ -365,3 +366,57 @@ def test_codex_compaction_is_kept_but_not_indexed(home):
     sources.sync()
     assert any("Summary of the work so far" in r for (r,) in vault_rows("SELECT raw FROM session_lines"))
     assert "Summary of the work so far" not in [r[5] for r in index_messages()]
+
+
+def test_every_codex_setup_shape_is_taken_off_and_what_follows_is_kept(home):
+    from inkvault import sources
+    codex_file(CODEX_NEW[0],
+               user_item("2026-10-06T09:00:01Z", "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nUse tabs.\n</INSTRUCTIONS>"),
+               user_item("2026-10-06T09:00:02Z", "# AGENTS.md instructions for C:\\work\n\nNo tags, just rules."),
+               user_item("2026-10-06T09:00:03Z", "<recommended_plugins>\n- github\n</recommended_plugins>"),
+               user_item("2026-10-06T09:00:04Z", "<external_codex_apps_open_page>\nurl: x\n</external_codex_apps_open_page>"),
+               user_item("2026-10-06T09:00:05Z", "<browser_context>tab: docs</browser_context>"),
+               user_item("2026-10-06T09:00:06Z", AGENTS + "\n<environment_context>\n<cwd>x</cwd>\n</environment_context>\n"
+                         "Plan the <b>garden</b> layout"))
+    sources.sync()
+    rows = index_messages()
+    assert [r[5] for r in rows] == ["Plan the <b>garden</b> layout"]
+    assert {r[3] for r in rows} == {"Codex · garden: Plan the <b>garden</b> layout"}
+
+
+@pytest.mark.parametrize("echoed", [True, False])
+def test_a_prompt_repeated_in_a_later_turn_is_not_taken_for_its_echo(home, echoed):
+    from inkvault import sources
+    event = {"type": "event_msg", "payload": {"type": "user_message", "message": "run the tests"}}
+    echo = [dict(event, timestamp="2026-10-06T10:01:00Z")] if echoed else []  # the event repeating the item above
+    codex_file(CODEX_NEW[0],
+               user_item("2026-10-06T10:01:00Z", "run the tests"), *echo,
+               reply_item("2026-10-06T10:02:00Z", "All green."),
+               dict(event, timestamp="2026-10-06T11:01:00Z"))  # a new turn that only has an event
+    sources.sync()
+    assert [r[5] for r in index_messages()] == ["run the tests", "All green.", "run the tests"]
+
+
+def test_a_vault_from_the_earlier_format_is_cleaned_once(home):
+    from inkvault import export, sources
+    image = {"type": "input_image", "image_url": "data:image/png;base64,OLDPIXELS"}
+    live = [CODEX_NEW[0], user_item("2026-10-06T09:00:01Z", "look", extra=[image]),
+            {"timestamp": "2026-10-06T10:00:00Z", "type": "compacted", "payload": {"message": "so far"}}]
+    codex_file(*live)
+    db = export.open_vault()  # what the earlier format stored: images kept, compaction skipped, file fully read
+    path = os.path.join(os.environ["CODEX_HOME"], "sessions", "2026", "10", "06", "rollout-cx-1.jsonl")
+    lines = open(path, "rb").read().splitlines(keepends=True)
+    db.execute("INSERT INTO session_lines VALUES ('codex', 'rollout-cx-1.jsonl', ?, ?)",
+               (len(lines[0]), lines[1].decode().rstrip("\n")))
+    db.execute("INSERT INTO session_files VALUES ('codex', 'rollout-cx-1.jsonl', ?, ?)",
+               (os.path.getsize(path), hashlib.sha1(lines[0]).hexdigest()))
+    gone = json.dumps(user_item("2026-01-01T00:00:00Z", "deleted", extra=[image]))  # its file no longer exists
+    db.execute("INSERT INTO session_lines VALUES ('codex', 'rollout-gone.jsonl', 0, ?)", (gone,))
+    db.commit()
+    db.close()
+    sources.sync()
+    stored = "".join(r for (r,) in vault_rows("SELECT raw FROM session_lines"))
+    assert "OLDPIXELS" not in stored
+    assert "so far" in stored  # read again from the start: the compaction an earlier format skipped
+    assert vault_rows("SELECT value FROM meta WHERE key='session_lines_format'") == [(sources.FORMAT,)]
+    assert len(vault_rows("SELECT * FROM session_lines WHERE file='rollout-gone.jsonl'")) == 1

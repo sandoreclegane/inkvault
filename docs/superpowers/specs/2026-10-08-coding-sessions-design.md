@@ -80,13 +80,16 @@ CREATE TABLE session_files (source TEXT NOT NULL, file TEXT NOT NULL, read_to IN
   `<system-reminder>` blocks are removed. Sidechain, `isMeta` and slash-command lines (`<command-…>`,
   `<local-command-…>`) are skipped.
 - Codex text: `response_item` messages are the turns (on 108 real sessions, CLI 0.101 to 0.162, every assistant
-  reply was there). An `event_msg` user or agent message with no matching response item (same role and text, each
-  match used once) is added where it appears, so a file mixing both shapes loses nothing.
-- Codex user text: whole input blocks Codex injects are dropped: `<environment_context>…</environment_context>`,
-  `<user_instructions>…</user_instructions>`, and `# AGENTS.md instructions for …` followed by
-  `<INSTRUCTIONS>…</INSTRUCTIONS>`. An answer to an in-app question
+  reply was there). An `event_msg` user or agent message that repeats a response item (same role and text, in the
+  same turn: nothing of the other role between them, each item used once) is dropped; any other is added where it
+  appears. A file mixing both shapes loses nothing, and a prompt repeated in a later turn isn't taken for an echo.
+- Codex user text: the setup Codex puts in front of what the user typed is taken off, repeatedly, from the start of
+  each input block. That covers wrapped context blocks (`environment_context`, `user_instructions`,
+  `recommended_plugins`, `external_codex_apps_open_page`, and any tag ending in `_context`) and AGENTS.md
+  instructions (`# AGENTS.md instructions`, with or without `for <path>`, up to `</INSTRUCTIONS>` when that tag is
+  there, else the whole block). Whatever follows the setup is kept. An answer to an in-app question
   (`<send_user_message_question_reply>…</send_user_message_question_reply>`) keeps the answer. Any other text,
-  markup included, is the user's.
+  markup included, is the user's. These shapes come from 108 real sessions (Codex review and recheck, 2026-10-08).
 - Codex message ids are `codex:<session id>:<hash of role, time and text>:<occurrence>`, so the same session saved
   under two file names is indexed once, while a prompt repeated in one session is kept each time. A fork with its
   own session id stays its own conversation.
@@ -114,6 +117,13 @@ column on `messages`).
 - A file that isn't valid UTF-8: decoded with replacement characters.
 - A session file copied to another machine with the same name: the same session, read once.
 - A very large session: read line by line, never whole.
+
+### Stored format
+
+`meta.session_lines_format` records how kept lines are stored (now `2`: attachment blocks omitted, compaction kept).
+A vault from an earlier format is upgraded once, on the next sync, in one transaction. Stored lines are cleaned in
+place, including those whose session file is gone. Files still on disk are read again from the start, which adds
+the records an earlier format skipped. Backups made before the upgrade are not rewritten.
 
 ## Not yet
 

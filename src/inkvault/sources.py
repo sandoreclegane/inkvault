@@ -85,6 +85,33 @@ def omit_attachments(o):
     return o if changed else None
 
 
+# How kept lines are stored. 2: OMITTED blocks replaced, Codex compaction records kept.
+FORMAT = "2"
+
+
+def upgrade(db):
+    """Bring lines stored by an earlier format up to this one, once, in one transaction. Lines whose session file is
+    gone are cleaned too (they can't be read again); files still there are read again from the start, which adds
+    records an earlier format skipped. Backups made before stay as they were."""
+    if db.execute("SELECT value FROM meta WHERE key='session_lines_format'").fetchone() == (FORMAT,):
+        return
+    last = 0
+    while rows := db.execute("SELECT rowid, raw FROM session_lines WHERE rowid > ? ORDER BY rowid LIMIT 1000",
+                             (last,)).fetchall():
+        for rowid, raw in rows:
+            try:
+                o = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(o, dict) and (stripped := omit_attachments(o)):
+                db.execute("UPDATE session_lines SET raw=? WHERE rowid=?",
+                           (json.dumps(stripped, ensure_ascii=False), rowid))
+        last = rows[-1][0]
+    db.execute("UPDATE session_files SET read_to = 0")
+    db.execute("INSERT OR REPLACE INTO meta VALUES ('session_lines_format', ?)", (FORMAT,))
+    db.commit()
+
+
 def read_file(db, source, path, keep):
     """Store the kept lines added to path since the last sync. Returns how many were stored."""
     name = path.name
@@ -134,6 +161,7 @@ def sync():
         return False  # and no empty vault is made
     db = export.open_vault()
     try:
+        upgrade(db)
         for source, (paths, keep) in found.items():
             new, failed = 0, 0
             for path in paths:
@@ -198,18 +226,26 @@ def claude_messages(file, lines):
     return conv, conversation_name("claude_code", cwd, title or first), out
 
 
-# Text Codex adds to a user message that the user didn't type: whole input blocks of these shapes.
-CODEX_CONTEXT = [
-    re.compile(r"\A\s*<(environment_context|user_instructions)>.*</\1>\s*\Z", re.S),
-    re.compile(r"\A\s*# AGENTS\.md instructions for [^\n]*\n\s*<INSTRUCTIONS>.*</INSTRUCTIONS>\s*\Z", re.S),
-]
+# Setup Codex puts in front of what the user typed: wrapped context blocks, and AGENTS.md instructions (with or
+# without "for <path>"; up to </INSTRUCTIONS> when that tag is there, else the whole block). Seen on real sessions.
+CODEX_CONTEXT_TAGS = {"environment_context", "user_instructions", "recommended_plugins",
+                      "external_codex_apps_open_page"}
+CODEX_WRAPPED = re.compile(r"\A\s*<([a-z_]+)>.*?</\1>", re.S)
+CODEX_AGENTS = re.compile(r"\A\s*# AGENTS\.md instructions\b[^\n]*(?:\n.*?</INSTRUCTIONS>|.*\Z)", re.S)
 # The user's answer to a question Codex asked in the app: keep the answer, drop the wrapper.
 CODEX_REPLY = re.compile(r"\A\s*<send_user_message_question_reply>(.*)</send_user_message_question_reply>\s*\Z", re.S)
 
 
 def codex_user_text(text):
-    if any(rx.match(text) for rx in CODEX_CONTEXT):
-        return ""
+    """What the user wrote, with Codex's setup taken off the front. Text after the setup is kept, markup included."""
+    while True:
+        m = CODEX_WRAPPED.match(text)
+        if m and (m.group(1) in CODEX_CONTEXT_TAGS or m.group(1).endswith("_context")):
+            text = text[m.end():]
+        elif m := CODEX_AGENTS.match(text):
+            text = text[m.end():]
+        else:
+            break
     if m := CODEX_REPLY.match(text):
         return m.group(1)
     return text
@@ -223,12 +259,38 @@ def codex_text(item):
     return block_text(content, ("input_text", "output_text", "text")).strip()
 
 
+def pair_events(items, events):
+    """Response items, plus each event that doesn't repeat one of them. An event repeats an item with the same role
+    and text in the same turn: nothing of the other role (a reply, or the next prompt) lies between them. Each item is
+    used once, the nearest first. Returns everything in file order."""
+    seq = sorted([(m, False) for m in items] + [(m, True) for m in events], key=lambda x: x[0][0])
+    used, keep = set(), []
+    for i, (m, is_event) in enumerate(seq):
+        if not is_event:
+            continue
+        match = None
+        for step in (-1, 1):
+            j = i + step
+            while 0 <= j < len(seq) and seq[j][0][2] == m[2]:
+                other, other_is_event = seq[j]
+                if not other_is_event and j not in used and other[3] == m[3]:
+                    if match is None or abs(j - i) < abs(match - i):
+                        match = j
+                    break
+                j += step
+        if match is None:
+            keep.append(i)
+        else:
+            used.add(match)
+    return [m for i, (m, is_event) in enumerate(seq) if not is_event or i in keep]
+
+
 def codex_messages(file, lines):
     """One Codex session -> (id, created, role, text), plus its id and name.
 
-    Turns come from response_item messages. event_msg user and agent messages usually repeat them; one that has no
-    matching response item (same role and text, each match used once) is added where it appears. Ids come from the
-    session id and the message itself, so a copy of a session under another file name isn't indexed twice.
+    Turns come from response_item messages. event_msg user and agent messages usually repeat them; one that doesn't
+    (see pair_events) is added where it appears. Ids come from the session id and the message itself, so a copy of a
+    session under another file name isn't indexed twice.
     """
     meta, events, items = {}, [], []
     for offset, o in lines:
@@ -246,13 +308,7 @@ def codex_messages(file, lines):
             item = payload if t == "response_item" else o
             if item.get("role") in ("user", "assistant"):
                 items.append((offset, ts, item["role"].upper(), codex_text(item)))
-    unmatched = Counter((role, text) for _, _, role, text in items)
-    for e in events:
-        if unmatched[e[2], e[3]]:
-            unmatched[e[2], e[3]] -= 1
-        else:
-            items.append(e)
-    items.sort(key=lambda m: m[0])
+    items = pair_events(items, events)
     start = meta.get("timestamp") if isinstance(meta.get("timestamp"), str) else None
     session = meta.get("id") if isinstance(meta.get("id"), str) else Path(file).stem
     seen, out = Counter(), []
