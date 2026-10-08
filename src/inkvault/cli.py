@@ -2,6 +2,7 @@
 
     inkvault rescue      export from PiecesOS, index, digest (if Ollama is running), build the dashboard
     inkvault export      copy everything out of PiecesOS into the vault (re-runnable, only adds)
+    inkvault sync        copy new Claude Code and Codex sessions into the vault, then rebuild search
     inkvault index       rebuild keyword + meaning search
     inkvault digest      write per-day digests with a local Ollama model
     inkvault dashboard   rebuild and open the Memory Atlas
@@ -78,6 +79,7 @@ def rescue(args):
             return 1
     except KeyboardInterrupt:
         return partial_rescue(args)
+    sync_sessions()
     index.build()
     if not args.no_digest:
         digest.run(model=args.model)
@@ -103,6 +105,44 @@ def partial_rescue(args):
     return 130  # the conventional exit code for "stopped with Ctrl+C"
 
 
+def sync_sessions():
+    """Claude Code and Codex sessions. A failure here is reported and never stops a rescue."""
+    from . import sources
+    try:
+        return sources.sync()
+    except Exception as e:  # noqa: BLE001
+        print(f"Couldn't sync Claude Code / Codex sessions: {type(e).__name__}: {e}")
+        return False
+
+
+def cmd_sync(_args):
+    from . import index, nightly
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(nightly.lock("sync"))
+        except nightly.Busy:
+            print("A nightly run or rescue is in progress right now; try again when it's done (see `inkvault status`).")
+            return 1
+        except OSError as e:  # e.g. a drive without file locking
+            print(f"Couldn't take the lock that keeps a sync and the nightly run apart ({e}); continuing without it.")
+        if not sync_sessions():
+            print("No Claude Code or Codex sessions on this computer.")
+            return 1
+    return 0 if index.build() else 1
+
+
+def session_status(db, meta):
+    """One line per synced source: sessions and stored lines."""
+    from .sources import NAMES, file_counts
+    try:
+        rows = db.execute("SELECT f.source, group_concat(f.file, char(10)), (SELECT COUNT(*) FROM session_lines l "
+                          "WHERE l.source = f.source) FROM session_files f GROUP BY f.source").fetchall()
+    except sqlite3.OperationalError:
+        return []  # never synced
+    return [f"  {NAMES.get(source, source)}: {file_counts(files.split(chr(10)))} ({lines:,} lines kept), last sync "
+            f"{meta.get('last_sync', '?')}" for source, files, lines in rows]
+
+
 def cmd_status(_args):
     from . import paths
     from .export import PiecesOS
@@ -114,6 +154,7 @@ def cmd_status(_args):
                 meta = dict(db.execute("SELECT key, value FROM meta"))
                 events = db.execute("SELECT COUNT(*), MIN(created), MAX(created) FROM events").fetchone()
                 kinds = dict(db.execute("SELECT kind, COUNT(*) FROM raw_records GROUP BY kind"))
+                sessions = session_status(db, meta)
             finally:
                 db.close()
             print(f"vault: {paths.vault_db().stat().st_size / 1e6:,.0f} MB, last export {meta.get('last_export', '?')}"
@@ -122,6 +163,8 @@ def cmd_status(_args):
             print(f"  {events[0]:,} captures ({(events[1] or '')[:10]} → {(events[2] or '')[:10]}), "
                   f"{kinds.get('summary', 0):,} summaries, {kinds.get('message', 0):,} chat messages, "
                   f"{kinds.get('asset', 0):,} snippets")
+            for line in sessions:
+                print(line)
         except sqlite3.Error as e:
             print(f"vault: unreadable ({e}); the nightly backups, if any, are in {paths.backups_dir()}")
     else:
@@ -169,6 +212,7 @@ def main(argv=None):
     r.add_argument("--no-open", action="store_true", help="don't open the dashboard when done")
     r.add_argument("--model", default=None, help="Ollama model for digests (default qwen3.5:4b)")
     sub.add_parser("export", help="copy everything out of PiecesOS into the vault")
+    sub.add_parser("sync", help="copy new Claude Code and Codex sessions into the vault, then rebuild search")
     sub.add_parser("index", help="rebuild keyword + meaning search")
     d = sub.add_parser("digest", help="per-day digests with a local Ollama model")
     d.add_argument("--model", default=None, help="Ollama model (default qwen3.5:4b)")
@@ -214,6 +258,8 @@ def dispatch(args):
     if args.cmd == "export":
         from . import export
         return 0 if export.run() else 1
+    if args.cmd == "sync":
+        return cmd_sync(args)
     if args.cmd == "index":
         from . import index
         return 0 if index.build() else 1

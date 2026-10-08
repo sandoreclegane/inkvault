@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0
+
+- **Claude Code and Codex sessions** in the vault: `inkvault sync` copies your prompts, the replies and session
+  titles from the session files both tools keep on disk, reading only what's new. `rescue` and the nightly run sync
+  too, before the backup. Sessions Claude Code deletes after 30 days stay in the vault. Tool output and attachments
+  are left out (most of the bytes, and where secrets show up), and so are pasted images. Codex's own setup text
+  (AGENTS.md, environment context) isn't counted as your words. Sessions are searchable as chats (named
+  `Claude Code · project: title`), and feed the timeline, digests and dashboard.
+- **Claude desktop app sessions** (agent mode, Windows) are synced too, as their own source (`Claude desktop`).
+  They live in the app's package folder, apart from `~/.claude`, at paths past Windows' 260-character limit.
+  Prompts that only the app's audit log kept are added to their conversation, and sessions known only from an
+  audit log are kept too. The app's random sandbox folder name is never shown as a project.
+- `inkvault status` lists synced sessions per source; `memory_stats` counts chat messages per source; the
+  dashboard's Chat messages tile says which sources it counts; `get_memory` shows a conversation's name.
+
 ## 0.1.2
 
 - **Topics over time** on the Memory Atlas: Pieces' own topic tags on your session summaries, in two groups:

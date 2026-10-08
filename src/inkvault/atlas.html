@@ -202,7 +202,7 @@ function renderTiles() {
     ["Days remembered", fmt(active), `${range.from} → ${range.to}`, true],
     ["Screen captures", compact(captures), "what Pieces saw"],
     ["Session summaries", fmt(sessions), "written by Pieces"],
-    ["Chat messages", compact(chats), "Pieces chats"],
+    ["Chat messages", compact(chats), (DATA.chat_sources || ["Pieces"]).join(", ")],
     ["Saved snippets", fmt(DATA.snippets), "all time"],
   ];
   const box = document.getElementById("tiles");
