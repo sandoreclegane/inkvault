@@ -221,9 +221,11 @@ def lock_owner():
 
 
 def lock_purpose():
-    """What the holder is doing, "nightly", "rescue" or "sync" (from the lock file's second line), or "" if unknown."""
+    """What the holder is doing: "nightly", "rescue", "sync", "index", "digest", "dashboard" or "browsers" (from the
+    lock file's second line), or "" if unknown."""
     lines = lock_lines()
-    return lines[1].strip() if len(lines) > 1 and lines[1].strip() in ("nightly", "rescue", "sync") else ""
+    known = ("nightly", "rescue", "sync", "index", "digest", "dashboard", "browsers")
+    return lines[1].strip() if len(lines) > 1 and lines[1].strip() in known else ""
 
 
 def running():
@@ -351,6 +353,18 @@ def step_sync():
     return sources.sync()
 
 
+def step_browsers():
+    from . import history
+    r = history.sync()
+    if r.outcome == "nothing":
+        return f"skipped ({r.waiting} waiting)" if r.waiting else False
+    if r.outcome == "partial":
+        return f"partial: {len(r.failed)} of {r.chosen} profiles failed ({', '.join(r.failed)})"
+    if r.outcome == "failed":
+        raise RuntimeError(f"all {r.chosen} chosen profiles failed")
+    return True
+
+
 def step_index():
     from . import index
     return index.build()
@@ -368,9 +382,10 @@ def step_dashboard():
 
 def steps():
     # Looked up at call time, so a test can replace any one of them.
-    # Only export and sync write vault.db, so the backup follows them directly: a slow digest can't starve it.
-    return [("export", step_export), ("sync", step_sync), ("backup", backup), ("index", step_index), ("digest", step_digest),
-            ("dashboard", step_dashboard)]
+    # Only export, sync and browsers write vault.db, so the backup follows them directly: a slow digest can't
+    # starve it.
+    return [("export", step_export), ("sync", step_sync), ("browsers", step_browsers), ("backup", backup),
+            ("index", step_index), ("digest", step_digest), ("dashboard", step_dashboard)]
 
 
 started = []  # non-empty once this run has written its START line
@@ -471,11 +486,12 @@ def keep_awake():
 
 
 def run_step(step, stream):
-    """Run one step with its output going to the log. Returns "ok", "partial", "skipped" or "failed: ..."."""
+    """Run one step with its output going to the log. Returns "ok", "skipped", "failed: ..." or what the step said (a
+    string such as "partial: ...")."""
     try:
         with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
             done = step()
-        return "partial" if done == "partial" else "ok" if done else "skipped"
+        return done if isinstance(done, str) else "ok" if done else "skipped"
     except Exception as e:  # noqa: BLE001 - one broken step must not stop the backup
         return f"failed: {type(e).__name__}: {' '.join(str(e).split())}"  # one line, or the END line splits
     finally:

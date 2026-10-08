@@ -76,6 +76,16 @@ def schedule_file() -> Path:
     return home() / "schedule.json"
 
 
+def browsers_file() -> Path:
+    """Which browser profiles are the user's, and sites never to keep (`inkvault browsers`)."""
+    return home() / "browsers.json"
+
+
+def rebuild_marker() -> Path:
+    """Exists while search must not be used: something was removed and search hasn't been rebuilt yet."""
+    return home() / "rebuild-needed"
+
+
 def connect_ro(path):
     """Open a SQLite file read-only. as_uri() escapes characters like # ? % that would break a hand-built
     "file:" URI. SQLite rejects the host part of a network (UNC) path's URI, so those connect plainly."""

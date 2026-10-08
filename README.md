@@ -56,6 +56,9 @@ a dashboard of what you have. Run the same command again later and it picks up w
 - **Your Claude Code, Codex and Claude desktop sessions**: your prompts and the replies, side by side with your
   Pieces history, searchable as chats (named like `Claude Code · project: title`), and part of the timeline, the
   digests and the dashboard.
+- **Your browser history** (new in 0.2.1): pages you opened in Chrome, Edge, Comet, Brave, Arc, Vivaldi, Opera or
+  Firefox, from the browser profiles you say are yours. Browsers delete history after about 90 days; the vault
+  keeps it. Searchable as `web`, on the timeline, in the digests and on the dashboard.
 - **Daily digests** (optional): a 2-3 sentence summary of each day, written by a *local* model through
   [Ollama](https://ollama.com). Pieces stopped writing summaries; this picks up where it left off.
 
@@ -79,6 +82,35 @@ args = ["--from", "git+https://github.com/sandoreclegane/inkvault", "inkvault", 
 
 Then ask: *"What was I working on the week of March 10?"*, *"Find that retry helper I saved"*, *"When did I last look at the Stripe dashboard?"*
 
+## Your browser history
+
+A browser profile can belong to someone else, so InkVault reads none until you choose:
+
+```bash
+inkvault browsers
+```
+
+It lists every profile it finds (browser, name, signed-in email) and asks which are yours. `sync` and `rescue`
+ask too when they find a new one; the nightly run never asks, and skips profiles you haven't chosen. If someone
+else starts using a browser on this computer, run `inkvault browsers` again: InkVault notices a profile that was
+replaced on Windows and macOS, and when a profile's signed-in account changes, but it can't always tell.
+
+- `inkvault browsers --no "chrome/Profile 2" --forget` stops copying a profile and removes what was copied, even
+  after the browser is uninstalled.
+- `inkvault browsers --skip-site mybank.com` never keeps that site or its subdomains, and removes what's there.
+
+Removing rebuilds search and the dashboard and deletes the digests for each removed visit's day (in UTC) and the day
+either side. If it's interrupted, the next `inkvault sync`, `inkvault index` or nightly run finishes it, and search
+stays off until then. It can't recall an answer your AI tool already received, or a dashboard tab that's already
+open. The nightly backups still hold the removed visits until they rotate out (7 nights).
+
+**What's kept:** each page's address and title, and when you opened it. Before anything is stored, InkVault
+removes parts of addresses that carry sign-in codes, tokens, signed links, password-reset tokens, and your email
+or username. Searches (`?q=…`) stay. This catches the common shapes, not every possible secret. Copying happens
+while the browser runs, so the newest few visits can wait for the next sync.
+
+Safari isn't supported yet (macOS blocks reading it without Full Disk Access).
+
 ## Keep it up to date
 
 PiecesOS keeps capturing for as long as it runs on your computer. To pull in what's new every night and back up
@@ -92,7 +124,7 @@ This installs InkVault as a permanent `inkvault` command (with `uv tool install`
 up a nightly run at 03:00 with your system's own scheduler: Task Scheduler on Windows, launchd on macOS, a systemd
 user timer (or cron) on Linux. If uv's tool folder isn't on your PATH, it tells you to run `uv tool update-shell`.
 
-Each run exports new captures (if PiecesOS is running), copies new Claude Code and Codex sessions, and saves a dated
+Each run exports new captures (if PiecesOS is running), copies new Claude Code and Codex sessions, copies new browser history from the profiles you chose, and saves a dated
 copy of `vault.db` in `backups/` right after (the last 7 are kept). Then it rebuilds search, writes new digests (if
 Ollama is running) and rebuilds the dashboard. One step failing never stops the others. The computer is kept awake
 while it runs (Windows and macOS). The export has a time budget: if a big backlog doesn't fit, the run stops

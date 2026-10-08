@@ -122,8 +122,8 @@ def chat_sources(db):
 
 
 def collect(db):
-    days = defaultdict(lambda: {"captures": 0, "sessions": 0, "chats": 0, "hours": 0})
-    apps, sites = defaultdict(Counter), defaultdict(Counter)
+    days = defaultdict(lambda: {"captures": 0, "sessions": 0, "chats": 0, "pages": 0, "hours": 0})
+    apps, sites, web_sites = defaultdict(Counter), defaultdict(Counter), defaultdict(Counter)
 
     def touch(ts, source):
         t = local(ts)
@@ -138,6 +138,17 @@ def collect(db):
             apps[day][re.sub(r"\.exe$", "", app, flags=re.I)] += 1
         if url and (host := urlsplit(url).hostname):
             sites[day][host.removeprefix("www.")] += 1
+
+    # Pages opened in a browser on this computer. Synced visits happened on another device, so they don't mark
+    # active hours here (they are in search). Counted apart from Pieces' captures: the two are sampled differently.
+    try:
+        opened = db.execute("SELECT created, host FROM visits WHERE synced = 0").fetchall()
+    except sqlite3.OperationalError:  # an index built before 0.2.1
+        opened = []
+    for ts, host in opened:
+        day = touch(ts, "pages")
+        if host:
+            web_sites[day][host] += 1
 
     titled = []  # (day, title, extra text) for project detection
     highlights = defaultdict(list)
@@ -172,14 +183,20 @@ def collect(db):
     digests = {}
     if paths.digests_db().exists():
         ddb = paths.connect_ro(paths.digests_db())
-        digests = dict(ddb.execute("SELECT day, digest FROM digests"))
-        ddb.close()
+        try:
+            digests = dict(ddb.execute("SELECT day, digest FROM digests"))
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e):  # a digests.db nothing has written to yet is no digests
+                raise
+        finally:
+            ddb.close()
 
     return {
         "themes": list(themes),
         "days": dict(sorted(days.items())),
         "apps": {d: dict(c) for d, c in apps.items()},
         "sites": {d: dict(c) for d, c in sites.items()},
+        "web_sites": {d: dict(c) for d, c in web_sites.items()},
         "docs": docs,
         "topics": topic_groups,
         "topic_docs": topic_docs,
@@ -194,6 +211,9 @@ def collect(db):
 def build():
     if not paths.search_db().exists():
         print("Nothing to show yet: run `inkvault rescue` first.")
+        return None
+    if paths.rebuild_marker().exists():
+        print("Search is being rebuilt after something was removed: run `inkvault index` first.")
         return None
     db = paths.connect_ro(paths.search_db())
     data = collect(db)

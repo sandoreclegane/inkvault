@@ -126,6 +126,23 @@ def open_vault():
         CREATE TABLE IF NOT EXISTS session_files (
             source TEXT NOT NULL, file TEXT NOT NULL, read_to INTEGER NOT NULL, head TEXT NOT NULL, PRIMARY KEY (source, file)
         );
+
+        -- Browser history (history.py): cleaned visits, and how each chosen profile's last sync went.
+        CREATE TABLE IF NOT EXISTS browser_visits (
+            id TEXT PRIMARY KEY, profile TEXT NOT NULL, visit_id INTEGER NOT NULL, redirected INTEGER NOT NULL,
+            created TEXT NOT NULL, url TEXT NOT NULL, address TEXT NOT NULL, title TEXT, title_observed_at TEXT,
+            duration_s REAL, transition INTEGER NOT NULL, origin TEXT, origin_visit_id INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS browser_visits_profile ON browser_visits(profile);
+        CREATE INDEX IF NOT EXISTS browser_visits_created ON browser_visits(created);
+        CREATE TABLE IF NOT EXISTS browser_profiles (
+            profile TEXT PRIMARY KEY, last_attempt TEXT, last_success TEXT, last_error TEXT, visits_in_file INTEGER
+        );
+        -- Removals recorded but not yet applied (forget.py): what ("profile" or "site"), the key or host, the
+        -- affected days as a JSON list.
+        CREATE TABLE IF NOT EXISTS browser_removals (
+            id INTEGER PRIMARY KEY, what TEXT NOT NULL, value TEXT NOT NULL, days TEXT NOT NULL, created TEXT NOT NULL
+        );
     """)
     return db
 

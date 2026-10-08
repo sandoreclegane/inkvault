@@ -18,6 +18,7 @@ QUERIES = {
     "chats": "SELECT id, coalesce(conversation_name,'') || char(10) || coalesce(text,'') FROM messages "
              "WHERE role IN ('USER','ASSISTANT') AND length(text) > 0",
     "snippets": "SELECT id, name || char(10) || language || char(10) || text FROM snippets",
+    "web": "SELECT id, coalesce(title,'') || char(10) || host || path FROM pages",
 }
 
 
@@ -33,12 +34,19 @@ def load_model():
 def build():
     start = time.time()
     db = paths.connect_ro(paths.search_db())
+    try:
+        found = {kind: [(i, t[:MAX_CHARS]) for i, t in db.execute(sql) if t and t.strip()]
+                 for kind, sql in QUERIES.items()}
+    finally:
+        db.close()
+    found = {kind: rows for kind, rows in found.items() if rows}
+    if not found:
+        paths.vectors().unlink(missing_ok=True)  # e.g. a removal took the last records: their vectors go too
+        print("nothing to embed yet")
+        return
     model = load_model()
     kinds, ids, vecs = [], [], []
-    for kind, sql in QUERIES.items():
-        rows = [(i, t[:MAX_CHARS]) for i, t in db.execute(sql) if t and t.strip()]
-        if not rows:
-            continue
+    for kind, rows in found.items():
         # No worker processes: they crash under pythonw (how the nightly job runs on Windows), and for a
         # static model one process is as fast anyway (~15 s for 120k records).
         v = model.encode([t for _, t in rows], batch_size=1024, show_progress_bar=False, use_multiprocessing=False)
@@ -46,10 +54,6 @@ def build():
         vecs.append(v.astype(np.float16))
         kinds += [kind] * len(rows)
         ids += [i for i, _ in rows]
-    db.close()
-    if not vecs:
-        print("nothing to embed yet")
-        return
     tmp = paths.vectors().with_name("vectors.tmp.npz")
     np.savez(tmp, kinds=np.array(kinds), ids=np.array(ids), vecs=np.vstack(vecs))
     tmp.replace(paths.vectors())

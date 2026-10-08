@@ -264,7 +264,8 @@ def test_a_failure_after_the_start_line_does_not_log_a_second_one(quick, monkeyp
 
 def test_backup_runs_right_after_export(quick, monkeypatch):
     from inkvault import nightly
-    assert [name for name, _ in nightly.steps()] == ["export", "sync", "backup", "index", "digest", "dashboard"]
+    assert [name for name, _ in nightly.steps()] == ["export", "sync", "browsers", "backup", "index", "digest",
+                                                     "dashboard"]
 
 
 def test_no_vault_is_not_a_plain_ok(quick):
@@ -683,3 +684,23 @@ def test_backup_clears_partials_left_by_runs_that_died(home):
     os.utime(old, (past, past))
     assert nightly.backup(today="2026-10-01")
     assert not old.exists() and fresh.exists()  # only the abandoned one goes
+
+
+@pytest.mark.parametrize("result, logged", [
+    (("nothing", 0, [], 0), "skipped"),
+    (("nothing", 0, [], 2), "skipped (2 waiting)"),
+    (("ok", 2, [], 0), "ok"),
+    (("partial", 3, ["chrome/Default"], 0), "partial: 1 of 3 profiles failed (chrome/Default)"),
+    (("failed", 2, ["chrome/Default", "edge/Default"], 0), "failed: RuntimeError: all 2 chosen profiles failed"),
+])
+def test_the_browser_step_says_how_it_went(home, monkeypatch, result, logged):
+    from inkvault import history, nightly
+    monkeypatch.setattr(history, "sync", lambda: history.SyncResult(*result))
+    assert nightly.run_step(nightly.step_browsers, nightly.LogStream()) == logged
+
+
+def test_the_new_lock_purposes_are_recognized(home):
+    from inkvault import nightly
+    for purpose in ("index", "digest", "dashboard", "browsers"):
+        with nightly.lock(purpose):
+            assert nightly.lock_purpose() == purpose
