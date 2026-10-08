@@ -50,11 +50,11 @@ def no_real_sessions(tmp_path_factory, monkeypatch):
 @pytest.fixture(autouse=True)
 def no_real_browsers(monkeypatch):
     """No test may read this machine's own browser history: every test starts with no browsers installed. A test
-    that wants browsers builds them with webfixtures.py and points browsers.user_data_dirs at them. The real
-    function stays reachable as browsers.real_user_data_dirs, for tests of the platform paths themselves."""
-    from inkvault import browsers
+    that wants browsers builds them with webfixtures.py and points browsers.user_data_dirs at them."""
+    from inkvault import browsers, history
     monkeypatch.setattr(browsers, "real_user_data_dirs", browsers.user_data_dirs, raising=False)
     monkeypatch.setattr(browsers, "user_data_dirs", lambda: [])
+    monkeypatch.setattr(history, "RETRY_WAIT", 0)
 
 
 @pytest.fixture(autouse=True)
