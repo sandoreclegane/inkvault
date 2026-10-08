@@ -44,8 +44,9 @@ CREATE TABLE session_files (source TEXT NOT NULL, file TEXT NOT NULL, read_to IN
 - `source` is `claude_code` or `codex`. `file` is the file's name. Session files are named by a unique id, so
   Codex moving a session to `archived_sessions/` doesn't read it twice.
 - **Kept lines are stored verbatim**: the text of the line as written, so a later version can read them differently
-  without another sync. One exception: image, document and tool-result blocks inside a kept line's message content
-  are replaced by `{"type": ..., "omitted": true}`, and that line is stored re-serialized. Pasted images arrive as
+  without another sync. One exception: image, document and tool-result blocks anywhere inside a kept line (Codex's
+  compaction records nest whole earlier messages) are replaced by `{"type": ..., "omitted": true}`, matched by block
+  type, never by text, and that line is stored re-serialized. Pasted images arrive as
   inline base64 and would otherwise fill the vault and its backups (Codex review, 2026-10-08).
 - **What's kept:**
   - Claude Code: `user` and `assistant` lines, except user lines that are only tool results; and title lines
@@ -80,16 +81,20 @@ CREATE TABLE session_files (source TEXT NOT NULL, file TEXT NOT NULL, read_to IN
   `<system-reminder>` blocks are removed. Sidechain, `isMeta` and slash-command lines (`<command-…>`,
   `<local-command-…>`) are skipped.
 - Codex text: `response_item` messages are the turns (on 108 real sessions, CLI 0.101 to 0.162, every assistant
-  reply was there). An `event_msg` user or agent message that repeats a response item (same role and text, in the
-  same turn: nothing of the other role between them, each item used once) is dropped; any other is added where it
-  appears. A file mixing both shapes loses nothing, and a prompt repeated in a later turn isn't taken for an echo.
+  reply was there). An `event_msg` user or agent message that repeats a response item (same role and text, written
+  within 30 seconds of it, nothing of the other role between them, each item used once) is dropped; any other is
+  added where it appears. A file mixing both shapes loses nothing, and a prompt repeated later, with or without a
+  reply between, isn't taken for an echo. (No real session sampled had event conversation records.)
 - Codex user text: the setup Codex puts in front of what the user typed is taken off, repeatedly, from the start of
-  each input block. That covers wrapped context blocks (`environment_context`, `user_instructions`,
-  `recommended_plugins`, `external_codex_apps_open_page`, and any tag ending in `_context`) and AGENTS.md
+  each input block. That covers an explicit list of wrapped blocks (`environment_context`, `user_instructions`,
+  `recommended_plugins`, `external_codex_apps_open_page`, `in-app-browser-context`, `guardian_tool_descriptions`,
+  `task-notification`, `turn_aborted`; tags may have hyphens and attributes) and AGENTS.md
   instructions (`# AGENTS.md instructions`, with or without `for <path>`, up to `</INSTRUCTIONS>` when that tag is
   there, else the whole block). Whatever follows the setup is kept. An answer to an in-app question
   (`<send_user_message_question_reply>…</send_user_message_question_reply>`) keeps the answer. Any other text,
-  markup included, is the user's. These shapes come from 108 real sessions (Codex review and recheck, 2026-10-08).
+  markup included, is the user's, including tags not on the list (`skill`, `command-name`,
+  `external_codex_apps_writing_block_edits`). The list comes from a tag audit of 108 real sessions (Codex reviews,
+  2026-10-08); a new setup tag is added when it is seen, not guessed from its name.
 - Codex message ids are `codex:<session id>:<hash of role, time and text>:<occurrence>`, so the same session saved
   under two file names is indexed once, while a prompt repeated in one session is kept each time. A fork with its
   own session id stays its own conversation.
@@ -120,15 +125,16 @@ column on `messages`).
 
 ### Stored format
 
-`meta.session_lines_format` records how kept lines are stored (now `2`: attachment blocks omitted, compaction kept).
+`meta.session_lines_format` records how kept lines are stored (`2`: attachment blocks omitted, compaction kept;
+now `3`: omitted at any depth).
 A vault from an earlier format is upgraded once, on the next sync, in one transaction. Stored lines are cleaned in
 place, including those whose session file is gone. Files still on disk are read again from the start, which adds
 the records an earlier format skipped. Backups made before the upgrade are not rewritten.
 
 ## Not yet
 
-- Codex's progress commentary and final reply are both kept as assistant messages; telling them apart needs the
-  field that marks the channel.
+- Codex's progress commentary and final reply are both kept as assistant messages. None of 3,245 real assistant
+  messages had a field telling them apart, so no distinction is claimed.
 - `compacted` records are stored but not shown anywhere.
 
 ## Testing

@@ -20,6 +20,7 @@ from collections import Counter
 from pathlib import Path
 
 from . import export
+from .times import local
 
 NAMES = {"claude_code": "Claude Code", "codex": "Codex"}
 
@@ -72,21 +73,28 @@ OMITTED = {"image", "input_image", "document", "tool_result"}
 
 
 def omit_attachments(o):
-    """o with OMITTED blocks in its message content replaced by {"type": ..., "omitted": true}; None if it had none."""
-    holders = [o.get("message"), o.get("payload"), o]  # Claude Code, Codex, Codex's older format
+    """o with every OMITTED block inside it replaced by {"type": ..., "omitted": true}, at any depth (Codex's
+    compaction records nest whole earlier messages); None if it had none. Matched by block type, never by text."""
     changed = False
-    for h in holders:
-        if isinstance(h, dict) and isinstance(h.get("content"), list):
-            blocks = [{"type": b["type"], "omitted": True} if isinstance(b, dict) and b.get("type") in OMITTED else b
-                      for b in h["content"]]
-            if blocks != h["content"]:
-                h["content"] = blocks
+
+    def clean(x):
+        nonlocal changed
+        if isinstance(x, list):
+            return [clean(v) for v in x]
+        if isinstance(x, dict):
+            if x.get("type") in OMITTED and x is not o:
                 changed = True
-    return o if changed else None
+                return {"type": x["type"], "omitted": True}
+            return {k: clean(v) for k, v in x.items()}
+        return x
+
+    cleaned = clean(o)
+    return cleaned if changed else None
 
 
-# How kept lines are stored. 2: OMITTED blocks replaced, Codex compaction records kept.
-FORMAT = "2"
+# How kept lines are stored. 2: OMITTED blocks replaced, Codex compaction records kept. 3: OMITTED blocks replaced
+# at any depth (images inside compaction history).
+FORMAT = "3"
 
 
 def upgrade(db):
@@ -229,8 +237,9 @@ def claude_messages(file, lines):
 # Setup Codex puts in front of what the user typed: wrapped context blocks, and AGENTS.md instructions (with or
 # without "for <path>"; up to </INSTRUCTIONS> when that tag is there, else the whole block). Seen on real sessions.
 CODEX_CONTEXT_TAGS = {"environment_context", "user_instructions", "recommended_plugins",
-                      "external_codex_apps_open_page"}
-CODEX_WRAPPED = re.compile(r"\A\s*<([a-z_]+)>.*?</\1>", re.S)
+                      "external_codex_apps_open_page", "in-app-browser-context", "guardian_tool_descriptions",
+                      "task-notification", "turn_aborted"}
+CODEX_WRAPPED = re.compile(r"\A\s*<([A-Za-z][\w-]*)(?:\s[^>]*)?>.*?</\1\s*>", re.S)
 CODEX_AGENTS = re.compile(r"\A\s*# AGENTS\.md instructions\b[^\n]*(?:\n.*?</INSTRUCTIONS>|.*\Z)", re.S)
 # The user's answer to a question Codex asked in the app: keep the answer, drop the wrapper.
 CODEX_REPLY = re.compile(r"\A\s*<send_user_message_question_reply>(.*)</send_user_message_question_reply>\s*\Z", re.S)
@@ -240,7 +249,7 @@ def codex_user_text(text):
     """What the user wrote, with Codex's setup taken off the front. Text after the setup is kept, markup included."""
     while True:
         m = CODEX_WRAPPED.match(text)
-        if m and (m.group(1) in CODEX_CONTEXT_TAGS or m.group(1).endswith("_context")):
+        if m and m.group(1) in CODEX_CONTEXT_TAGS:
             text = text[m.end():]
         elif m := CODEX_AGENTS.match(text):
             text = text[m.end():]
@@ -259,10 +268,21 @@ def codex_text(item):
     return block_text(content, ("input_text", "output_text", "text")).strip()
 
 
+ECHO_SECONDS = 30  # an event and the response item it repeats are written together
+
+
+def near(a, b):
+    """True if two timestamps are within ECHO_SECONDS, or either is missing or unreadable (then position decides)."""
+    try:
+        return abs((local(a) - local(b)).total_seconds()) <= ECHO_SECONDS
+    except (TypeError, ValueError, AttributeError):
+        return True
+
+
 def pair_events(items, events):
     """Response items, plus each event that doesn't repeat one of them. An event repeats an item with the same role
-    and text in the same turn: nothing of the other role (a reply, or the next prompt) lies between them. Each item is
-    used once, the nearest first. Returns everything in file order."""
+    and text, written at about the same time, with nothing of the other role (a reply, or the next prompt) between
+    them. Each item is used once, the nearest first. Returns everything in file order."""
     seq = sorted([(m, False) for m in items] + [(m, True) for m in events], key=lambda x: x[0][0])
     used, keep = set(), []
     for i, (m, is_event) in enumerate(seq):
@@ -273,7 +293,7 @@ def pair_events(items, events):
             j = i + step
             while 0 <= j < len(seq) and seq[j][0][2] == m[2]:
                 other, other_is_event = seq[j]
-                if not other_is_event and j not in used and other[3] == m[3]:
+                if not other_is_event and j not in used and other[3] == m[3] and near(other[1], m[1]):
                     if match is None or abs(j - i) < abs(match - i):
                         match = j
                     break

@@ -375,7 +375,11 @@ def test_every_codex_setup_shape_is_taken_off_and_what_follows_is_kept(home):
                user_item("2026-10-06T09:00:02Z", "# AGENTS.md instructions for C:\\work\n\nNo tags, just rules."),
                user_item("2026-10-06T09:00:03Z", "<recommended_plugins>\n- github\n</recommended_plugins>"),
                user_item("2026-10-06T09:00:04Z", "<external_codex_apps_open_page>\nurl: x\n</external_codex_apps_open_page>"),
-               user_item("2026-10-06T09:00:05Z", "<browser_context>tab: docs</browser_context>"),
+               user_item("2026-10-06T09:00:05Z", '<in-app-browser-context url="https://x">\ntab: docs\n'
+                                                 '</in-app-browser-context>'),
+               user_item("2026-10-06T09:00:05Z", "<guardian_tool_descriptions>[tools]</guardian_tool_descriptions>"),
+               user_item("2026-10-06T09:00:05Z", "<task-notification>\ntask done\n</task-notification>"),
+               user_item("2026-10-06T09:00:05Z", "<turn_aborted>\ninterrupted\n</turn_aborted>"),
                user_item("2026-10-06T09:00:06Z", AGENTS + "\n<environment_context>\n<cwd>x</cwd>\n</environment_context>\n"
                          "Plan the <b>garden</b> layout"))
     sources.sync()
@@ -420,3 +424,52 @@ def test_a_vault_from_the_earlier_format_is_cleaned_once(home):
     assert "so far" in stored  # read again from the start: the compaction an earlier format skipped
     assert vault_rows("SELECT value FROM meta WHERE key='session_lines_format'") == [(sources.FORMAT,)]
     assert len(vault_rows("SELECT * FROM session_lines WHERE file='rollout-gone.jsonl'")) == 1
+
+
+def test_tags_that_are_not_known_setup_are_the_users(home):
+    from inkvault import sources
+    codex_file(CODEX_NEW[0], user_item("2026-10-06T09:00:01Z", "<my_context>notes I pasted</my_context>"),
+               user_item("2026-10-06T09:00:02Z", "<command-name>/review</command-name>"))
+    sources.sync()
+    assert [r[5] for r in index_messages()] == ["<my_context>notes I pasted</my_context>",
+                                                "<command-name>/review</command-name>"]
+
+
+def test_a_prompt_repeated_without_a_reply_between_is_kept(home):
+    from inkvault import sources
+    codex_file(CODEX_NEW[0], user_item("2026-10-06T10:01:00Z", "run the tests"),
+               {"timestamp": "2026-10-06T11:01:00Z", "type": "event_msg",
+                "payload": {"type": "user_message", "message": "run the tests"}})
+    sources.sync()
+    assert [r[5] for r in index_messages()] == ["run the tests", "run the tests"]
+
+
+def compaction_with_image(pixels):
+    return {"timestamp": "2026-10-06T10:00:00Z", "type": "compacted", "payload": {
+        "message": "so far", "replacement_history": [
+            {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "see data:image/png;base64,TEXTONLY in the docs"},
+                {"type": "input_image", "image_url": f"data:image/png;base64,{pixels}"}]}]}}
+
+
+def test_images_nested_in_compaction_history_are_not_stored(home):
+    from inkvault import sources
+    codex_file(CODEX_NEW[0], compaction_with_image("NESTEDPIXELS"))
+    sources.sync()
+    stored = "".join(r for (r,) in vault_rows("SELECT raw FROM session_lines"))
+    assert "NESTEDPIXELS" not in stored
+    assert "TEXTONLY" in stored and "so far" in stored  # text that merely mentions a data URL stays
+
+
+def test_a_format_2_vault_is_cleaned_again(home):
+    from inkvault import export, sources
+    codex_file(CODEX_NEW[0])
+    db = export.open_vault()
+    db.execute("INSERT INTO session_lines VALUES ('codex', 'rollout-gone.jsonl', 0, ?)",
+               (json.dumps(compaction_with_image("FORMAT2PIXELS")),))
+    db.execute("INSERT INTO meta VALUES ('session_lines_format', '2')")
+    db.commit()
+    db.close()
+    sources.sync()
+    assert "FORMAT2PIXELS" not in "".join(r for (r,) in vault_rows("SELECT raw FROM session_lines"))
+    assert vault_rows("SELECT value FROM meta WHERE key='session_lines_format'") == [(sources.FORMAT,)]
