@@ -1,6 +1,6 @@
 # Browser history in the vault
 
-**Status:** design, revised after Codex's review (2026-10-08); ready for the implementation plan
+**Status:** design, revised after two Codex reviews (2026-10-08); ready for the implementation plan
 **Release:** v0.3.0. ChatGPT/Claude.ai importers and people are specced separately.
 
 ## Why
@@ -37,7 +37,8 @@ opened.
 
 - 8,302 visits in the files; the keep rules below leave 7,800 (83 sub-frames, 397 redirect hops, 22 non-http).
 - Ordinary navigations carry both redirect-chain bits (6,920 visits). The kept set includes 505 reloads and 57 form
-  submits. Core transition types seen: 0 (link) dominates; 1, 2, 5, 6, 7, 8 appear in every profile.
+  submits. Core transition type 0 (link) dominates everywhere; 1, 2, 5, 6, 7 and 8 appear too, though
+  not in every profile (Chrome `Default` had no 6, Edge no 8).
 - **Seven groups of distinct visits share the same profile, time and address** (nine extra rows). Time plus
   address is not a unique key.
 - 735 visits had zero duration. Chromium fills in duration after a page is left, can update a URL's title, and can
@@ -46,13 +47,14 @@ opened.
 - 35 visits in Chrome `Default` came from another device (`originator_cache_guid` set). `is_known_to_sync` was 1
   on every row of that profile, so it can't tell them apart.
 - Every profile had a `History-journal` and no WAL. All copies passed `quick_check`. The old rescue's logs since
-  September 28 show 91 browser syncs and no failed copies.
+  September 28 hold 91 browser log lines and no failed copy (the old collector copies only the main file and
+  doesn't catch errors while reading, so this is encouraging, not proof).
 - Query parameter names across all addresses include credentials the first list missed (`rapt` 68, `xsrf` 21,
   `tokenid` 3, `authcode` 2, `__clerk_handshake` 2, `login_verifier`, `consent_verifier`, `_vercel_jwt`,
   `_vercel_jwe`, `user_code`) and identity (`login_hint` 7, `email` 6, `login_identifier` 2, `upn` 2,
   `username` 2). Two kept visits had a credential inside an encoded address nested in a parameter.
-- A rule redacting every long letters-and-digits path part would have changed 327 of 4,793 addresses, including
-  114 UUIDs; it was replaced by the narrower rule in §3.
+- A rule redacting every long letters-and-digits path part would have changed 327 of 4,793 addresses; 114 kept
+  visits had UUID-shaped path parts that it would also redact; it was replaced by the narrower rule in §3.
 - 12 kept visits had a page title containing address-shaped text.
 - `Local State`'s `profile.info_cache` named every profile folder holding a `History` file; there was no System or
   Guest profile with history.
@@ -114,9 +116,12 @@ A profile's key is `<browser>/<folder>`: `chrome/Profile 2`, `firefox/abcd1234.d
 - **A choice is bound to the profile, not just its folder name.** Chromium reuses folder names (`Profile 3`) after a
   profile is deleted and another created. With a choice, InkVault records the folder's creation time (where the OS
   gives one: Windows and macOS) and a SHA-256 of the profile's `gaia_id` (or `user_name` when there's no
-  `gaia_id`), when signed in. If a recorded value and the current one both exist and differ, the profile goes back
-  to `new`, and `status` says it looks like a different profile than the one chosen. The email itself is never
-  stored.
+  `gaia_id`), when signed in. If either piece of evidence changes (differs, appears, or disappears), the profile
+  goes back to `new`, and `status` says why: *"chrome/Profile 3: signed-in account changed since you chose it."*
+  Choosing again records the new evidence. The email itself is never stored.
+- **This is best effort.** Linux gives no folder creation time, and a profile that was never signed in has no
+  account, so there a replaced profile with a reused folder name can inherit the earlier choice. The README says
+  so: when someone else starts using a browser on this computer, check `inkvault browsers`.
 - **`inkvault browsers`** lists every profile found, with its browser, display name, signed-in email (read live,
   never stored) and choice (`yes`, `no`, `new`). In a terminal it then asks: *"Which of these are yours? Numbers
   separated by spaces, `all`, or `none`."* Every listed profile gets an answer: picked ones `yes`, the others `no`.
@@ -125,12 +130,20 @@ A profile's key is `<browser>/<folder>`: `chrome/Profile 2`, `firefox/abcd1234.d
     (default no; `--no <key> --forget` answers yes).
   - `inkvault browsers --skip-site <host>` / `--unskip-site <host>` edit the skip list. A host matches itself and its
     subdomains. Adding one removes that site's stored visits right away.
-- **Removing** (`--forget`, `--skip-site`) takes the same lock as `sync` and the nightly run, deletes the visits from
-  `vault.db`, rebuilds search (tables and vectors) and the dashboard, and deletes the digests of the affected days
-  (the next `inkvault digest` writes them again without that browsing). If the rebuild fails, `search.db`,
-  `vectors.npz` and `dashboard.html` are deleted rather than left serving what was removed, and the message says to
-  run `inkvault index`. The nightly backups still hold the removed visits until they rotate out (7 nights); the
-  message says so.
+- **Removing** (`--forget`, `--skip-site`) takes the same lock as `sync` and the nightly run, then, in this order:
+  1. finds the affected days, in both the time zone recorded by the last index and the current one;
+  2. writes a `rebuild-needed` marker file in the InkVault home;
+  3. deletes those days' digests from `digests.db` (the next `inkvault digest` writes them again without that
+     browsing);
+  4. deletes the visits from `vault.db`;
+  5. rebuilds search (tables and vectors), then the dashboard;
+  6. deletes the marker.
+
+  While the marker exists, the MCP tools answer only *"Search is being rebuilt after something was removed: run
+  `inkvault index`."*, `status` says the same, and a successful `index` followed by a successful dashboard build
+  deletes it. So a failed rebuild, or a process killed anywhere in between, never leaves the old index serving
+  what was removed; the next nightly run's rebuild recovers. The nightly backups still hold the removed visits
+  until they rotate out (7 nights); the message says so.
 - **`rescue` and `sync`**, run in a terminal, show the same prompt when there are `new` profiles, then continue.
 - **The nightly run never asks.** `new` profiles are skipped, and both the nightly log and `inkvault status` say
   *"N browser profiles waiting for you to choose: run `inkvault browsers`."* After an upgrade every profile is `new`,
@@ -146,11 +159,12 @@ CREATE TABLE browser_visits (
     id TEXT PRIMARY KEY,          -- see "Id"
     profile TEXT NOT NULL,        -- chrome/Default
     visit_id INTEGER NOT NULL,    -- the browser's own visit id
-    from_visit INTEGER,           -- the browser's referring visit id (Firefox redirect handling)
+    redirected INTEGER NOT NULL,  -- 1: Firefox redirected away from this visit (resolved per snapshot, below)
     created TEXT NOT NULL,        -- UTC ISO time of the visit
     url TEXT NOT NULL,            -- cleaned (§3)
     address TEXT NOT NULL,        -- SHA-1 of the raw address: groups pages without storing it
     title TEXT,                   -- cleaned, as observed at the last sync that saw the visit
+    title_observed_at TEXT,       -- when that title was read (the sync's start time)
     duration_s REAL,              -- Chromium only
     transition INTEGER NOT NULL,  -- raw Chromium transition / Firefox visit_type
     origin TEXT,                  -- Chromium originator_cache_guid when set: synced from another device
@@ -173,8 +187,8 @@ CREATE TABLE browser_profiles (profile TEXT PRIMARY KEY, last_attempt TEXT, last
 - **Read everything; add new, update present.** Each sync reads the whole file. Chrome brings in other devices'
   visits with their original, older times and can reuse visit ids, so neither a time nor an id is a safe bookmark;
   a full read of a 90-day history takes seconds. Visits not yet stored are added. Visits already stored and still
-  in the file get their `title` (when non-empty), `duration_s`, `transition` and `from_visit` updated, because the
-  browser changes those after the fact. Visits no longer in the file (the browser's cleanup, or the user clearing
+  in the file get their `title` (when non-empty, with `title_observed_at`), `duration_s`, `transition` and
+  `redirected` updated, because the browser changes those after the fact. Visits no longer in the file (the browser's cleanup, or the user clearing
   history) are kept as they were.
 - **Id:** SHA-1 over the length-prefixed fields profile, native visit id, raw visit time and raw address. Distinct
   browser rows stay distinct (the seven measured collisions), and a reused visit id with a new time or address is a
@@ -184,6 +198,11 @@ CREATE TABLE browser_profiles (profile TEXT PRIMARY KEY, last_attempt TEXT, last
   as pages is decided when indexing (§4), so a visit that later loses its chain-end bit simply stops counting, and a
   later version can change the rule without another sync. `file:`, `chrome://`, `about:`, extensions and the like
   are never stored.
+- **Firefox redirects are resolved inside one snapshot.** Visit ids can be reused, and stored visits outlive the
+  browser's copy, so a stored `from_visit` could point at an unrelated old visit. Instead, while reading a copy, a
+  visit is marked `redirected` when another visit *in the same copy* has type 5 or 6 and `from_visit` pointing at
+  it. The flag is stored, and updated on later syncs while the visit is still in the file. Chromium needs no flag:
+  its chain bits are in `transition`.
 - `browser_profiles` records each profile's last attempt, last success and last error. Browser failures don't go in
   the shared `failures` table (the Pieces export clears it).
 
@@ -205,7 +224,8 @@ addresses, but a looser one can't bring anything back.
   - is identity: `email`, `emailaddress`, `loginhint`, `loginidentifier`, `upn`, `username`, `userid`, `phone`.
 - **Parameter values** are dropped whatever the name when they look like a JWT or JWE (base64url parts starting
   `eyJ`, joined by two or four dots) or an email address. A value that, percent-decoded, is itself an `http(s)`
-  address is cleaned by these same rules, up to three levels deep, and put back encoded.
+  address is cleaned by these same rules and put back encoded, up to three levels deep. A nested address found
+  past the third level is dropped with its parameter, not kept as it is.
 - **Fragments:** a fragment starting with `/` or `!/` that contains `?` is a route plus parameters: the route stays,
   the parameters are cleaned. Otherwise a fragment containing `=` is parameters. A bare fragment is dropped if it is
   JWT/JWE-shaped or 32+ characters of letters, digits, `-` and `_` with both letters and digits; otherwise it stays.
@@ -223,8 +243,7 @@ addresses, but a looser one can't bring anything back.
 - Chromium: the core type isn't 3 or 4 (sub-frames), and it ends a redirect chain (`0x20000000`) or carries neither
   chain bit. Reloads (8, which also covers restoring a session or reopening a closed tab), form submits and
   automatic top-level navigations (6) count.
-- Firefox: the type isn't 4 (embed), 7 (download) or 8 (framed link), and no other visit of the profile is a
-  redirect from it (no visit with `from_visit` pointing at it and type 5 or 6). Redirect destinations (5, 6) and
+- Firefox: the type isn't 4 (embed), 7 (download) or 8 (framed link), and `redirected` is 0. Redirect destinations (5, 6) and
   reloads (9) count.
 
 Visits measure how often pages were opened, not attention or time spent.
@@ -236,7 +255,8 @@ New tables in `search.db`:
 - `pages (id, created, day, url, host, title, visits, profiles)`: **one row per address per local day**, grouped by
   the raw-address hash, so two different documents whose cleaned addresses look alike stay two pages. `id` is
   `web:` plus the first 16 hex digits of SHA-1 of address hash and day. `created` is that day's first visit;
-  `title` the latest non-empty one (observed at sync); `visits` how many; `profiles` which.
+  `title` the most recently observed non-empty one (latest
+  `title_observed_at`, then latest visit, then smallest visit id); `visits` how many; `profiles` which.
   `visits.page_id` links each visit to its page.
 - `meta(key, value)` with `timezone`: the local time zone used for `day`. The nightly re-index follows a change.
 - `pages_fts` over `title` and `url` (porter, unicode61, like the others).
@@ -260,9 +280,18 @@ New tables in `search.db`:
   day's most-opened page titles, up to 12) and top sites from visits, after sessions and chats and within a
   1,500-character share of the 6,000-character limit. Digests already rewrite a day when its material changes, so
   days that gain browsing are rewritten on the next run.
-- **Sync works without Pieces or sessions.** `inkvault sync` syncs sessions and browsers independently, then rebuilds
-  search if either found anything; it fails only when neither exists. In the nightly run, browser sync is its own
-  step after session sync and before the backup, so a failure in one doesn't stop the other or the backup. `rescue`
+- **Sync works without Pieces or sessions, and says honestly how it went.** `inkvault sync` syncs sessions and
+  browsers independently, then rebuilds search from whatever succeeded. Browser sync has four outcomes:
+  - *nothing selected*: no `yes` profiles (it says how many are waiting);
+  - *ok*: every selected profile was read, even with zero new visits;
+  - *partial*: some selected profiles failed (named, with their errors);
+  - *failed*: every selected profile failed.
+
+  `inkvault sync` exits 1 when browser sync is partial or failed, when session sync failed, or when there are
+  neither sessions nor selected profiles; otherwise 0. Whatever succeeded is still indexed. In the nightly run, browser sync is its own
+  step after session sync and before the backup, logged as `ok`, `skipped (N waiting)`, `partial: ...` or
+  `failed: ...`. A failure in one step doesn't stop the others or the backup, and, as now, only a failed backup
+  fails the run. `rescue`
   stays Pieces-first: when the export can't reach PiecesOS, it says to use `inkvault sync` for sessions and
   browsers.
 - **`inkvault status`:** one line per `yes` profile (visits stored, first and last, last success, and the last
@@ -293,19 +322,23 @@ addresses are used.
 - **Finding and choosing:** each browser layout (Opera's, Arc's package folder); a `History` folder `Local State`
   doesn't list; System and Guest profiles ignored; the prompt (all, none, numbers); the nightly run skips `new`
   profiles and reports them; a reused folder name with a different creation time or account goes back to `new`.
-- **Removing:** `--no --forget` and `--skip-site` remove visits, rebuild search, vectors and the dashboard, and delete
-  the affected days' digests; a failed rebuild deletes the derived files instead of leaving them.
+- **Removing:** `--no --forget` and `--skip-site` delete the affected days' digests (in both time zones) before
+  rebuilding search, vectors and the dashboard; a failed rebuild, or a stop between any two steps, leaves the
+  `rebuild-needed` marker and the MCP tools refuse until a rebuild succeeds.
+- **Consent:** an account that disappears, appears or changes sends a `yes` profile back to `new` with the reason.
 - **Sync:** a second sync adds nothing; a visit added between syncs is added; two browser visits sharing profile,
   time and address are both kept; a reused visit id with a new address is a new row; a later sync updates duration,
   title and transition; a visit gone from the file stays; a copy failing twice is recorded and the next profile is
-  still read; sync works with no sessions and no Pieces.
+  still read; the four outcomes and their exit codes; sync works with no sessions and no Pieces; a title observed
+  later wins over an older observation from another profile.
 - **Counting:** sub-frames; a single-hop visit with both chain bits; a multi-hop Chromium chain keeps only its end; a
   visit that loses its chain-end bit stops counting; Firefox embeds, framed links and downloads left out; Firefox
-  multi-hop and branching redirects keep only their destinations; reloads and form submits counted; synced visits
+  multi-hop and branching redirects keep only their destinations; an expired visit stays counted when a new chain
+  reuses its native id; reloads and form submits counted; synced visits
   counted for search but not active hours.
 - **Cleaning:** a table of addresses in, cleaned addresses out: each listed parameter name and its separator
   variants (`token_id`, `tokenid`, `__clerk_handshake`), JWT and JWE values, an email value under any name, an OAuth
-  callback nested and encoded in a `redirect_uri`, `#/callback?access_token=…`, a bare JWT fragment, a reset link,
+  callback nested and encoded in a `redirect_uri`, a nested address four levels deep (dropped), `#/callback?access_token=…`, a bare JWT fragment, a reset link,
   a Google-Docs-shaped id and a UUID left alone, a search kept, a title containing an address.
 - **Index, MCP, dashboard, digests:** two different raw addresses that clean alike stay two pages; pages group by
   address and local day with their visits linked; `search_memories(source="web")` (keyword and meaning),
@@ -329,3 +362,15 @@ addresses are used.
 | 11 | `info_cache` as sole discovery; reused folder names | Discovery by `History` file; System/Guest excluded; choice bound to creation time and account hash |
 | 12 | Page identity, titles, time zone | Deterministic page ids, page-to-visit link, `timezone` recorded, titles "observed at sync" |
 | 13 | Digests already rewrite changed days; sync stops without sessions; shared `failures`; `embed.py` | All four addressed in §2, §4 and §5; top sites shown as two lists |
+
+## Changes from Codex's second review (2026-10-08)
+
+| # | Finding | Change |
+|---|---|---|
+| 1 | Nothing said what happens past three nested levels | Dropped with its parameter |
+| 2 | Firefox `from_visit` could match a reused id in an old visit | Redirects resolved within one snapshot; `redirected` flag stored |
+| 3 | Removal rebuilt the dashboard before deleting digests; a stop mid-way left stale search | Digests deleted first, days in both time zones; `rebuild-needed` marker checked by the MCP tools |
+| 4 | An account disappearing went unnoticed; Linux has no creation time | Any change in evidence resets to `new`; binding described as best effort |
+| 5 | "Fails only when neither exists" hid failed copies | Four outcomes, exit codes, nightly log wording |
+| 6 | No time recorded for title observations | `title_observed_at` and a fixed tie-breaker |
+| 7 | Three measurement claims overstated | Corrected in "What the real data looks like" |
