@@ -132,8 +132,9 @@ A profile's key is `<browser>/<folder>`: `chrome/Profile 2`, `firefox/abcd1234.d
     subdomains. Adding one removes that site's stored visits right away.
 - **Removing** (`--forget`, `--skip-site`) is a *recorded* operation, so an interruption at any point is finished
   later instead of being undone. Holding the lock (below), it:
-  1. finds the matching visits and the affected days, in both the time zone recorded by the last index (the days
-     the pages have in `search.db`) and the current one;
+  1. finds the matching visits and the affected days: each visit's UTC date and the day either side. Digests are
+     keyed by the local day when *they* were written, which can differ from both the index's time zone and
+     today's; every offset from UTC−12 to UTC+14 puts an instant on one of those three days (Codex code review);
   2. writes a `rebuild-needed` marker file in the InkVault home, and deletes `dashboard.html` (a page on disk can't
      check the marker);
   3. records the removal in `vault.db` (`browser_removals`: what, which profile or host, the affected days). All of
