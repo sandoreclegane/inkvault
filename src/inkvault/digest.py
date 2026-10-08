@@ -1,8 +1,9 @@
 """Optional: a short digest of each day, written by a local model through Ollama.
 
-Each local day's material (Pieces session titles, chats, most-used apps, windows and sites, and pages opened in a browser) goes to the
-model, and the result is stored in digests.db. Only new or changed days are written, so re-runs are quick.
-Everything stays on this machine: Ollama runs locally. Without Ollama, the dashboard still works.
+Each local day's material (Pieces session titles, chats, most-used apps, windows and sites, and pages opened in a
+browser) goes to the model, and the result is stored in digests.db. Only new or changed days are written, so
+re-runs are quick. Everything stays on this machine: Ollama runs locally. Without Ollama, the dashboard still
+works.
 """
 import hashlib
 import json

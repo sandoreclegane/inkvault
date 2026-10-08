@@ -121,10 +121,11 @@ def test_a_digest_database_that_cant_be_written_stops_the_removal_and_keeps_it_r
 
 
 def test_a_digest_database_without_its_table_is_nothing_to_delete(setup):
-    from inkvault import forget, paths
+    from inkvault import forget, paths, server
     paths.digests_db().unlink()
     sqlite3.connect(paths.digests_db()).close()  # exists, but empty
     assert forget.forget_site("bank.example") == 1 and forget.pending() == 0
+    server.timeline(since="2026-10-01")  # an empty digests.db is no digests, not an error
 
 
 def test_a_request_in_flight_when_a_removal_starts_never_returns_what_was_removed(setup, monkeypatch):

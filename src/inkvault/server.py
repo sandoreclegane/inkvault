@@ -309,10 +309,15 @@ def timeline(since: str, until: str = "", limit: int = 50) -> str:
     if paths.digests_db().exists():
         d = paths.connect_ro(paths.digests_db())
         params = []
-        for day, digest in d.execute("SELECT day, digest FROM digests WHERE 1=1" +
-                                     date_filter("day", since, until, params), params):
-            items.append((day + "T00:00", f"{day}  [day digest] {digest}"))
-        d.close()
+        try:
+            for day, digest in d.execute("SELECT day, digest FROM digests WHERE 1=1" +
+                                         date_filter("day", since, until, params), params):
+                items.append((day + "T00:00", f"{day}  [day digest] {digest}"))
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e):  # a digests.db nothing has written to yet is no digests
+                raise
+        finally:
+            d.close()
     items.sort(key=lambda x: x[0])
     return "\n".join(line for _, line in items[:limit]) or "Nothing in that range."
 
