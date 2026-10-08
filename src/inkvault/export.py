@@ -119,6 +119,13 @@ def open_vault():
         CREATE TABLE IF NOT EXISTS raw_records (kind TEXT NOT NULL, id TEXT NOT NULL, raw TEXT NOT NULL, PRIMARY KEY (kind, id));
         CREATE TABLE IF NOT EXISTS failures (kind TEXT, id TEXT, error TEXT);
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+        -- Claude Code and Codex sessions (sources.py): kept lines verbatim, and how far each file has been read.
+        CREATE TABLE IF NOT EXISTS session_lines (
+            source TEXT NOT NULL, file TEXT NOT NULL, offset INTEGER NOT NULL, raw TEXT NOT NULL, PRIMARY KEY (source, file, offset)
+        );
+        CREATE TABLE IF NOT EXISTS session_files (
+            source TEXT NOT NULL, file TEXT NOT NULL, read_to INTEGER NOT NULL, head TEXT NOT NULL, PRIMARY KEY (source, file)
+        );
     """)
     return db
 

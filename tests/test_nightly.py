@@ -264,7 +264,7 @@ def test_a_failure_after_the_start_line_does_not_log_a_second_one(quick, monkeyp
 
 def test_backup_runs_right_after_export(quick, monkeypatch):
     from inkvault import nightly
-    assert [name for name, _ in nightly.steps()] == ["export", "backup", "index", "digest", "dashboard"]
+    assert [name for name, _ in nightly.steps()] == ["export", "sync", "backup", "index", "digest", "dashboard"]
 
 
 def test_no_vault_is_not_a_plain_ok(quick):

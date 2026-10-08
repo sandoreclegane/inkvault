@@ -221,9 +221,9 @@ def lock_owner():
 
 
 def lock_purpose():
-    """What the holder is doing, "nightly" or "rescue" (from the lock file's second line), or "" if unknown."""
+    """What the holder is doing, "nightly", "rescue" or "sync" (from the lock file's second line), or "" if unknown."""
     lines = lock_lines()
-    return lines[1].strip() if len(lines) > 1 and lines[1].strip() in ("nightly", "rescue") else ""
+    return lines[1].strip() if len(lines) > 1 and lines[1].strip() in ("nightly", "rescue", "sync") else ""
 
 
 def running():
@@ -346,6 +346,11 @@ def step_export():
     return export.run(budget_seconds=left)
 
 
+def step_sync():
+    from . import sources
+    return sources.sync()
+
+
 def step_index():
     from . import index
     return index.build()
@@ -363,8 +368,8 @@ def step_dashboard():
 
 def steps():
     # Looked up at call time, so a test can replace any one of them.
-    # Only export writes vault.db, so the backup follows it directly: a slow digest can't starve it.
-    return [("export", step_export), ("backup", backup), ("index", step_index), ("digest", step_digest),
+    # Only export and sync write vault.db, so the backup follows them directly: a slow digest can't starve it.
+    return [("export", step_export), ("sync", step_sync), ("backup", backup), ("index", step_index), ("digest", step_digest),
             ("dashboard", step_dashboard)]
 
 

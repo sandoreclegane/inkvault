@@ -7,7 +7,7 @@ import json
 import os
 import sqlite3
 
-from . import embed, paths, topics
+from . import embed, paths, sources, topics
 
 
 def indices(obj, key):
@@ -37,7 +37,7 @@ def build():
     db.executescript("""
         CREATE TABLE events (id TEXT PRIMARY KEY, created TEXT, app TEXT, window_title TEXT, url TEXT, readable TEXT);
         CREATE TABLE summaries (id TEXT PRIMARY KEY, created TEXT, name TEXT, text TEXT, event_ids TEXT);
-        CREATE TABLE messages (id TEXT PRIMARY KEY, created TEXT, conversation_id TEXT, conversation_name TEXT, role TEXT, text TEXT);
+        CREATE TABLE messages (id TEXT PRIMARY KEY, created TEXT, conversation_id TEXT, conversation_name TEXT, role TEXT, text TEXT, source TEXT);
         CREATE TABLE snippets (id TEXT PRIMARY KEY, created TEXT, name TEXT, language TEXT, text TEXT);
         CREATE TABLE summary_tags (summary_id TEXT, created TEXT, tag TEXT);
     """)
@@ -62,8 +62,10 @@ def build():
     for m in raws("message"):
         conv = (m.get("conversation") or {}).get("id")
         text = (((m.get("fragment") or {}).get("string") or {}).get("raw")) or ""
-        db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)", (
+        db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,'pieces')", (
             m["id"], (m.get("created") or {}).get("value"), conv, conv_names.get(conv, ""), m.get("role"), text))
+    # Claude Code and Codex sessions. A resumed session can repeat earlier lines (same id): the first copy wins.
+    db.executemany("INSERT OR IGNORE INTO messages VALUES (?,?,?,?,?,?,?)", sources.messages(raw))
     db.executemany("INSERT INTO snippets VALUES (?,?,?,?,?)", (snippet_row(a) for a in raws("asset")))
 
     # External-content FTS tables: the index points back at rows, so text isn't stored twice.

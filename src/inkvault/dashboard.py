@@ -16,6 +16,7 @@ from . import paths, topics
 from .times import local
 
 MAX_THEMES = 14
+SOURCE_LABEL = re.compile(r"^(Claude Code|Codex) · ")
 # Words that never make a project name on their own: function words and generic work words.
 FUNCTION = {"a", "an", "and", "the", "of", "for", "with", "to", "in", "on", "at", "by", "from", "&", "vs", "via", "+", "-"}
 GENERIC = {
@@ -110,6 +111,16 @@ def topic_data(db):
     return groups, sorted([day, sorted(found)] for day, found in per_summary.values())
 
 
+def chat_sources(db):
+    """Where the chat messages came from, most first, for the Chat messages tile."""
+    names = {"pieces": "Pieces", "claude_code": "Claude Code", "codex": "Codex"}
+    try:
+        rows = db.execute("SELECT source FROM messages GROUP BY source ORDER BY COUNT(*) DESC").fetchall()
+    except sqlite3.OperationalError:  # an index built before 0.2.0 has no source column: all Pieces
+        return ["Pieces"]
+    return [names.get(s, s) for (s,) in rows] or ["Pieces"]
+
+
 def collect(db):
     days = defaultdict(lambda: {"captures": 0, "sessions": 0, "chats": 0, "hours": 0})
     apps, sites = defaultdict(Counter), defaultdict(Counter)
@@ -143,7 +154,8 @@ def collect(db):
         if role == "USER":
             c["asks"].append(text or "")
     for c in chats.values():
-        titled.append((c["day"], c["name"], "\n".join(c["asks"])))
+        # "Claude Code · harbor: …": the label names the tool, not a project, and is on every session.
+        titled.append((c["day"], SOURCE_LABEL.sub("", c["name"]), "\n".join(c["asks"])))
         if c["name"]:
             highlights[c["day"]].append(c["name"])
 
@@ -174,6 +186,7 @@ def collect(db):
         "digests": digests,
         "highlights": {d: h[:3] for d, h in highlights.items()},
         "snippets": db.execute("SELECT COUNT(*) FROM snippets").fetchone()[0],
+        "chat_sources": chat_sources(db),
         "built": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M"),
     }
 

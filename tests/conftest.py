@@ -36,6 +36,15 @@ def only_python_subprocesses(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_sessions(tmp_path_factory, monkeypatch):
+    """Sync must never read this machine's own Claude Code or Codex sessions: point both at empty folders.
+    A test that wants sessions writes them under these same variables."""
+    base = tmp_path_factory.mktemp("agents")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(base / "claude"))
+    monkeypatch.setenv("CODEX_HOME", str(base / "codex"))
+
+
+@pytest.fixture(autouse=True)
 def no_pieces_probe(request, monkeypatch):
     """PiecesOS.find probes several ports and waits on each; no test needs a real PiecesOS. A test can fake find
     itself (that wins), or use @pytest.mark.real_pieces_find."""
