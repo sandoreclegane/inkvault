@@ -10,7 +10,8 @@ forgets what you read after about 90 days.
 InkVault gathers all of it into one file on your machine: your Pieces memory, rescued once, and your conversations
 with Claude Code, Codex and the Claude desktop app and the history of the browser profiles you choose, added every
 night. It makes the whole thing searchable by your AI
-tools and draws it as a private dashboard. Nothing is uploaded anywhere.
+tools and draws it as a private dashboard. InkVault itself does not upload your archive. If you connect an AI client,
+memories returned to that client may be sent to its model provider under that client's settings.
 
 **Coming from Pieces?** Rescue your memory while PiecesOS still runs (read-only now, and gone once you uninstall it):
 
@@ -183,12 +184,14 @@ and `uv tool upgrade inkvault` updates InkVault.
 
 ## Privacy
 
-This is your screen history, your chats, your browsing and your code. InkVault is built so that none of it leaves your machine:
+This is your screen history, your chats, your browsing and your code. InkVault stores and searches your archive locally:
 
 - Everything is stored in your app-data folder (`%LOCALAPPDATA%\InkVault`, `~/Library/Application Support/InkVault`,
   or `~/.local/share/inkvault`), or wherever `INKVAULT_HOME` points. Never inside the code folder.
 - No telemetry, no accounts, no cloud.
-- Two things are downloaded, and nothing of yours is uploaded: the search model (~130 MB from Hugging Face, once)
+- InkVault itself does not upload your archive. When you connect an AI client through MCP, memories returned to that
+  client may be sent to its model provider under that client's settings. Choose your client and settings accordingly.
+- Two things are downloaded: the search model (~130 MB from Hugging Face, once)
   and the dashboard's chart library (from cdnjs, when you open the page).
 - Digests use Ollama on your own machine. Skip them with `--no-digest`.
 - From Claude Code and Codex sessions, InkVault keeps what you typed, what the assistant replied and session titles.
