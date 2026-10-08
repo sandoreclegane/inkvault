@@ -1,19 +1,44 @@
 # InkVault
 
-**Rescue your Pieces memory before it's gone, then search it from Claude, Codex, or any MCP client, and see it as a map of your year.**
+**A long-term memory you own: rescue what Pieces knew about you, keep every Claude Code and Codex session from here
+on, and search all of it from your AI tools.**
 
-Pieces for Developers shut down on September 27, 2026. PiecesOS still runs in read-only mode on your computer, and
-your long-term memory is still inside it: every capture, session summary, chat and saved snippet. Once you
-uninstall PiecesOS, it's gone.
+Your working memory is scattered across tools that don't keep it. Pieces for Developers shut down on September 27,
+2026. Claude Code deletes your sessions after 30 days. Codex keeps them in files nobody reads twice.
 
-InkVault copies all of it into a single file on your machine, makes it searchable by your AI tools, and draws it
-as a private dashboard. Nothing is uploaded anywhere.
+InkVault gathers all of it into one file on your machine: your Pieces memory, rescued once, and your conversations
+with Claude Code, Codex and the Claude desktop app, added every night. It makes the whole thing searchable by your AI
+tools and draws it as a private dashboard. Nothing is uploaded anywhere.
+
+**Coming from Pieces?** Rescue your memory while PiecesOS still runs (read-only now, and gone once you uninstall it):
 
 ```bash
 uvx --from git+https://github.com/sandoreclegane/inkvault inkvault rescue
 ```
 
-That's the whole thing. It needs [uv](https://docs.astral.sh/uv/getting-started/installation/) and PiecesOS running.
+**Never used Pieces?** Start a vault from your Claude Code and Codex sessions alone:
+
+```bash
+uvx --from git+https://github.com/sandoreclegane/inkvault inkvault sync
+```
+
+Either way, add [`inkvault schedule`](#keep-it-up-to-date) and the vault keeps growing on its own. All it needs is
+[uv](https://docs.astral.sh/uv/getting-started/installation/).
+
+### The vault keeps learning
+
+Every night, InkVault reads the session files Claude Code and Codex already keep on disk and copies in what's new:
+what you asked, what the assistant answered, what each session was called. Your AI tools can then search what they
+helped you with last month, or last year, long after the original files are gone.
+
+- **Claude Code**: every project, from `~/.claude/projects`. Kept past its 30-day cleanup.
+- **Codex**: every session it saved, from `~/.codex/sessions`.
+- **Claude desktop app** (agent mode, Windows): including prompts only its audit log kept.
+
+Only what's new since the last sync is read. Tool output and attachments are left out (see
+[Privacy](#privacy)).
+
+### Rescuing from Pieces
 
 **It takes a while.** PiecesOS hands records over at about 8 per second, so a year of captures (~100,000) takes
 around 3-4 hours. Leave it running, or press **Ctrl+C** anytime: InkVault keeps everything saved so far and opens
@@ -28,9 +53,9 @@ a dashboard of what you have. Run the same command again later and it picks up w
 - **Memory Atlas**: a dashboard of your year. Active hours per day (hover a day for what it was about), when you work,
   how your projects connect, projects over time, topics over time (from Pieces' own topic tags: ongoing interests
   and short bursts), top apps and sites. Every chart has a table view.
-- **Your Claude Code and Codex sessions** (new in 0.2.0), and the Claude desktop app's agent-mode sessions: your
-  prompts and the replies, copied from the session files these tools keep on disk, so the vault keeps growing after
-  Pieces. Claude Code deletes sessions after 30 days by default; the vault keeps them. Searchable as chats, and on the dashboard and in the digests.
+- **Your Claude Code, Codex and Claude desktop sessions**: your prompts and the replies, side by side with your
+  Pieces history, searchable as chats (named like `Claude Code · project: title`), and part of the timeline, the
+  digests and the dashboard.
 - **Daily digests** (optional): a 2-3 sentence summary of each day, written by a *local* model through
   [Ollama](https://ollama.com). Pieces stopped writing summaries; this picks up where it left off.
 
