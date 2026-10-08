@@ -182,3 +182,28 @@ def test_a_removal_clears_digests_for_every_day_its_visits_could_fall_on(setup):
     left = {d for (d,) in rows(paths.digests_db(), "SELECT day FROM digests")}
     assert not left & {"2026-10-06", "2026-10-07", "2026-10-08"}
     assert "2026-10-10" in left
+
+
+def no_model():
+    raise RuntimeError("no model")
+
+
+def test_a_failed_embedding_leaves_search_db_free_to_replace(setup, monkeypatch):
+    import os
+    import shutil
+    from inkvault import embed, paths
+    monkeypatch.setattr(embed, "load_model", no_model)
+    with pytest.raises(RuntimeError) as failed:  # the traceback keeps build()'s frame, and any handle in it, alive
+        embed.build()
+    copy = paths.search_db().with_name("copy.db")
+    shutil.copy(paths.search_db(), copy)
+    os.replace(copy, paths.search_db())  # fails on Windows while a handle is still open
+
+
+def test_clearing_old_vectors_needs_no_model(setup, monkeypatch):
+    from inkvault import embed, forget, paths
+    forget.forget_profile("chrome/Default")
+    paths.vectors().write_bytes(b"old")
+    monkeypatch.setattr(embed, "load_model", no_model)
+    embed.build()
+    assert not paths.vectors().exists()
