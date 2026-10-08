@@ -5,7 +5,8 @@
 - **Claude Code and Codex sessions** in the vault: `inkvault sync` copies your prompts, the replies and session
   titles from the session files both tools keep on disk, reading only what's new. `rescue` and the nightly run sync
   too, before the backup. Sessions Claude Code deletes after 30 days stay in the vault. Tool output and attachments
-  are left out (most of the bytes, and where secrets show up). Sessions are searchable as chats (named
+  are left out (most of the bytes, and where secrets show up), and so are pasted images. Codex's own setup text
+  (AGENTS.md, environment context) isn't counted as your words. Sessions are searchable as chats (named
   `Claude Code · project: title`), and feed the timeline, digests and dashboard.
 - `inkvault status` lists synced sessions per source; `memory_stats` counts chat messages per source; the
   dashboard's Chat messages tile says which sources it counts; `get_memory` shows a conversation's name.

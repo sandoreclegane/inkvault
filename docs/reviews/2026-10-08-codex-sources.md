@@ -72,7 +72,7 @@ uv run python -c "from inkvault import server; print(server.search_memories('a w
 ```
 
 Then compare a few of your sessions with what InkVault indexed: `get_memory('<id from the search results>')`
-shows a whole conversation. Look for missing turns, duplicated turns, injected context showing up as the user's
+shows a conversation (up to 20,000 characters by default; pass `max_chars` for more). Look for missing turns, duplicated turns, injected context showing up as the user's
 words, and wrong timestamps. Please quote only short excerpts in your reply; these are the user's private
 sessions. When you're done, delete `%TEMP%\inkvault-codex-review`.
 

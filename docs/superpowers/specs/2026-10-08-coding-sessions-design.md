@@ -44,17 +44,21 @@ CREATE TABLE session_files (source TEXT NOT NULL, file TEXT NOT NULL, read_to IN
 - `source` is `claude_code` or `codex`. `file` is the file's name. Session files are named by a unique id, so
   Codex moving a session to `archived_sessions/` doesn't read it twice.
 - **Kept lines are stored verbatim**: the text of the line as written, so a later version can read them differently
-  without another sync.
+  without another sync. One exception: image, document and tool-result blocks inside a kept line's message content
+  are replaced by `{"type": ..., "omitted": true}`, and that line is stored re-serialized. Pasted images arrive as
+  inline base64 and would otherwise fill the vault and its backups (Codex review, 2026-10-08).
 - **What's kept:**
   - Claude Code: `user` and `assistant` lines, except user lines that are only tool results; and title lines
     (`summary`, any type ending in `title`).
-  - Codex: `session_meta`, `response_item` messages, `event_msg` user and agent messages, and the old format's
-    message and metadata lines.
+  - Codex: `session_meta`, `response_item` messages, `event_msg` user and agent messages, `compacted` records
+    (kept, not indexed), and the old format's message and metadata lines.
   - Everything else (tool output, attachments, queue and hook bookkeeping) is left out. Tool *calls* stay, inside
     the assistant lines.
 - **Incremental:** each file is read from `read_to` (a byte offset), and only complete lines (ending in `\n`) are
   taken, so a session in progress is picked up where it stopped. `head` is the SHA-1 of the first line; if it
   changed, or the file got shorter, the file was rewritten, so its lines are dropped and it is read from the start.
+  This is an assumption that the files are append-only, not a full rewrite detector: a rewrite that keeps the first
+  line and doesn't shrink the file goes unnoticed.
 - **Deleted files keep their lines.** That is the point: Claude Code's 30-day cleanup no longer loses anything.
 - Only Claude Code's top-level session files are read (`projects/*/*.jsonl`), not subagent transcripts.
 - A file that can't be read, or a line that isn't JSON, is skipped (the line still counts as read); one bad file
@@ -75,8 +79,17 @@ CREATE TABLE session_files (source TEXT NOT NULL, file TEXT NOT NULL, read_to IN
 - Claude Code text: string content or `text` blocks only (no thinking, tool calls or tool results).
   `<system-reminder>` blocks are removed. Sidechain, `isMeta` and slash-command lines (`<command-…>`,
   `<local-command-…>`) are skipped.
-- Codex text: `event_msg` user and agent messages when the session has them. Otherwise `response_item` messages,
-  skipping user text that starts with `<` (injected context).
+- Codex text: `response_item` messages are the turns (on 108 real sessions, CLI 0.101 to 0.162, every assistant
+  reply was there). An `event_msg` user or agent message with no matching response item (same role and text, each
+  match used once) is added where it appears, so a file mixing both shapes loses nothing.
+- Codex user text: whole input blocks Codex injects are dropped: `<environment_context>…</environment_context>`,
+  `<user_instructions>…</user_instructions>`, and `# AGENTS.md instructions for …` followed by
+  `<INSTRUCTIONS>…</INSTRUCTIONS>`. An answer to an in-app question
+  (`<send_user_message_question_reply>…</send_user_message_question_reply>`) keeps the answer. Any other text,
+  markup included, is the user's.
+- Codex message ids are `codex:<session id>:<hash of role, time and text>:<occurrence>`, so the same session saved
+  under two file names is indexed once, while a prompt repeated in one session is kept each time. A fork with its
+  own session id stays its own conversation.
 - Empty messages are skipped. A line that doesn't parse, or has no timestamp, never stops indexing (Codex's older
   files use the session's start time).
 
@@ -101,6 +114,12 @@ column on `messages`).
 - A file that isn't valid UTF-8: decoded with replacement characters.
 - A session file copied to another machine with the same name: the same session, read once.
 - A very large session: read line by line, never whole.
+
+## Not yet
+
+- Codex's progress commentary and final reply are both kept as assistant messages; telling them apart needs the
+  field that marks the channel.
+- `compacted` records are stored but not shown anywhere.
 
 ## Testing
 

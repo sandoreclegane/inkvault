@@ -128,7 +128,8 @@ This is your screen history, your chats and your code. InkVault is built so that
 - Digests use Ollama on your own machine. Skip them with `--no-digest`.
 - From Claude Code and Codex sessions, InkVault keeps what you typed, what the assistant replied and session titles.
   Claude Code's replies include its tool calls, so a file it wrote is kept as written. Tool output (files it read,
-  command output) and attachments are left out: they are most of each file and where secrets tend to show up.
+  command output), pasted images and attachments are left out: they are most of each file and where secrets tend
+  to show up. That lowers the risk; it can't rule it out, since anything you typed or pasted as text is kept.
 - Captured text was written by other people and apps. The MCP server tells your AI tool to treat it as data, not
   instructions.
 

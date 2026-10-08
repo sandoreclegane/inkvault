@@ -1,9 +1,12 @@
 """Claude Code and Codex sessions, copied into vault.db so they outlive the tools' own cleanup.
 
 Both keep every session on disk as JSONL. Each sync reads only what was added since the last one, and stores the
-lines that matter (prompts, replies, titles) exactly as written. Tool output and attachments are left out: they are
-most of the bytes, and where secrets end up. Claude Code deletes old sessions after 30 days by default; lines
-already in the vault stay there.
+lines that matter (prompts, replies, titles) exactly as written, except that images, documents and tool results
+inside a kept line are replaced by a short placeholder (that line is then stored re-serialized). Tool output and
+attachments are most of the bytes, and where secrets end up. Claude Code deletes old sessions after 30 days by
+default; lines already in the vault stay there.
+
+The files are assumed to be append-only: a rewrite is noticed only if the first line changes or the file shrinks.
 
 At index time, messages() turns the stored lines into chat messages for search, digests and the dashboard.
 """
@@ -13,6 +16,7 @@ import json
 import os
 import re
 import sqlite3
+from collections import Counter
 from pathlib import Path
 
 from . import export
@@ -57,10 +61,28 @@ def keep_codex(o):
         return payload.get("type") == "message"
     if t == "event_msg":
         return payload.get("type") in ("user_message", "agent_message")
+    if t == "compacted":  # kept so a later version can show where context was summarized; not indexed
+        return True
     return t == "message" or (t is None and "id" in o and "timestamp" in o)  # the older, unwrapped format
 
 
 SOURCES = {"claude_code": (claude_files, keep_claude), "codex": (codex_files, keep_codex)}
+# Blocks never stored, even inside a kept line: pasted images and files (often inline base64) and tool output.
+OMITTED = {"image", "input_image", "document", "tool_result"}
+
+
+def omit_attachments(o):
+    """o with OMITTED blocks in its message content replaced by {"type": ..., "omitted": true}; None if it had none."""
+    holders = [o.get("message"), o.get("payload"), o]  # Claude Code, Codex, Codex's older format
+    changed = False
+    for h in holders:
+        if isinstance(h, dict) and isinstance(h.get("content"), list):
+            blocks = [{"type": b["type"], "omitted": True} if isinstance(b, dict) and b.get("type") in OMITTED else b
+                      for b in h["content"]]
+            if blocks != h["content"]:
+                h["content"] = blocks
+                changed = True
+    return o if changed else None
 
 
 def read_file(db, source, path, keep):
@@ -89,8 +111,10 @@ def read_file(db, source, path, keep):
             except ValueError:
                 kept = False
             if kept:
-                db.execute("INSERT OR REPLACE INTO session_lines VALUES (?,?,?,?)",
-                           (source, name, offset, line.decode("utf-8", "replace").rstrip("\r\n")))
+                stripped = omit_attachments(o)
+                raw = json.dumps(stripped, ensure_ascii=False) if stripped else \
+                    line.decode("utf-8", "replace").rstrip("\r\n")
+                db.execute("INSERT OR REPLACE INTO session_lines VALUES (?,?,?,?)", (source, name, offset, raw))
                 stored += 1
             offset += len(line)
     db.execute("INSERT OR REPLACE INTO session_files VALUES (?,?,?,?)", (source, name, offset, now_head))
@@ -174,7 +198,38 @@ def claude_messages(file, lines):
     return conv, conversation_name("claude_code", cwd, title or first), out
 
 
+# Text Codex adds to a user message that the user didn't type: whole input blocks of these shapes.
+CODEX_CONTEXT = [
+    re.compile(r"\A\s*<(environment_context|user_instructions)>.*</\1>\s*\Z", re.S),
+    re.compile(r"\A\s*# AGENTS\.md instructions for [^\n]*\n\s*<INSTRUCTIONS>.*</INSTRUCTIONS>\s*\Z", re.S),
+]
+# The user's answer to a question Codex asked in the app: keep the answer, drop the wrapper.
+CODEX_REPLY = re.compile(r"\A\s*<send_user_message_question_reply>(.*)</send_user_message_question_reply>\s*\Z", re.S)
+
+
+def codex_user_text(text):
+    if any(rx.match(text) for rx in CODEX_CONTEXT):
+        return ""
+    if m := CODEX_REPLY.match(text):
+        return m.group(1)
+    return text
+
+
+def codex_text(item):
+    content = item.get("content")
+    if item.get("role") == "user" and isinstance(content, list):
+        content = [dict(b, text=codex_user_text(b["text"])) if isinstance(b, dict) and isinstance(b.get("text"), str)
+                   else b for b in content]
+    return block_text(content, ("input_text", "output_text", "text")).strip()
+
+
 def codex_messages(file, lines):
+    """One Codex session -> (id, created, role, text), plus its id and name.
+
+    Turns come from response_item messages. event_msg user and agent messages usually repeat them; one that has no
+    matching response item (same role and text, each match used once) is added where it appears. Ids come from the
+    session id and the message itself, so a copy of a session under another file name isn't indexed twice.
+    """
     meta, events, items = {}, [], []
     for offset, o in lines:
         t, payload = o.get("type"), o.get("payload") if isinstance(o.get("payload"), dict) else {}
@@ -185,18 +240,29 @@ def codex_messages(file, lines):
             meta = meta or o
         elif t == "event_msg" and isinstance(payload.get("message"), str):
             role = "USER" if payload.get("type") == "user_message" else "ASSISTANT"
-            events.append((offset, ts, role, payload["message"]))
+            text = codex_user_text(payload["message"]) if role == "USER" else payload["message"]
+            events.append((offset, ts, role, text.strip()))
         elif t in ("response_item", "message"):
             item = payload if t == "response_item" else o
             if item.get("role") in ("user", "assistant"):
-                text = block_text(item.get("content"), ("input_text", "output_text", "text"))
-                if not (item["role"] == "user" and text.lstrip().startswith("<")):
-                    items.append((offset, ts, item["role"].upper(), text))
+                items.append((offset, ts, item["role"].upper(), codex_text(item)))
+    unmatched = Counter((role, text) for _, _, role, text in items)
+    for e in events:
+        if unmatched[e[2], e[3]]:
+            unmatched[e[2], e[3]] -= 1
+        else:
+            items.append(e)
+    items.sort(key=lambda m: m[0])
     start = meta.get("timestamp") if isinstance(meta.get("timestamp"), str) else None
-    out = [(f"codex:{file}:{offset}", ts if isinstance(ts, str) else start, role, text.strip())
-           for offset, ts, role, text in (events or items)]
-    out = [m for m in out if m[1] and m[3]]
     session = meta.get("id") if isinstance(meta.get("id"), str) else Path(file).stem
+    seen, out = Counter(), []
+    for _, ts, role, text in items:
+        ts = ts if isinstance(ts, str) else start
+        if not ts or not text:
+            continue
+        key = hashlib.sha1(f"{role}\0{ts}\0{text}".encode()).hexdigest()[:16]
+        out.append((f"codex:{session}:{key}:{seen[key]}", ts, role, text))
+        seen[key] += 1
     first = next((text for _, _, role, text in out if role == "USER"), "untitled")
     return f"codex:{session}", conversation_name("codex", meta.get("cwd"), first), out
 

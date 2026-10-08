@@ -179,7 +179,7 @@ CODEX_NEW = [
     {"timestamp": "2026-10-06T09:00:00Z", "type": "session_meta",
      "payload": {"id": "cx-1", "timestamp": "2026-10-06T09:00:00Z", "cwd": "C:\\work\\garden"}},
     {"timestamp": "2026-10-06T09:00:01Z", "type": "response_item",
-     "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<environment_context>x"}]}},
+     "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<environment_context>\n  <cwd>C:\\work\\garden</cwd>\n</environment_context>"}]}},
     {"timestamp": "2026-10-06T09:00:02Z", "type": "response_item",
      "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Fix the planner"}]}},
     {"timestamp": "2026-10-06T09:00:02Z", "type": "event_msg", "payload": {"type": "user_message", "message": "Fix the planner"}},
@@ -205,7 +205,7 @@ def test_codex_older_format(home):
     write(os.path.join(os.environ["CODEX_HOME"], "sessions", "rollout-old.jsonl"),
           {"id": "cx-old", "timestamp": "2025-06-01T10:00:00Z", "instructions": ""},
           {"record_type": "state"},
-          {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<user_instructions>x"}]},
+          {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<user_instructions>\nbe brief\n</user_instructions>"}]},
           {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Rename the module"}]},
           {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Renamed."}]})
     sources.sync()
@@ -275,3 +275,93 @@ def test_the_tool_name_is_never_a_project(home):
         db.close()
     assert not any("Claude" in t or "Code" == t for t in data["themes"])
     assert sum(d["chats"] for d in data["days"].values()) == 12
+
+
+def codex_file(*objs, name="rollout-cx-1.jsonl"):
+    write(os.path.join(os.environ["CODEX_HOME"], "sessions", "2026", "10", "06", name), *objs)
+
+
+def user_item(ts, *texts, extra=()):
+    return {"timestamp": ts, "type": "response_item", "payload": {
+        "type": "message", "role": "user", "content": [*({"type": "input_text", "text": t} for t in texts), *extra]}}
+
+
+def reply_item(ts, text):
+    return {"timestamp": ts, "type": "response_item",
+            "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}}
+
+
+AGENTS = "# AGENTS.md instructions for C:\\work\\garden\n\n<INSTRUCTIONS>\nUse tabs.\n</INSTRUCTIONS>"
+
+
+def test_codex_setup_is_not_the_users_words_but_markup_and_answers_are(home):
+    from inkvault import sources
+    codex_file(CODEX_NEW[0],
+               user_item("2026-10-06T09:00:01Z", AGENTS),
+               user_item("2026-10-06T09:00:02Z", "<html> please review this"),
+               reply_item("2026-10-06T09:00:03Z", "Which file?"),
+               user_item("2026-10-06T09:00:04Z",
+                         "<send_user_message_question_reply>index.html</send_user_message_question_reply>"),
+               user_item("2026-10-06T09:00:05Z", "mentions AGENTS.md instructions in passing"))
+    sources.sync()
+    rows = index_messages()
+    assert [(r[4], r[5]) for r in rows] == [("USER", "<html> please review this"), ("ASSISTANT", "Which file?"),
+                                            ("USER", "index.html"),
+                                            ("USER", "mentions AGENTS.md instructions in passing")]
+    assert {r[3] for r in rows} == {"Codex · garden: <html> please review this"}
+
+
+def test_images_and_tool_results_are_not_stored(home):
+    from inkvault import sources
+    image = {"type": "input_image", "image_url": "data:image/png;base64,SECRETPIXELS"}
+    codex_file(CODEX_NEW[0], user_item("2026-10-06T09:00:01Z", "what is in this screenshot?", extra=[image]))
+    write(os.path.join(claude_dir(), "sess-1.jsonl"),
+          turn("user", "u1", [{"type": "text", "text": "and this one?"},
+                              {"type": "image", "source": {"type": "base64", "data": "MOREPIXELS"}},
+                              {"type": "tool_result", "tool_use_id": "t1", "content": "API_KEY=sk-123"}]))
+    sources.sync()
+    stored = "".join(r for (r,) in vault_rows("SELECT raw FROM session_lines"))
+    assert "SECRETPIXELS" not in stored and "MOREPIXELS" not in stored and "sk-123" not in stored
+    assert '{"type": "input_image", "omitted": true}' in stored
+    assert sorted(r[5] for r in index_messages()) == ["and this one?", "what is in this screenshot?"]
+
+
+def test_codex_events_fill_turns_the_response_items_lack(home):
+    from inkvault import sources
+    codex_file(CODEX_NEW[0],
+               user_item("2026-10-06T09:00:01Z", "first ask"), reply_item("2026-10-06T09:00:02Z", "first answer"),
+               {"timestamp": "2026-10-06T09:01:00Z", "type": "event_msg",
+                "payload": {"type": "user_message", "message": "second ask"}},
+               {"timestamp": "2026-10-06T09:01:05Z", "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "second answer"}},
+               user_item("2026-10-06T09:02:00Z", "third ask"),
+               {"timestamp": "2026-10-06T09:02:00Z", "type": "event_msg",
+                "payload": {"type": "user_message", "message": "third ask"}})
+    sources.sync()
+    assert [r[5] for r in index_messages()] == ["first ask", "first answer", "second ask", "second answer",
+                                                "third ask"]
+
+
+def test_a_repeated_prompt_is_kept_each_time(home):
+    from inkvault import sources
+    codex_file(CODEX_NEW[0], user_item("2026-10-06T09:00:01Z", "run the tests"),
+               user_item("2026-10-06T09:05:00Z", "run the tests"))
+    sources.sync()
+    assert [r[5] for r in index_messages()] == ["run the tests", "run the tests"]
+
+
+def test_a_copied_codex_session_is_indexed_once(home):
+    from inkvault import sources
+    codex_file(*CODEX_NEW)
+    codex_file(*CODEX_NEW, name="rollout-copy.jsonl")
+    sources.sync()
+    assert len(index_messages()) == 2
+
+
+def test_codex_compaction_is_kept_but_not_indexed(home):
+    from inkvault import sources
+    codex_file(*CODEX_NEW, {"timestamp": "2026-10-06T10:00:00Z", "type": "compacted",
+                            "payload": {"message": "Summary of the work so far"}})
+    sources.sync()
+    assert any("Summary of the work so far" in r for (r,) in vault_rows("SELECT raw FROM session_lines"))
+    assert "Summary of the work so far" not in [r[5] for r in index_messages()]
