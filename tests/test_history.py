@@ -237,3 +237,170 @@ def test_firefox_visits_still_in_the_wal_file_are_read(home, monkeypatch):
     finally:
         live.close()
     assert [u for _, _, u in stored()] == ["https://example.com/old", "https://example.com/new"]
+
+
+def search_rows(sql):
+    from inkvault import paths
+    db = paths.connect_ro(paths.search_db())
+    try:
+        return db.execute(sql).fetchall()
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("transition, counted", [
+    (LINK, True),                      # an ordinary visit: both chain bits
+    (CHAIN_START, False),              # the first hop of a redirect chain
+    (CHAIN_END, True),                 # where the chain ended
+    (0, True),                         # no chain bits at all
+    (LINK | 3, False), (LINK | 4, False),  # sub-frames
+    (LINK | 6, True), (LINK | 7, True), (LINK | 8, True),  # automatic top-level, form submit, reload
+])
+def test_which_chromium_visits_count(transition, counted):
+    from inkvault import history
+    assert history.counts("chrome/Default", transition, 0) is counted
+
+
+@pytest.mark.parametrize("visit_type, redirected, counted", [
+    (1, 0, True), (5, 0, True), (6, 0, True), (9, 0, True),  # link, redirect destinations, reload
+    (4, 0, False), (7, 0, False), (8, 0, False),             # embed, download, framed link
+    (1, 1, False),                                           # redirected away from
+])
+def test_which_firefox_visits_count(visit_type, redirected, counted):
+    from inkvault import history
+    assert history.counts(FIREFOX, visit_type, redirected) is counted
+
+
+def test_firefox_redirect_chains_count_only_where_they_end(home, monkeypatch):
+    from inkvault import history, index
+    places = firefox(home, monkeypatch)
+    firefox_visit(places, 1, "https://a.example/", T1)                            # multi-hop: a -> b -> c
+    firefox_visit(places, 2, "https://b.example/", T1, visit_type=5, from_visit=1)
+    firefox_visit(places, 3, "https://c.example/", T1, visit_type=6, from_visit=2)
+    firefox_visit(places, 4, "https://d.example/", T2)                            # branching: d -> e, d -> f
+    firefox_visit(places, 5, "https://e.example/", T2, visit_type=5, from_visit=4)
+    firefox_visit(places, 6, "https://f.example/", T2, visit_type=6, from_visit=4)
+    firefox_visit(places, 7, "https://g.example/file.zip", T2, visit_type=7)      # a download
+    choose(FIREFOX)
+    history.sync()
+    index.build()
+    assert search_rows("SELECT host FROM pages ORDER BY host") == [("c.example",), ("e.example",), ("f.example",)]
+
+
+def test_an_expired_firefox_visit_stays_counted_when_a_new_chain_reuses_its_id(home, monkeypatch):
+    from inkvault import history, index
+    places = firefox(home, monkeypatch)
+    firefox_visit(places, 1, "https://old.example/", T1)
+    choose(FIREFOX)
+    history.sync()
+    webfixtures.execute(places, "DELETE FROM moz_historyvisits WHERE id=1")
+    firefox_visit(places, 1, "https://new.example/", T2)  # the id is reused, and redirected away from
+    firefox_visit(places, 2, "https://dest.example/", T2, visit_type=5, from_visit=1)
+    history.sync()
+    index.build()
+    assert search_rows("SELECT host FROM pages ORDER BY host") == [("dest.example",), ("old.example",)]
+
+
+def test_a_chromium_visit_that_loses_its_chain_end_stops_counting(home, monkeypatch):
+    from inkvault import history, index
+    h = chrome(home, monkeypatch, "Default")["Default"]
+    chromium_visit(h, 1, "https://hop.example/", T1)
+    choose("chrome/Default")
+    history.sync()
+    index.build()
+    assert search_rows("SELECT COUNT(*) FROM pages") == [(1,)]
+    webfixtures.execute(h, "UPDATE visits SET transition=? WHERE id=1", CHAIN_START)  # a client redirect extended it
+    history.sync()
+    index.build()
+    assert search_rows("SELECT COUNT(*) FROM pages") == [(0,)]
+
+
+def test_pages_are_one_per_address_per_local_day(home, monkeypatch):
+    from inkvault import history, index
+    h = chrome(home, monkeypatch, "Default")["Default"]
+    chromium_visit(h, 1, "https://example.com/a", "2026-10-05T12:00:00Z", title="A")
+    chromium_visit(h, 2, "https://example.com/a", "2026-10-05T12:30:00Z")
+    chromium_visit(h, 3, "https://example.com/a", "2026-10-08T12:00:00Z")
+    # two different raw addresses that clean alike stay two pages
+    chromium_visit(h, 4, "https://x.example/reset/Ab3dEf6hIj9kLm2nOp5q", "2026-10-05T12:00:00Z")
+    chromium_visit(h, 5, "https://x.example/reset/Zy9xWv8uTs7rQp6oNm5l", "2026-10-05T12:00:00Z")
+    choose("chrome/Default")
+    history.sync()
+    index.build()
+    assert search_rows("SELECT url, visits FROM pages ORDER BY url, day") == [
+        ("https://example.com/a", 2), ("https://example.com/a", 1),
+        ("https://x.example/reset/…", 1), ("https://x.example/reset/…", 1)]
+    assert search_rows("SELECT COUNT(*), COUNT(DISTINCT page_id) FROM visits") == [(5, 4)]
+    assert all(pid.startswith("web:") and len(pid) == 20 for (pid,) in search_rows("SELECT id FROM pages"))
+    assert search_rows("SELECT key FROM meta") == [("timezone",)]
+
+
+def test_the_title_observed_last_wins_over_a_later_visit_from_another_profile(home, monkeypatch):
+    from inkvault import history, index
+    url = "https://example.com/doc"
+    h = chrome(home, monkeypatch, "Default", "Profile 1")
+    chromium_visit(h["Default"], 1, url, "2026-10-05T12:00:00Z", title="Old title")
+    chromium_visit(h["Profile 1"], 1, url, "2026-10-05T12:10:00Z", title="Other title")
+    choose("chrome/Default", "chrome/Profile 1")
+    monkeypatch.setattr(history, "now", lambda: "2026-10-06T00:00:00Z")
+    history.sync()
+    webfixtures.execute(h["Default"], "UPDATE urls SET title='New title'")
+    choose("chrome/Default", no=["chrome/Profile 1"])
+    monkeypatch.setattr(history, "now", lambda: "2026-10-07T00:00:00Z")
+    history.sync()
+    index.build()
+    assert search_rows("SELECT title, visits, profiles FROM pages") == [
+        ("New title", 2, "chrome/Default,chrome/Profile 1")]
+
+
+def test_meaning_search_has_a_web_query(home, monkeypatch):
+    from inkvault import embed, history, index, paths
+    h = chrome(home, monkeypatch, "Default")["Default"]
+    chromium_visit(h, 1, "https://docs.example.com/retry", T1, title="Retry with backoff")
+    choose("chrome/Default")
+    history.sync()
+    index.build()
+    db = paths.connect_ro(paths.search_db())
+    try:
+        assert [t for _, t in db.execute(embed.QUERIES["web"])] == ["Retry with backoff\ndocs.example.com/retry"]
+    finally:
+        db.close()
+
+
+def test_with_nothing_left_to_embed_the_old_vectors_go(home, monkeypatch):
+    from inkvault import history, index, paths
+    h = chrome(home, monkeypatch, "Default")["Default"]
+    chromium_visit(h, 1, "https://docs.example.com/retry", T1, title="Retry with backoff")
+    choose("chrome/Default")
+    history.sync()
+    index.build()
+    assert paths.vectors().exists()
+    db = sqlite3.connect(paths.vault_db())
+    db.execute("DELETE FROM browser_visits")
+    db.commit()
+    db.close()
+    index.build()
+    assert not paths.vectors().exists()
+
+
+def test_an_old_vault_without_browser_tables_still_indexes(home):
+    from inkvault import export, index, paths
+    db = export.open_vault()
+    db.execute("DROP TABLE browser_visits")
+    db.commit()
+    db.close()
+    assert index.build()
+    assert search_rows("SELECT COUNT(*) FROM pages") == [(0,)]
+
+
+def test_a_failed_search_build_leaves_no_file_open(home, monkeypatch):
+    from inkvault import export, history, index, paths
+    export.open_vault().close()
+
+    def broken(raw, db):
+        raise RuntimeError("index broke")
+    monkeypatch.setattr(history, "index_into", broken)
+    with pytest.raises(RuntimeError):
+        index.build()
+    paths.search_db().with_suffix(".tmp").unlink()  # Windows can't delete a file that is still open
+    paths.vault_db().unlink()

@@ -15,6 +15,7 @@ from typing import NamedTuple
 from urllib.parse import urlsplit
 
 from . import browsers, export, urlclean
+from .times import local
 
 CHROME_EPOCH = datetime(1601, 1, 1, tzinfo=timezone.utc)
 UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -220,3 +221,59 @@ def sync():
         db.close()
     outcome = "ok" if not failed else "failed" if len(failed) == len(chosen) else "partial"
     return SyncResult(outcome, len(chosen), failed, len(waiting))
+
+
+# --- From the vault into search (used by index.py) ---
+
+FIREFOX_NOT_PAGES = {4, 7, 8}  # embed, download, framed link
+CHAIN_START, CHAIN_END = 0x10000000, 0x20000000
+
+INDEX_TABLES = """
+    CREATE TABLE visits (id TEXT PRIMARY KEY, created TEXT, profile TEXT, browser TEXT, host TEXT, page_id TEXT,
+                         synced INTEGER);
+    CREATE TABLE pages (id TEXT PRIMARY KEY, created TEXT, day TEXT, url TEXT, host TEXT, path TEXT, title TEXT,
+                        visits INTEGER, profiles TEXT);
+"""
+
+
+def counts(profile, transition, redirected):
+    """Whether a stored visit counts: a recorded top-level navigation (spec §4). Decided here, at index time, so a
+    visit the browser later re-labels, or a later change to this rule, needs no new sync."""
+    if profile.startswith("firefox/"):
+        return transition not in FIREFOX_NOT_PAGES and not redirected
+    if (transition & 0xFF) in (3, 4):  # sub-frames
+        return False
+    return bool(transition & CHAIN_END) or not transition & CHAIN_START  # a chain's end, or no chain at all
+
+
+def index_into(raw, db):
+    """Counted visits, and one page per address per local day, from vault.db (raw) into search.db (db)."""
+    db.executescript(INDEX_TABLES)
+    try:
+        rows = raw.execute("SELECT id, profile, visit_id, created, url, address, title, title_observed_at, "
+                           "transition, redirected, origin FROM browser_visits ORDER BY created, id").fetchall()
+    except sqlite3.OperationalError:  # a vault from before 0.3.0
+        rows = []
+    pages, visits = {}, []
+    for vid, profile, native, created, url, address, title, observed, transition, redirected, origin in rows:
+        if not counts(profile, transition, redirected):
+            continue
+        try:
+            day = local(created).date().isoformat()
+        except (TypeError, ValueError):
+            continue
+        page_id = "web:" + hashlib.sha1(f"{address}\n{day}".encode()).hexdigest()[:16]
+        parts = urlsplit(url)
+        host = (parts.hostname or "").removeprefix("www.")
+        p = pages.setdefault(page_id, {"created": created, "day": day, "url": url, "host": host, "path": parts.path,
+                                       "title": None, "rank": None, "visits": 0, "profiles": set()})
+        p["visits"] += 1
+        p["profiles"].add(profile)
+        rank = (observed or "", created, -native)  # last observed, then latest visit, then smallest visit id
+        if title and (p["rank"] is None or rank > p["rank"]):
+            p["title"], p["rank"] = title, rank
+        visits.append((vid, created, profile, profile.split("/", 1)[0], host, page_id, int(bool(origin))))
+    db.executemany("INSERT INTO visits VALUES (?,?,?,?,?,?,?)", visits)
+    db.executemany("INSERT INTO pages VALUES (?,?,?,?,?,?,?,?,?)", (
+        (pid, p["created"], p["day"], p["url"], p["host"], p["path"], p["title"], p["visits"],
+         ",".join(sorted(p["profiles"]))) for pid, p in pages.items()))

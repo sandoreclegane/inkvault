@@ -18,6 +18,7 @@ QUERIES = {
     "chats": "SELECT id, coalesce(conversation_name,'') || char(10) || coalesce(text,'') FROM messages "
              "WHERE role IN ('USER','ASSISTANT') AND length(text) > 0",
     "snippets": "SELECT id, name || char(10) || language || char(10) || text FROM snippets",
+    "web": "SELECT id, coalesce(title,'') || char(10) || host || path FROM pages",
 }
 
 
@@ -48,6 +49,7 @@ def build():
         ids += [i for i, _ in rows]
     db.close()
     if not vecs:
+        paths.vectors().unlink(missing_ok=True)  # e.g. a removal took the last records: their vectors go too
         print("nothing to embed yet")
         return
     tmp = paths.vectors().with_name("vectors.tmp.npz")
