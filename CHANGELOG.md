@@ -10,6 +10,8 @@
   `Claude Code · project: title`), and feed the timeline, digests and dashboard.
 - **Claude desktop app sessions** (agent mode, Windows) are synced too, as their own source (`Claude desktop`).
   They live in the app's package folder, apart from `~/.claude`, at paths past Windows' 260-character limit.
+  Prompts that only the app's audit log kept are added to their conversation, and sessions known only from an
+  audit log are kept too. The app's random sandbox folder name is never shown as a project.
 - `inkvault status` lists synced sessions per source; `memory_stats` counts chat messages per source; the
   dashboard's Chat messages tile says which sources it counts; `get_memory` shows a conversation's name.
 

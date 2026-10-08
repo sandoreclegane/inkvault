@@ -133,13 +133,13 @@ def cmd_sync(_args):
 
 def session_status(db, meta):
     """One line per synced source: sessions and stored lines."""
-    from .sources import NAMES
+    from .sources import NAMES, file_counts
     try:
-        rows = db.execute("SELECT f.source, COUNT(*), (SELECT COUNT(*) FROM session_lines l "
+        rows = db.execute("SELECT f.source, group_concat(f.file, char(10)), (SELECT COUNT(*) FROM session_lines l "
                           "WHERE l.source = f.source) FROM session_files f GROUP BY f.source").fetchall()
     except sqlite3.OperationalError:
         return []  # never synced
-    return [f"  {NAMES.get(source, source)}: {files:,} sessions ({lines:,} lines kept), last sync "
+    return [f"  {NAMES.get(source, source)}: {file_counts(files.split(chr(10)))} ({lines:,} lines kept), last sync "
             f"{meta.get('last_sync', '?')}" for source, files, lines in rows]
 
 

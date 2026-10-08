@@ -23,13 +23,22 @@ secrets those contain.
 
 **Claude desktop app (agent mode):** the desktop app runs agent-mode sessions with Claude Code inside and keeps them
 apart from `~/.claude`, under the app's data folder at
-`local-agent-mode-sessions/<id>/<id>/local_<id>/.claude/projects/<project>/<session-id>.jsonl`. On Windows the app is an MSIX package, so that folder is
-`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\`; `%APPDATA%\Claude\` is redirected to the same place.
-The lines are Claude Code's (same `type`s, `sessionId`, `timestamp`, `isSidechain`; the title line is `ai-title`).
-`cwd` is a path inside the app's sandbox (`/sessions/<name>/...`). Next to each `local_<id>` folder is an
-`audit.jsonl` in another format that repeats the same turns. The full paths run past Windows' 260-character limit,
-and long paths are off by default, so a plain `open` or directory listing fails there. (Seen on 17 real sessions,
-2026-02 to 2026-10, local test 2026-10-08.)
+`local-agent-mode-sessions/<id>/<id>/local_<id>/.claude/projects/<project>/<session-id>.jsonl`. On Windows the app
+is an MSIX package, so that folder is `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\`;
+`%APPDATA%\Claude\` is redirected to the same place. The lines are Claude Code's (same `type`s, `sessionId`,
+`timestamp`, `isSidechain`; the title line is `ai-title`). `cwd` is a path inside the app's sandbox: the sandbox
+root `/sessions/<random name>`, or a folder below it. The full paths run past Windows' 260-character limit, and long
+paths are off by default, so a plain `open` or directory listing fails there.
+
+Each `local_<id>` folder also has an `audit.jsonl` in another shape: `{type, uuid, session_id, message,
+parent_tool_use_id, _audit_timestamp, _audit_hmac}`, with `timestamp`, `isReplay` and `isSynthetic` on some lines,
+and no `sessionId` or `cwd`. It mostly repeats the session file, but not entirely. On this PC (Codex review,
+2026-10-08): 19 audit logs and 17 session files in 16 folders; 3 folders have only an audit log; 27 top-level user
+prompts (by uuid) are in an audit log and not in the session file, and 26 of those have text the session file lacks.
+No non-empty assistant message was audit-only. The same prompt text can appear under two uuids. In every folder
+that has a session file, the audit log also uses a second `session_id` that isn't the session file's: the app's own
+id for the same conversation (120 of the 135 prompts under it have text that is in the session file; local check,
+2026-10-08). So a folder, not a `session_id`, is what ties an audit log to its session.
 
 **Codex:** `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` (or `$CODEX_HOME/sessions`). Archived sessions move to
 `archived_sessions/`. Current files wrap each line as `{timestamp, type, payload}`, where `type` is `session_meta`,
@@ -72,11 +81,19 @@ CREATE TABLE session_files (source TEXT NOT NULL, file TEXT NOT NULL, read_to IN
   line and doesn't shrink the file goes unnoticed.
 - **Deleted files keep their lines.** That is the point: Claude Code's 30-day cleanup no longer loses anything.
 - Only Claude Code's top-level session files are read (`projects/*/*.jsonl`), not subagent transcripts.
-- **Claude desktop** is a third source, `claude_desktop` ("Claude desktop"), with Claude Code's keep rules and reader.
-  Only top-level session files under `local_*/.claude/projects/` are read: not `audit.jsonl`, not subagents. Each
+- **Claude desktop** is a third source, `claude_desktop` ("Claude desktop"). Its session files
+  (`local_*/.claude/projects/*/*.jsonl`) and audit logs (`local_*/audit.jsonl`) are read; subagents are not. Each
   data folder is resolved first and read once, so the redirected `%APPDATA%` path doesn't read it twice. On Windows
   the folder is opened with the `\\?\` long-path prefix. Only the Windows locations above are read; another
   platform's location is added when it is seen, not guessed.
+  - Desktop files are stored under `file` = `<local folder>/<file name>` (`local_<id>/<session-id>.jsonl`,
+    `local_<id>/audit.jsonl`): every audit log is named `audit.jsonl`, and the index needs the folder. Session files
+    use Claude Code's keep rules. Which rules apply is decided by the line's shape: a line with `_audit_timestamp`
+    or `session_id` is an audit line.
+  - Audit lines kept: `user` and `assistant` lines with no `parent_tool_use_id` (not a subagent or tool's child),
+    not `isReplay`, not `isSynthetic`, and not only tool results. `system`, `result`, `tool_use_summary` and
+    `rate_limit_event` lines are left out. Kept audit lines get the same attachment cleanup, and are otherwise
+    stored as written, `_audit_hmac` included. The HMAC is not checked: nothing here can verify it.
 - A file that can't be read, or a line that isn't JSON, is skipped (the line still counts as read); one bad file
   never stops a sync.
 - `inkvault sync` takes the same lock as `rescue`, syncs, then rebuilds search. `rescue` and the nightly run sync
@@ -89,13 +106,24 @@ conversation:
 
 - `conversation_id`: `claude_code:<sessionId>`, `claude_desktop:<sessionId>` or `codex:<session id>`.
 - `conversation_name`: `Claude Code · <project>: <title>`, likewise `Claude desktop ·` and `Codex ·`.
-  The project is the last part of the session's working folder. The title is the session's custom title or summary
-  if it has one, else its first prompt (clipped to 80 characters).
+  The project is the last part of the session's working folder. For Claude desktop, the sandbox root
+  (`/sessions/<random name>`) is taken off first, so a session at the root has no project part (the name is
+  `Claude desktop · <title>`) and one below it uses that folder. The random name is never used. The title is the
+  session's custom title or summary if it has one, else its first prompt (clipped to 80 characters).
 - Roles are `USER` and `ASSISTANT`, like Pieces chats, so embeddings, digests and project detection treat them the
   same.
 - Claude Code text: string content or `text` blocks only (no thinking, tool calls or tool results).
   `<system-reminder>` blocks are removed. Sidechain, `isMeta` and slash-command lines (`<command-…>`,
   `<local-command-…>`) are skipped.
+- Claude desktop: lines are grouped by folder. Session-file lines form one conversation per `sessionId`. An audit
+  line joins the folder's session with its `session_id` if there is one; otherwise the folder's session nearest to
+  it in time (usually the only one). In a folder with no session file, audit lines form one conversation per
+  `session_id`. An audit line is read as a Claude Code line with `timestamp` from `timestamp`, else
+  `_audit_timestamp`. Session-file messages come first and win:
+  an audit message is added only if its uuid isn't one of the session file's, and it doesn't repeat a session-file
+  message of the same role and text within 30 seconds (the same prompt under a second uuid). The name comes from the
+  session file (title, `cwd`) when there is one; a session known only from its audit log is named after its first
+  prompt.
 - Codex text: `response_item` messages are the turns (on 108 real sessions, CLI 0.101 to 0.162, every assistant
   reply was there). An `event_msg` user or agent message that repeats a response item (same role and text, written
   within 30 seconds of it, nothing of the other role between them, each item used once) is dropped; any other is
@@ -163,6 +191,10 @@ Synthetic files under a temporary `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, covering
   keeps its lines, and an archived Codex session isn't duplicated.
 - Index: conversation names and roles, system-reminder stripping, sidechain, meta and command lines skipped, both
   Codex formats, and the `source` column.
-- Claude desktop: its sessions become `claude_desktop` conversations; `audit.jsonl` and subagents are skipped; a
-  folder listed twice is read once; on Windows, a session whose path is over 260 characters is read.
+- Claude desktop: its sessions become `claude_desktop` conversations; subagents are skipped; a folder listed twice is
+  read once; on Windows, a session whose path is over 260 characters is read; a session at the sandbox root has no
+  project part. Audit logs: an audit-only session, an audit-extra prompt next to a session file, a shared uuid, the
+  same prompt under two uuids, an audit log under the app's own id joining its folder's session, two audit logs
+  that don't collide, lines without `timestamp`, and child, tool,
+  replay, synthetic and system lines left out.
 - Nightly: the step list includes `sync`, before `backup`.

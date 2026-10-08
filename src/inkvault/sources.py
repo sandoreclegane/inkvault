@@ -16,7 +16,7 @@ import json
 import os
 import re
 import sqlite3
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from . import export
@@ -56,12 +56,33 @@ def long_path(p):
 
 
 def claude_desktop_files():
-    """Top-level agent-mode session files (not subagents, not audit.jsonl), each folder read once."""
+    """Agent-mode session files and audit logs (not subagents), each folder read once."""
     roots = {long_path(r) for r in claude_desktop_roots() if r.is_dir()}
     if not roots:
         return None
-    files = {f.name: f for r in sorted(roots) for f in r.glob("*/*/local_*/.claude/projects/*/*.jsonl")}
+    files = {desktop_key(f): f for r in sorted(roots)
+             for pattern in ("*/*/local_*/.claude/projects/*/*.jsonl", "*/*/local_*/audit.jsonl")
+             for f in r.glob(pattern)}
     return sorted(files.values())
+
+
+def file_name(path):
+    """The name a file is stored under: its own. Session files are named by a unique id."""
+    return path.name
+
+
+def desktop_key(path):
+    """A desktop file is stored as <local_ folder>/<name>: every audit log is named audit.jsonl, and the index ties
+    an audit log to its session by folder."""
+    folder = path.parent if path.name == "audit.jsonl" else path.parents[3]  # local_*/.claude/projects/<p>/<file>
+    return f"{folder.name}/{path.name}"
+
+
+def file_counts(names):
+    """'3 sessions', or '3 sessions, 4 audit logs': an audit log repeats sessions, so it isn't counted as one."""
+    names = list(names)
+    audits = sum(n.endswith("/audit.jsonl") for n in names)
+    return f"{len(names) - audits} sessions" + (f", {audits} audit logs" if audits else "")
 
 
 def codex_files():
@@ -79,6 +100,19 @@ def keep_claude(o):
     return t == "summary" or (isinstance(t, str) and t.endswith("title"))
 
 
+def is_audit(o):
+    return "_audit_timestamp" in o or "session_id" in o
+
+
+def keep_desktop(o):
+    """Session-file lines by Claude Code's rules. Audit-log lines: top-level prompts and replies only, not a child of
+    a tool or subagent, not replayed or synthetic, not only tool results."""
+    if not is_audit(o):
+        return keep_claude(o)
+    return (o.get("type") in ("user", "assistant") and o.get("parent_tool_use_id") is None
+            and not o.get("isReplay") and not o.get("isSynthetic") and keep_claude(o))
+
+
 def keep_codex(o):
     t, payload = o.get("type"), o.get("payload")
     payload = payload if isinstance(payload, dict) else {}
@@ -93,8 +127,10 @@ def keep_codex(o):
     return t == "message" or (t is None and "id" in o and "timestamp" in o)  # the older, unwrapped format
 
 
-SOURCES = {"claude_code": (claude_files, keep_claude), "claude_desktop": (claude_desktop_files, keep_claude),
-           "codex": (codex_files, keep_codex)}
+# source -> (find its files, which lines to keep, the name a file is stored under)
+SOURCES = {"claude_code": (claude_files, keep_claude, file_name),
+           "claude_desktop": (claude_desktop_files, keep_desktop, desktop_key),
+           "codex": (codex_files, keep_codex, file_name)}
 # Blocks never stored, even inside a kept line: pasted images and files (often inline base64) and tool output.
 OMITTED = {"image", "input_image", "document", "tool_result"}
 
@@ -148,9 +184,8 @@ def upgrade(db):
     db.commit()
 
 
-def read_file(db, source, path, keep):
-    """Store the kept lines added to path since the last sync. Returns how many were stored."""
-    name = path.name
+def read_file(db, source, path, keep, name):
+    """Store the kept lines added to path (stored as name) since the last sync. Returns how many were stored."""
     row = db.execute("SELECT read_to, head FROM session_files WHERE source=? AND file=?", (source, name)).fetchone()
     read_to, head = row or (0, None)
     stored = 0
@@ -187,28 +222,29 @@ def read_file(db, source, path, keep):
 def sync():
     """Copy what's new from each source into the vault. Returns False if no source is on this computer."""
     found = {}
-    for source, (files, keep) in SOURCES.items():
+    for source, (files, keep, key) in SOURCES.items():
         paths = files()
         if paths is None:
             print(f"{NAMES[source]}: not found")
         else:
-            found[source] = paths, keep
+            found[source] = paths, keep, key
     if not found:
         return False  # and no empty vault is made
     db = export.open_vault()
     try:
         upgrade(db)
-        for source, (paths, keep) in found.items():
+        for source, (paths, keep, key) in found.items():
             new, failed = 0, 0
             for path in paths:
                 try:
-                    new += read_file(db, source, path, keep)
+                    new += read_file(db, source, path, keep, key(path))
                 except OSError as e:  # one unreadable file must not stop the rest
                     db.execute("INSERT INTO failures VALUES (?, ?, ?)", (source, path.name, str(e)))
                     failed += 1
                 db.commit()
             unreadable = f", {failed} unreadable" if failed else ""
-            print(f"{NAMES[source]}: {len(paths)} sessions, {new} new lines{unreadable}", flush=True)
+            print(f"{NAMES[source]}: {file_counts(key(p) for p in paths)}, {new} new lines{unreadable}",
+                  flush=True)
         db.execute("INSERT OR REPLACE INTO meta VALUES ('last_sync', ?)",
                    (datetime.datetime.now().astimezone().isoformat(timespec="seconds"),))
         db.commit()
@@ -371,23 +407,72 @@ def codex_messages(file, lines):
     return f"codex:{session}", conversation_name("codex", meta.get("cwd"), first), out
 
 
+SANDBOX = re.compile(r"\A/sessions/[^/]+/?")  # the desktop app's sandbox root; its name is random
+
+
 def conversation_name(source, cwd, title):
+    if source == "claude_desktop" and isinstance(cwd, str):
+        cwd = SANDBOX.sub("", cwd)
     where = project(cwd)
     return f"{NAMES[source]} · {where + ': ' if where else ''}{clip(title)}"
 
 
+def nearest_session(sessions, ts):
+    """The session (id -> lines) whose time span is nearest ts: 0 inside it. The first one if ts can't be read."""
+    def distance(lines):
+        try:
+            t = local(ts)
+            times = [local(o["timestamp"]) for _, o in lines if isinstance(o.get("timestamp"), str)]
+            lo, hi = min(times), max(times)
+        except (TypeError, ValueError, AttributeError):
+            return float("inf")
+        return 0 if lo <= t <= hi else min(abs((t - lo).total_seconds()), abs((t - hi).total_seconds()))
+    return min(sorted(sessions), key=lambda s: distance(sessions[s]))
+
+
+def desktop_messages(stored):
+    """Claude desktop lines from every stored file, [(file, offset, line)] -> (conversation_id, name, messages) per
+    session. Files are grouped by their local_ folder. An audit line joins the folder's session with its session_id,
+    else the one nearest in time: the audit log also uses the app's own id for the same conversation. Session-file
+    messages come first and win; an audit message is added only if its uuid is new and it doesn't repeat a
+    session-file message (same role and text, within ECHO_SECONDS): the same prompt under a second uuid. The name
+    comes from the session file when there is one."""
+    folders = defaultdict(lambda: (defaultdict(list), []))  # folder -> ({session id: session-file lines}, audit lines)
+    for file, offset, o in stored:
+        sessions, audit_lines = folders[file.split("/", 1)[0]]
+        if is_audit(o):
+            audit_lines.append((offset, dict(o, timestamp=o.get("timestamp") or o.get("_audit_timestamp"))))
+        else:
+            sessions[o["sessionId"] if isinstance(o.get("sessionId"), str) else Path(file).stem].append((offset, o))
+    for folder, (sessions, audit_lines) in sorted(folders.items()):
+        extra = defaultdict(list)
+        for offset, o in audit_lines:
+            sid = o.get("session_id") if isinstance(o.get("session_id"), str) else folder
+            if sessions and sid not in sessions:
+                sid = nearest_session(sessions, o.get("timestamp"))
+            extra[sid].append((offset, dict(o, sessionId=sid)))
+        for sid in sorted(sessions.keys() | extra.keys()):
+            main = sessions.get(sid, [])
+            conv, name, out = claude_messages(sid, main, "claude_desktop")
+            _, audit_name, more = claude_messages(f"{sid}/audit", extra.get(sid, []), "claude_desktop")
+            ids = {m[0] for m in out}
+            added = [m for m in more if m[0] not in ids and not any(
+                role == m[2] and text == m[3] and near(created, m[1]) for _, created, role, text in out)]
+            yield conv, name if main else audit_name, out + added
+
+
 def messages(vault):
     """Every stored session as message rows: (id, created, conversation_id, conversation_name, role, text, source)."""
-    readers = {"claude_code": claude_messages, "codex": codex_messages,
-               "claude_desktop": lambda file, lines: claude_messages(file, lines, "claude_desktop")}
+    readers = {"claude_code": claude_messages, "codex": codex_messages}
     try:
         files = vault.execute("SELECT DISTINCT source, file FROM session_lines").fetchall()
     except sqlite3.OperationalError as e:  # a vault that has never been synced has no session tables
         if "no such table" in str(e):
             return
         raise
+    desktop = []
     for source, file in files:
-        if source not in readers:
+        if source not in readers and source != "claude_desktop":
             continue
         lines = []
         for offset, raw in vault.execute(
@@ -398,6 +483,12 @@ def messages(vault):
                 continue
             if isinstance(o, dict):
                 lines.append((offset, o))
+        if source == "claude_desktop":  # a session's lines can be in two files: merged below
+            desktop += [(file, offset, o) for offset, o in lines]
+            continue
         conv, name, out = readers[source](file, lines)
         for id_, created, role, text in out:
             yield id_, created, conv, name, role, text, source
+    for conv, name, out in desktop_messages(desktop):
+        for id_, created, role, text in out:
+            yield id_, created, conv, name, role, text, "claude_desktop"

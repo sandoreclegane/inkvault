@@ -262,10 +262,16 @@ def test_status_lists_synced_sessions(home, capsys):
     assert "Claude Code: 1 sessions (6 lines kept), last sync " in capsys.readouterr().out
 
 
-def desktop_session(*parts):
+def desktop_session(*parts, local="local_s1"):
     """Where the Claude desktop app keeps an agent-mode session, under the test's data folder."""
     from inkvault import sources
-    return os.path.join(str(sources.claude_desktop_roots()[0]), "acct", "org", "local_s1", *parts)
+    return os.path.join(str(sources.claude_desktop_roots()[0]), "acct", "org", local, *parts)
+
+
+def audit(type_, uuid, content, sid="desk-1", ts="2026-10-05T14:00:00Z", **extra):
+    """A line of the desktop app's audit.jsonl: no sessionId, cwd or (usually) timestamp."""
+    return {"type": type_, "uuid": uuid, "session_id": sid, "parent_tool_use_id": None,
+            "message": {"role": type_, "content": content}, "_audit_timestamp": ts, "_audit_hmac": "h", **extra}
 
 
 DESKTOP = [dict(o, sessionId="desk-1", uuid=f"d-{o['uuid']}", cwd="/sessions/quiet-amber-otter/lantern")
@@ -278,7 +284,7 @@ def test_claude_desktop_sessions_are_their_own_source(home, capsys):
     write(desktop_session(".claude", "projects", "-sessions-quiet-amber-otter", "desk-1.jsonl"), *DESKTOP)
     write(desktop_session(".claude", "projects", "-sessions-quiet-amber-otter", "desk-1", "subagents",
                           "agent-1.jsonl"), *DESKTOP)
-    write(desktop_session("audit.jsonl"), {"type": "user", "session_id": "desk-1", "message": {"content": "dup"}})
+    write(desktop_session("audit.jsonl"), audit("user", "d-u1", "Add retries to the <b>uploader</b>"))
     sources.sync()
     rows = index_messages()
     assert [(r[0], r[4], r[5]) for r in rows] == [
@@ -290,7 +296,7 @@ def test_claude_desktop_sessions_are_their_own_source(home, capsys):
         ("claude_desktop:desk-1", "Claude desktop · lantern: Lantern launch plan", "claude_desktop")}
     capsys.readouterr()
     cli.main(["status"])
-    assert "Claude desktop: 1 sessions (7 lines kept)" in capsys.readouterr().out
+    assert "Claude desktop: 1 sessions, 1 audit logs (8 lines kept)" in capsys.readouterr().out
 
 
 def test_a_desktop_folder_listed_twice_is_read_once(home, monkeypatch, capsys):
@@ -300,6 +306,87 @@ def test_a_desktop_folder_listed_twice_is_read_once(home, monkeypatch, capsys):
     monkeypatch.setattr(sources, "claude_desktop_roots", lambda: [root, root / "acct" / ".."])  # like %APPDATA%
     sources.sync()
     assert "Claude desktop: 1 sessions, 7 new lines" in capsys.readouterr().out
+
+
+def test_a_desktop_session_at_the_sandbox_root_has_no_project(home):
+    from inkvault import sources
+    write(desktop_session(".claude", "projects", "-sessions-x", "desk-1.jsonl"),
+          *[dict(o, cwd="/sessions/quiet-amber-otter") for o in DESKTOP])
+    sources.sync()
+    assert {r[3] for r in index_messages()} == {"Claude desktop · Lantern launch plan"}
+
+
+def test_an_audit_only_desktop_session_is_kept(home):
+    from inkvault import sources
+    write(desktop_session("audit.jsonl", local="local_s2"),
+          {"type": "system", "subtype": "init", "session_id": "desk-2", "_audit_timestamp": "2026-10-05T09:00:00Z"},
+          audit("user", "x1", "Draft the lantern FAQ", sid="desk-2", ts="2026-10-05T09:00:01Z"),
+          audit("user", "x2", "child prompt", sid="desk-2", parent_tool_use_id="t9"),
+          audit("user", "x3", "replayed", sid="desk-2", isReplay=True),
+          audit("user", "x4", "synthetic", sid="desk-2", isSynthetic=True),
+          audit("user", "x5", [{"type": "tool_result", "tool_use_id": "t1", "content": "API_KEY=sk-777"}],
+                sid="desk-2"),
+          {"type": "tool_use_summary", "session_id": "desk-2", "summary": "ran tests"},
+          {"type": "result", "session_id": "desk-2", "result": "done"},
+          {"type": "rate_limit_event", "session_id": "desk-2"},
+          audit("assistant", "x6", [{"type": "text", "text": "Here is a draft."}], sid="desk-2",
+                ts="2026-10-05T09:00:09Z"))
+    sources.sync()
+    stored = vault_rows("SELECT file, raw FROM session_lines WHERE source='claude_desktop'")
+    assert {f for f, _ in stored} == {"local_s2/audit.jsonl"}
+    assert [json.loads(r)["uuid"] for _, r in stored] == ["x1", "x6"]
+    rows = index_messages()
+    assert [(r[0], r[1], r[4], r[5]) for r in rows] == [
+        ("claude_desktop:x1", "2026-10-05T09:00:01Z", "USER", "Draft the lantern FAQ"),
+        ("claude_desktop:x6", "2026-10-05T09:00:09Z", "ASSISTANT", "Here is a draft."),
+    ]
+    assert {(r[2], r[3]) for r in rows} == {("claude_desktop:desk-2", "Claude desktop · Draft the lantern FAQ")}
+
+
+def test_audit_extra_prompts_join_the_session(home):
+    from inkvault import sources
+    write(desktop_session(".claude", "projects", "-sessions-x", "desk-1.jsonl"), *DESKTOP)
+    write(desktop_session("audit.jsonl"),
+          audit("user", "d-u1", "same uuid, other text"),  # the session file's copy wins
+          audit("user", "y1", "Add retries to the <b>uploader</b>", ts="2026-10-05T14:00:02Z"),  # same prompt, new uuid
+          audit("user", "y2", "Also log each retry", ts="2026-10-05T14:00:30Z"),  # only in the audit log
+          audit("user", "y3", "Add retries to the <b>uploader</b>", ts="2026-10-05T15:00:00Z"))  # asked again later
+    sources.sync()
+    rows = index_messages()
+    assert [(r[0], r[4], r[5]) for r in rows] == [
+        ("claude_desktop:d-u1", "USER", "Add retries to the <b>uploader</b>"),
+        ("claude_desktop:d-a1", "ASSISTANT", "Adding backoff."),
+        ("claude_desktop:y2", "USER", "Also log each retry"),
+        ("claude_desktop:d-a3", "ASSISTANT", "Done: retries with jitter."),
+        ("claude_desktop:y3", "USER", "Add retries to the <b>uploader</b>"),
+    ]
+    assert {(r[2], r[3]) for r in rows} == {("claude_desktop:desk-1", "Claude desktop · lantern: Lantern launch plan")}
+
+
+def test_an_audit_log_under_the_apps_own_id_joins_its_folders_session(home):
+    from inkvault import sources
+    write(desktop_session(".claude", "projects", "-sessions-x", "desk-1.jsonl"), *DESKTOP)
+    write(desktop_session(".claude", "projects", "-sessions-y", "desk-9.jsonl", local="local_s9"),
+          *[dict(o, sessionId="desk-9", uuid=f"{o.get('uuid')}-9") for o in DESKTOP])  # another folder, same day
+    write(desktop_session("audit.jsonl"),
+          audit("user", "z1", "Add retries to the <b>uploader</b>", sid="app-1"),  # the session file has it
+          audit("user", "z2", "Also log each retry", sid="app-1", ts="2026-10-05T14:00:30Z"))
+    sources.sync()
+    rows = [r for r in index_messages() if r[2] == "claude_desktop:desk-1"]
+    assert [r[0] for r in rows] == ["claude_desktop:d-u1", "claude_desktop:d-a1", "claude_desktop:z2",
+                                    "claude_desktop:d-a3"]
+    assert "claude_desktop:app-1" not in {r[2] for r in index_messages()}
+
+
+def test_two_audit_logs_do_not_collide(home):
+    from inkvault import sources
+    write(desktop_session("audit.jsonl", local="local_s2"), audit("user", "p1", "first", sid="desk-2"))
+    write(desktop_session("audit.jsonl", local="local_s3"), audit("user", "p2", "second", sid="desk-3"))
+    sources.sync()
+    sources.sync()
+    assert sorted(vault_rows("SELECT file FROM session_files WHERE source='claude_desktop'")) == \
+        [("local_s2/audit.jsonl",), ("local_s3/audit.jsonl",)]
+    assert {r[5] for r in index_messages()} == {"first", "second"}
 
 
 @pytest.mark.skipif(os.name != "nt", reason="the 260-character limit is Windows'")
