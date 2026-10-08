@@ -181,6 +181,16 @@ the records an earlier format skipped. Backups made before the upgrade are not r
   messages had a field telling them apart, so no distinction is claimed.
 - `compacted` records are stored but not shown anywhere.
 - The Claude desktop app's sessions on macOS and Linux: their location hasn't been seen yet.
+- A prompt the audit log has under a new uuid more than 30 seconds from its session-file copy is indexed twice.
+  Codex's recheck found 1 of 27 recovered prompts like this (47 seconds apart); the median gap between the two copies
+  is about 3 seconds. Nothing in the records says whether it is a late copy or the user asking again, so both are kept
+  rather than risk dropping a real prompt. Widening the window would swallow real repeats.
+- No upgrade for desktop files stored under their bare file name (`<session-id>.jsonl`, the first desktop commit on
+  the 0.2.0 branch): that version was never released, so no vault has them. Such a vault would show its desktop
+  sessions twice in `status`; the index is unaffected (uuids are the same).
+- The second audit `session_id` is read as the app's id for the folder's conversation, because 120 of 135 prompts
+  under it repeat the session file. A folder with two distinct conversations hasn't been seen; nearest-in-time is the
+  fallback there.
 
 ## Testing
 
