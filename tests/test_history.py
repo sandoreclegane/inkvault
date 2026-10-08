@@ -517,3 +517,59 @@ def test_a_tool_whose_files_were_replaced_while_it_worked_asks_again(home, monke
         return rows
     monkeypatch.setattr(server, "keyword_ranked", slow)
     assert server.search_memories("backoff", mode="keyword") == server.CHANGED
+
+
+def test_the_dashboard_counts_pages_opened_here_and_lists_browser_sites(home, monkeypatch):
+    from inkvault import dashboard, paths
+    day = web_vault(home, monkeypatch)  # one visit here, one synced from a phone
+    db = paths.connect_ro(paths.search_db())
+    try:
+        data = dashboard.collect(db)
+    finally:
+        db.close()
+    assert data["days"][day]["pages"] == 1 and data["days"][day]["hours"]
+    assert data["web_sites"] == {day: {"docs.example.com": 1}}
+    page = dashboard.build().read_text(encoding="utf-8")
+    assert 'id="web_sites"' in page and "Pages opened" in page
+
+
+def material_db(with_web=True):
+    from inkvault import history
+    db = sqlite3.connect(":memory:")
+    db.executescript("CREATE TABLE summaries (id, created, name, text, event_ids);"
+                     "CREATE TABLE messages (id, created, conversation_id, conversation_name, role, text, source);"
+                     "CREATE TABLE events (id, created, app, window_title, url, readable);")
+    db.execute("INSERT INTO summaries VALUES ('s1', ?, 'Harbor audit', '', '[]')", (T1,))
+    if with_web:
+        db.executescript(history.INDEX_TABLES)
+    return db
+
+
+def add_page(db, n, title, host="docs.example.com", when=T1):
+    db.execute("INSERT INTO pages VALUES (?, ?, '', '', ?, '', ?, 1, 'chrome/Default')", (f"web:{n}", when, host, title))
+    db.execute("INSERT INTO visits VALUES (?, ?, 'chrome/Default', 'chrome', ?, ?, 0)", (f"v{n}", when, host, f"web:{n}"))
+
+
+def test_digest_material_adds_browsing_and_leaves_other_days_alone(home):
+    from inkvault import digest
+    day = digest.local_day(T1)
+    before = digest.gather(material_db(with_web=False))
+    assert digest.gather(material_db()) == before == {day: "Work sessions: Harbor audit"}
+    db = material_db()
+    add_page(db, 1, "Retry with backoff")
+    add_page(db, 2, "Weather", host="weather.example", when="2026-10-07T12:00:00Z")  # a day with only browsing
+    m = digest.gather(db)
+    assert m[day] == ("Work sessions: Harbor audit\nPages opened: Retry with backoff\n"
+                      "Top sites in the browser: docs.example.com")
+    assert m[digest.local_day("2026-10-07T12:00:00Z")] == "Pages opened: Weather\nTop sites in the browser: weather.example"
+
+
+def test_browsing_keeps_to_its_share_of_a_days_material(home):
+    from inkvault import digest
+    db = material_db()
+    db.execute("UPDATE summaries SET name=?", ("x" * 7000,))
+    for n in range(40):
+        add_page(db, n, f"Page {n} " + "y" * 90)
+    (m,) = digest.gather(db).values()
+    web = m[m.index("Pages opened:"):]
+    assert len(m) <= digest.MAX_INPUT and len(web) <= digest.WEB_SHARE and m.startswith("Work sessions: x")

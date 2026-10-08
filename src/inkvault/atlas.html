@@ -42,7 +42,7 @@ h1 { font-size: 22px; font-weight: 600; margin: 0 0 2px; }
 .filters button[aria-pressed="true"]::before { content: "✓ "; }
 .filters .custom { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--ink-2); margin-left: 8px; }
 .filters input { min-width: 0; max-width: 100%; }
-.tiles { display: grid; grid-template-columns: 1.4fr repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+.tiles { display: grid; grid-template-columns: 1.4fr repeat(5, 1fr); gap: 12px; margin-bottom: 16px; }
 .tile, .card { background: var(--surface-1); border: 1px solid var(--ring); border-radius: 12px; padding: 16px; }
 .tile .label { color: var(--ink-2); font-size: 13px; }
 .tile .value { font-size: 26px; font-weight: 600; margin-top: 4px; }
@@ -86,7 +86,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
 
   <section class="card" data-table="calendar">
     <div class="head"><div><h2>Active hours per day</h2>
-      <p class="desc">How many different hours of each day you were on the computer (screen captures, session summaries, chats). Hover a day for what it was about.</p></div>
+      <p class="desc">How many different hours of each day you were on the computer (screen captures, session summaries, chats, pages opened in a browser). Hover a day for what it was about.</p></div>
       <button class="tbl">Show table</button></div>
     <div class="chart" id="calendar" style="height:200px"></div>
   </section>
@@ -136,18 +136,23 @@ footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
       <div class="chart" id="apps" style="height:380px"></div>
     </section>
     <section class="card" data-table="sites">
-      <div class="head"><div><h2>Top sites</h2><p class="desc">Screen captures per website (from Pieces' browser captures).</p></div>
+      <div class="head"><div><h2>Top sites seen by Pieces</h2><p class="desc">Screen captures per website (from Pieces' browser captures).</p></div>
         <button class="tbl">Show table</button></div>
       <div class="chart" id="sites" style="height:380px"></div>
     </section>
   </div>
+  <section class="card" data-table="web_sites">
+    <div class="head"><div><h2>Top sites opened in a browser</h2><p class="desc">Page visits per website, from the browser profiles you chose. Visits synced from your other devices aren't counted here.</p></div>
+      <button class="tbl">Show table</button></div>
+    <div class="chart" id="web_sites" style="height:380px"></div>
+  </section>
 
   <footer id="foot"></footer>
 </main>
 
 <script>
 const DATA = /*DATA*/null;
-const SOURCES = [["captures", "Screen captures"], ["sessions", "Session summaries"], ["chats", "Chat messages"]];
+const SOURCES = [["captures", "Screen captures"], ["sessions", "Session summaries"], ["chats", "Chat messages"], ["pages", "Pages opened"]];
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const allDays = Object.keys(DATA.days);
 const FIRST = allDays[0], LAST = allDays[allDays.length - 1];
@@ -192,17 +197,18 @@ function inRange(day) { return day >= range.from && day <= range.to; }
 function dayStory(day) { return DATA.digests[day] || (DATA.highlights[day] || []).join("; "); }
 
 function renderTiles() {
-  let active = 0, captures = 0, sessions = 0, chats = 0;
+  let active = 0, captures = 0, sessions = 0, chats = 0, pages = 0;
   for (const [day, d] of Object.entries(DATA.days)) {
     if (!inRange(day)) continue;
     if (d.hours) active++;
-    captures += d.captures; sessions += d.sessions; chats += d.chats;
+    captures += d.captures; sessions += d.sessions; chats += d.chats; pages += d.pages || 0;
   }
   const tiles = [
     ["Days remembered", fmt(active), `${range.from} → ${range.to}`, true],
     ["Screen captures", compact(captures), "what Pieces saw"],
     ["Session summaries", fmt(sessions), "written by Pieces"],
     ["Chat messages", compact(chats), (DATA.chat_sources || ["Pieces"]).join(", ")],
+    ["Pages opened", compact(pages), "in your browsers, on this computer"],
     ["Saved snippets", fmt(DATA.snippets), "all time"],
   ];
   const box = document.getElementById("tiles");
@@ -460,7 +466,7 @@ function render() {
     `Everything your vault holds, ${range.from} to ${range.to}. Private: built from files on this PC.`;
   renderTiles();
   renderCalendar(t); renderRhythm(t); renderGraph(t); renderThemes(t); renderTopics(t); renderSources(t);
-  renderBars("apps", DATA.apps, t, "App"); renderBars("sites", DATA.sites, t, "Site");
+  renderBars("apps", DATA.apps, t, "App"); renderBars("sites", DATA.sites, t, "Site"); renderBars("web_sites", DATA.web_sites || {}, t, "Site");
   document.querySelectorAll(".card[data-table]").forEach(renderTableFor);
   document.getElementById("foot").textContent =
     `Built ${DATA.built} by InkVault from your local vault. Nothing on this page was sent anywhere.`;
