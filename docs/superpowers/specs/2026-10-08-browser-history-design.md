@@ -130,20 +130,41 @@ A profile's key is `<browser>/<folder>`: `chrome/Profile 2`, `firefox/abcd1234.d
     (default no; `--no <key> --forget` answers yes).
   - `inkvault browsers --skip-site <host>` / `--unskip-site <host>` edit the skip list. A host matches itself and its
     subdomains. Adding one removes that site's stored visits right away.
-- **Removing** (`--forget`, `--skip-site`) takes the same lock as `sync` and the nightly run, then, in this order:
-  1. finds the affected days, in both the time zone recorded by the last index and the current one;
-  2. writes a `rebuild-needed` marker file in the InkVault home;
-  3. deletes those days' digests from `digests.db` (the next `inkvault digest` writes them again without that
-     browsing);
-  4. deletes the visits from `vault.db`;
-  5. rebuilds search (tables and vectors), then the dashboard;
-  6. deletes the marker.
+- **Removing** (`--forget`, `--skip-site`) is a *recorded* operation, so an interruption at any point is finished
+  later instead of being undone. Holding the lock (below), it:
+  1. finds the matching visits and the affected days, in both the time zone recorded by the last index (the days
+     the pages have in `search.db`) and the current one;
+  2. writes a `rebuild-needed` marker file in the InkVault home, and deletes `dashboard.html` (a page on disk can't
+     check the marker);
+  3. records the removal in `vault.db` (`browser_removals`: what, which profile or host, the affected days), in one
+     transaction. Until this commits, nothing has changed, and the command reports failure;
+  4. *applies* every recorded removal: makes sure the choice is saved (`no` for the profile, the host on the skip
+     list), deletes the affected days' digests, then deletes the visits **and** the removal record in one
+     transaction;
+  5. rebuilds search (tables and vectors), then the dashboard.
 
-  While the marker exists, the MCP tools answer only *"Search is being rebuilt after something was removed: run
-  `inkvault index`."*, `status` says the same, and a successful `index` followed by a successful dashboard build
-  deletes it. So a failed rebuild, or a process killed anywhere in between, never leaves the old index serving
-  what was removed; the next nightly run's rebuild recovers. The nightly backups still hold the removed visits
-  until they rotate out (7 nights); the message says so.
+  Applying is idempotent. **Every search build applies pending removals before it reads anything**, and deletes the
+  marker only after it has built search with no removal pending. So a removal stopped after step 3 is finished by
+  the next `sync`, `index`, rescue or nightly run, never re-indexed. A digest database that can't be written (for
+  example, locked) stops the removal with an error and leaves it recorded; only a missing table is taken as
+  "nothing to delete".
+- **What can't be recalled:** an answer the MCP server already returned, and a dashboard tab already open in a
+  browser. The README says so. The nightly backups still hold removed visits until they rotate out (7 nights); the
+  message says so.
+- **One writer at a time.** Every command that writes `vault.db`, `search.db`, `vectors.npz`, `digests.db` or
+  `dashboard.html` holds the lock the nightly run uses: `rescue`, `sync` (through its search rebuild), `index`,
+  `digest`, `dashboard`, `browsers` (when it changes a choice or removes), and the nightly run. So a search build
+  can't publish visits a removal is deleting, and two builds never share a temp file.
+- **Choices are written under the lock too.** Answers are collected first (a prompt can wait for a person; the lock
+  shouldn't), then the lock is taken, `browsers.json` is read again, the answers are merged in, and it is saved
+  (through a uniquely named temp file). If the lock is busy, nothing is changed and the message says so.
+- **A profile that's gone can still be forgotten.** `--no <key>` (with or without `--forget`) accepts a key that is
+  in `browsers.json` or has stored visits, even when its browser folder no longer exists. Only `--yes` needs the
+  profile to be found.
+- **The MCP tools never return what a removal has started to remove.** Each tool checks, before it starts and again
+  before it answers, that the marker is absent and that `search.db` and `vectors.npz` haven't been replaced in
+  between. Otherwise it answers *"Search is being rebuilt after something was removed: run `inkvault index`."* or
+  *"Search was updated while answering; ask again."* `status` reports the marker too.
 - **`rescue` and `sync`**, run in a terminal, show the same prompt when there are `new` profiles, then continue.
 - **The nightly run never asks.** `new` profiles are skipped, and both the nightly log and `inkvault status` say
   *"N browser profiles waiting for you to choose: run `inkvault browsers`."* After an upgrade every profile is `new`,
@@ -174,6 +195,9 @@ CREATE INDEX browser_visits_profile ON browser_visits(profile);
 CREATE INDEX browser_visits_created ON browser_visits(created);
 CREATE TABLE browser_profiles (profile TEXT PRIMARY KEY, last_attempt TEXT, last_success TEXT, last_error TEXT,
                                visits_in_file INTEGER);
+CREATE TABLE browser_removals (id INTEGER PRIMARY KEY, what TEXT NOT NULL,  -- "profile" or "site"
+                               value TEXT NOT NULL, days TEXT NOT NULL,    -- the key or host; JSON list of days
+                               created TEXT NOT NULL);                     -- removals recorded, not yet applied (§1)
 ```
 
 - **A best-effort copy.** For each `yes` profile, each attempt makes a fresh temp folder and copies the history file
@@ -252,7 +276,7 @@ New tables in `search.db`:
 
 - `visits (id, created, profile, browser, host, page_id, synced)`: one row per counted visit; `synced` is 1 when it
   came from another device.
-- `pages (id, created, day, url, host, title, visits, profiles)`: **one row per address per local day**, grouped by
+- `pages (id, created, day, url, host, path, title, visits, profiles)`: **one row per address per local day**, grouped by
   the raw-address hash, so two different documents whose cleaned addresses look alike stay two pages. `id` is
   `web:` plus the first 16 hex digits of SHA-1 of address hash and day. `created` is that day's first visit;
   `title` the most recently observed non-empty one (latest
@@ -261,12 +285,17 @@ New tables in `search.db`:
 - `meta(key, value)` with `timezone`: the local time zone used for `day`. The nightly re-index follows a change.
 - `pages_fts` over `title` and `url` (porter, unicode61, like the others).
 
-`embed.py` gets a `web` query (title, then host and path) alongside its other hard-coded sources.
+`embed.py` gets a `web` query (title, then host and path; not the query or fragment) alongside its other hard-coded
+sources. When there is nothing left to embed, `vectors.npz` is deleted rather than left as it was, so removing the
+last records also removes their vectors.
 
 ### 5. What changes elsewhere
 
 - **MCP `search_memories`:** a new source `web` ("pages you opened, from your browsers' history; best for 'when did
-  I look at…'"). A hit reads `[web] <id>  <time>  <title> — <host>` with the address as preview.
+  I look at…'"). A hit reads `[web] <id>  <time>  <title> — <host>` with the address as preview. Date ranges for
+  `web` follow the visits, not just the day's first one: a date-only bound (`2026-10-06`) compares the page's
+  local day, and a bound with a time compares the page's visits (stored in UTC, like every other source's times),
+  so a page opened at 12:00 and again at 12:20 is found by `since="2026-10-05T12:10"`.
 - **`get_memory`** on a page: title (marked as observed at sync), address, profiles, and that day's visit times,
   marking visits synced from another device.
 - **`timeline`:** one line per day with browsing: `<day>  [web] N pages; most visited: host, host, host`.
@@ -323,8 +352,17 @@ addresses are used.
   doesn't list; System and Guest profiles ignored; the prompt (all, none, numbers); the nightly run skips `new`
   profiles and reports them; a reused folder name with a different creation time or account goes back to `new`.
 - **Removing:** `--no --forget` and `--skip-site` delete the affected days' digests (in both time zones) before
-  rebuilding search, vectors and the dashboard; a failed rebuild, or a stop between any two steps, leaves the
-  `rebuild-needed` marker and the MCP tools refuse until a rebuild succeeds.
+  rebuilding search, vectors and the dashboard. A failure at each step (before the record commits, while deleting
+  digests, a locked digest database, while deleting visits, while rebuilding) is followed by the next search
+  build, which must finish the removal; the MCP tools refuse throughout. Removing the last records also removes
+  their vectors (tested with a small fake embedding model, not by skipping embedding). A profile whose folder is
+  gone can still be forgotten. An MCP request paused after its first check while a removal runs doesn't return removed visits.
+- **Locking:** `index`, `digest`, `dashboard` and `sync` (through indexing) refuse while another process holds the
+  lock (tested with a second process); concurrent choice changes both survive.
+- **Dates:** a later visit inside a time range finds its page; date-only ranges follow the local day, tested with
+  fixed positive and negative UTC offsets around midnight. (Daylight-saving changes go through the same local-time
+  conversion and aren't tested separately: Windows has no time-zone database to test them with.)
+- **Cleaning:** percent-encoded JWT and opaque fragments are removed; an address with no host is not stored.
 - **Consent:** an account that disappears, appears or changes sends a `yes` profile back to `new` with the reason.
 - **Sync:** a second sync adds nothing; a visit added between syncs is added; two browser visits sharing profile,
   time and address are both kept; a reused visit id with a new address is a new row; a later sync updates duration,
@@ -374,3 +412,19 @@ addresses are used.
 | 5 | "Fails only when neither exists" hid failed copies | Four outcomes, exit codes, nightly log wording |
 | 6 | No time recorded for title observations | `title_observed_at` and a fixed tie-breaker |
 | 7 | Three measurement claims overstated | Corrected in "What the real data looks like" |
+
+## Changes from Codex's plan review (2026-10-08)
+
+| # | Finding | Change |
+|---|---|---|
+| 1 | An interrupted removal could be re-indexed and the marker cleared | Removals are recorded in `browser_removals` before anything changes; every search build applies them first and clears the marker only with none pending |
+| 2 | A locked digest database was taken as "no digests" | Only a missing table is ignored; anything else stops the removal, which stays recorded |
+| 3 | Search builds weren't serialized with removal | Every writer of the vault, search, vectors, digests or dashboard holds the nightly lock; `sync` keeps it through indexing |
+| 4 | An MCP request in flight could return removed visits | Tools check the marker and the published files again before answering |
+| 5 | Removing the last records left old vectors | `vectors.npz` is deleted when nothing is left to embed |
+| 6 | The real-machine check could touch someone else's profile and print private data | Replaced by a harness that copies only named profiles, never lists browser folders, and prints counts |
+| 7 | Percent-encoded fragments and hostless addresses escaped cleaning | Fragment shapes matched decoded; hostless addresses not stored |
+| 8 | Date ranges used only the day's first visit; local days vs UTC | `web` ranges follow visits for times and local days for dates |
+| 9 | Choices were saved outside the lock | Answers collected first, merged and saved under the lock |
+| 10 | A profile whose folder is gone couldn't be forgotten | `--no` accepts keys from `browsers.json` or stored visits |
+| 11 | Embedding used the whole address | Title, host and path; `pages.path` added |
