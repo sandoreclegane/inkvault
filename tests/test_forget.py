@@ -207,3 +207,29 @@ def test_clearing_old_vectors_needs_no_model(setup, monkeypatch):
     monkeypatch.setattr(embed, "load_model", no_model)
     embed.build()
     assert not paths.vectors().exists()
+
+
+def test_an_index_build_that_cannot_clear_its_temp_file_still_closes_the_vault(setup):
+    from inkvault import index, paths
+    tmp = paths.search_db().with_suffix(".tmp")
+    tmp.mkdir()
+    (tmp / "x").write_text("x")  # a non-empty directory: unlink fails
+    with pytest.raises(OSError) as failed:  # the traceback keeps build()'s frame, and any handle in it, alive
+        index.build()
+    paths.vault_db().unlink()
+
+
+def test_an_index_build_that_cannot_open_its_temp_file_still_closes_the_vault(setup, monkeypatch):
+    from inkvault import index, paths
+    real = sqlite3.connect
+
+    def connect(target, *args, **kwargs):
+        if str(target).endswith(".tmp"):
+            raise sqlite3.OperationalError("unable to open database file")
+        return real(target, *args, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(sqlite3, "connect", connect)
+        with pytest.raises(sqlite3.OperationalError) as failed:
+            index.build()
+    paths.vault_db().unlink()

@@ -6,6 +6,7 @@ MCP server never sees a half-built index. Safe to re-run any time; it rebuilds f
 import json
 import os
 import sqlite3
+from contextlib import ExitStack
 from datetime import datetime
 
 from . import embed, history, paths, sources, topics
@@ -29,16 +30,18 @@ def build():
         return False
     # A removal stopped part-way is finished before anything is read, so its visits can't be indexed again.
     forget.apply_pending()
-    raw = paths.connect_ro(paths.vault_db())
+    with ExitStack() as stack:  # each connection is registered the moment it opens, so any later failure closes it
+        raw = paths.connect_ro(paths.vault_db())
+        stack.callback(raw.close)
 
-    def raws(kind):
-        for (r,) in raw.execute("SELECT raw FROM raw_records WHERE kind=?", (kind,)):
-            yield json.loads(r)
+        def raws(kind):
+            for (r,) in raw.execute("SELECT raw FROM raw_records WHERE kind=?", (kind,)):
+                yield json.loads(r)
 
-    tmp = paths.search_db().with_suffix(".tmp")
-    tmp.unlink(missing_ok=True)
-    db = sqlite3.connect(tmp)
-    try:
+        tmp = paths.search_db().with_suffix(".tmp")
+        tmp.unlink(missing_ok=True)
+        db = sqlite3.connect(tmp)
+        stack.callback(db.close)
         db.executescript("""
             CREATE TABLE events (id TEXT PRIMARY KEY, created TEXT, app TEXT, window_title TEXT, url TEXT, readable TEXT);
             CREATE TABLE summaries (id TEXT PRIMARY KEY, created TEXT, name TEXT, text TEXT, event_ids TEXT);
@@ -102,9 +105,6 @@ def build():
         db.commit()
         counts = {t: db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("events", "summaries", "messages", "snippets", "pages")}
         print("indexed: " + ", ".join(f"{n:,} {t}" for t, n in counts.items()), flush=True)
-    finally:
-        db.close()
-        raw.close()
     os.replace(tmp, paths.search_db())
 
     embed.build()
