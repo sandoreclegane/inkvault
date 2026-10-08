@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+
+- **Browser history** in the vault: Chrome, Edge, Comet, Brave, Arc, Vivaldi, Opera and Firefox, from the profiles
+  you choose with `inkvault browsers` (nothing is read before you choose; the nightly run never asks). Each sync
+  copies the history file and reads the copy. Visits the browser later deletes stay in the vault.
+- Addresses are cleaned before they are stored: sign-in codes, tokens, signed links, reset tokens, and email or
+  username parameters are removed; searches stay. Page titles get the same cleaning.
+- Search has a `web` source, one entry per page per day; `get_memory` lists a page's visits; the timeline has a
+  browsing line per day; `memory_stats` counts visits by browser. Visits synced from other devices are searchable
+  but don't count as active hours here.
+- The dashboard has a Pages opened tile and series, and a separate *Top sites opened in a browser* card. Digests
+  include the pages you opened; days that gain browsing are rewritten on the next run.
+- `inkvault browsers --no KEY --forget` and `--skip-site HOST` remove visits from the vault, search, the dashboard
+  and the digests (each removed visit's UTC day and the day either side). A removal is recorded first, so an
+  interrupted one is finished by the next search build; search stays off until then.
+- `inkvault sync` works without Pieces or sessions, and exits 1 when a chosen browser profile couldn't be read.
+- `index`, `digest` and `dashboard` take the same lock as the nightly run, so they never overlap a removal or a sync.
+- With nothing left to embed, `vectors.npz` is deleted instead of kept.
+
 ## 0.2.0
 
 - **Claude Code and Codex sessions** in the vault: `inkvault sync` copies your prompts, the replies and session
