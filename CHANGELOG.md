@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.2.0)
+## 0.2.0
 
 - **Claude Code and Codex sessions** in the vault: `inkvault sync` copies your prompts, the replies and session
   titles from the session files both tools keep on disk, reading only what's new. `rescue` and the nightly run sync

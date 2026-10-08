@@ -1,7 +1,8 @@
 # Claude Code and Codex sessions in the vault (v0.2.0)
 
 **Status:** approved direction, 2026-10-08 (Claude Code + Codex first; synced nightly)
-**Release:** v0.2.0, with ChatGPT/Claude.ai importers, browser history and people (specced separately)
+**Release:** v0.2.0, 2026-10-08. ChatGPT/Claude.ai importers, browser history and people move to v0.3.0 (specced
+separately).
 
 ## Why
 
