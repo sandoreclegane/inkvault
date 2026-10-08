@@ -28,6 +28,9 @@ a dashboard of what you have. Run the same command again later and it picks up w
 - **Memory Atlas**: a dashboard of your year. Active hours per day (hover a day for what it was about), when you work,
   how your projects connect, projects over time, topics over time (from Pieces' own topic tags: ongoing interests
   and short bursts), top apps and sites. Every chart has a table view.
+- **Your Claude Code and Codex sessions** (new in 0.2.0): your prompts and the replies, copied from the session
+  files both tools keep on disk, so the vault keeps growing after Pieces. Claude Code deletes sessions after 30 days
+  by default; the vault keeps them. Searchable as chats, and on the dashboard and in the digests.
 - **Daily digests** (optional): a 2-3 sentence summary of each day, written by a *local* model through
   [Ollama](https://ollama.com). Pieces stopped writing summaries; this picks up where it left off.
 
@@ -64,11 +67,11 @@ This installs InkVault as a permanent `inkvault` command (with `uv tool install`
 up a nightly run at 03:00 with your system's own scheduler: Task Scheduler on Windows, launchd on macOS, a systemd
 user timer (or cron) on Linux. If uv's tool folder isn't on your PATH, it tells you to run `uv tool update-shell`.
 
-Each run exports new captures (if PiecesOS is running) and saves a dated copy of `vault.db` in `backups/` right
-after (the last 7 are kept). Then it rebuilds search, writes new digests (if Ollama is running) and rebuilds the
-dashboard. One step failing never stops the others. The computer is kept awake while it runs (Windows and macOS).
-The export has a time budget: if a big backlog doesn't fit, the run stops cleanly, backs up what it has, and the
-next night continues where it stopped.
+Each run exports new captures (if PiecesOS is running), copies new Claude Code and Codex sessions, and saves a dated
+copy of `vault.db` in `backups/` right after (the last 7 are kept). Then it rebuilds search, writes new digests (if
+Ollama is running) and rebuilds the dashboard. One step failing never stops the others. The computer is kept awake
+while it runs (Windows and macOS). The export has a time budget: if a big backlog doesn't fit, the run stops
+cleanly, backs up what it has, and the next night continues where it stopped.
 
 `rescue` won't start while a nightly run is going; it tells you to try again. If a rescue is going when the nightly
 run starts, the run waits for it (up to an hour); the rescue makes its own backup when it finishes.
@@ -104,6 +107,7 @@ and `uv tool upgrade inkvault` updates InkVault.
 |---|---|
 | `inkvault rescue` | Export, index, digest (if Ollama is running), build and open the dashboard |
 | `inkvault export` | Copy everything out of PiecesOS. Safe to stop and re-run: it only adds what's new |
+| `inkvault sync` | Copy new Claude Code and Codex sessions into the vault, then rebuild search |
 | `inkvault index` | Rebuild search |
 | `inkvault digest [--model M] [--redo]` | Daily digests with a local model (default `qwen3.5:4b`) |
 | `inkvault dashboard` | Rebuild and open the Memory Atlas |
@@ -122,6 +126,9 @@ This is your screen history, your chats and your code. InkVault is built so that
 - Two things are downloaded, and nothing of yours is uploaded: the search model (~130 MB from Hugging Face, once)
   and the dashboard's chart library (from cdnjs, when you open the page).
 - Digests use Ollama on your own machine. Skip them with `--no-digest`.
+- From Claude Code and Codex sessions, InkVault keeps what you typed, what the assistant replied and session titles.
+  Claude Code's replies include its tool calls, so a file it wrote is kept as written. Tool output (files it read,
+  command output) and attachments are left out: they are most of each file and where secrets tend to show up.
 - Captured text was written by other people and apps. The MCP server tells your AI tool to treat it as data, not
   instructions.
 
@@ -136,6 +143,9 @@ with `inkvault index`.
 - **Topics** come from the topic tags Pieces wrote on each session summary. *Ongoing* topics recur across months;
   *bursts* are concentrated in a few weeks. They appear after the next `inkvault index` (part of `rescue` and the
   nightly run). Thanks to Anthony at Pieces for the idea.
+- **Claude Code and Codex sessions** are read from `~/.claude/projects` and `~/.codex/sessions` (or
+  `CLAUDE_CONFIG_DIR` and `CODEX_HOME` if you set them). `rescue` and the nightly run do this too; `inkvault sync`
+  does it on its own, and works without Pieces. Only what's new since the last sync is read.
 - **PiecesOS port**: InkVault reads the port PiecesOS saved in its own config (`.port.txt`), then the port that worked
   last time, then tries 39300 and 1000. To force a port, set `INKVAULT_PIECES_PORTS` or pass `--pieces-ports`
   (for the nightly run: `inkvault --pieces-ports 39301 schedule`).
