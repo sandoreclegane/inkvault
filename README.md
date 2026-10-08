@@ -28,9 +28,9 @@ a dashboard of what you have. Run the same command again later and it picks up w
 - **Memory Atlas**: a dashboard of your year. Active hours per day (hover a day for what it was about), when you work,
   how your projects connect, projects over time, topics over time (from Pieces' own topic tags: ongoing interests
   and short bursts), top apps and sites. Every chart has a table view.
-- **Your Claude Code and Codex sessions** (new in 0.2.0): your prompts and the replies, copied from the session
-  files both tools keep on disk, so the vault keeps growing after Pieces. Claude Code deletes sessions after 30 days
-  by default; the vault keeps them. Searchable as chats, and on the dashboard and in the digests.
+- **Your Claude Code and Codex sessions** (new in 0.2.0), and the Claude desktop app's agent-mode sessions: your
+  prompts and the replies, copied from the session files these tools keep on disk, so the vault keeps growing after
+  Pieces. Claude Code deletes sessions after 30 days by default; the vault keeps them. Searchable as chats, and on the dashboard and in the digests.
 - **Daily digests** (optional): a 2-3 sentence summary of each day, written by a *local* model through
   [Ollama](https://ollama.com). Pieces stopped writing summaries; this picks up where it left off.
 
@@ -147,6 +147,9 @@ with `inkvault index`.
 - **Claude Code and Codex sessions** are read from `~/.claude/projects` and `~/.codex/sessions` (or
   `CLAUDE_CONFIG_DIR` and `CODEX_HOME` if you set them). `rescue` and the nightly run do this too; `inkvault sync`
   does it on its own, and works without Pieces. Only what's new since the last sync is read.
+- **Claude desktop app sessions** (agent mode, Windows) are read from the app's own folder
+  (`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\local-agent-mode-sessions`) and named
+  `Claude desktop · project: title`. On macOS and Linux they aren't read yet.
 - **PiecesOS port**: InkVault reads the port PiecesOS saved in its own config (`.port.txt`), then the port that worked
   last time, then tries 39300 and 1000. To force a port, set `INKVAULT_PIECES_PORTS` or pass `--pieces-ports`
   (for the nightly run: `inkvault --pieces-ports 39301 schedule`).

@@ -8,6 +8,8 @@
   are left out (most of the bytes, and where secrets show up), and so are pasted images. Codex's own setup text
   (AGENTS.md, environment context) isn't counted as your words. Sessions are searchable as chats (named
   `Claude Code · project: title`), and feed the timeline, digests and dashboard.
+- **Claude desktop app sessions** (agent mode, Windows) are synced too, as their own source (`Claude desktop`).
+  They live in the app's package folder, apart from `~/.claude`, at paths past Windows' 260-character limit.
 - `inkvault status` lists synced sessions per source; `memory_stats` counts chat messages per source; the
   dashboard's Chat messages tile says which sources it counts; `get_memory` shows a conversation's name.
 

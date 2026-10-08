@@ -262,6 +262,56 @@ def test_status_lists_synced_sessions(home, capsys):
     assert "Claude Code: 1 sessions (6 lines kept), last sync " in capsys.readouterr().out
 
 
+def desktop_session(*parts):
+    """Where the Claude desktop app keeps an agent-mode session, under the test's data folder."""
+    from inkvault import sources
+    return os.path.join(str(sources.claude_desktop_roots()[0]), "acct", "org", "local_s1", *parts)
+
+
+DESKTOP = [dict(o, sessionId="desk-1", uuid=f"d-{o['uuid']}", cwd="/sessions/quiet-amber-otter/lantern")
+           for o in SESSION if "uuid" in o] + \
+          [{"type": "ai-title", "aiTitle": "Lantern launch plan", "sessionId": "desk-1"}]
+
+
+def test_claude_desktop_sessions_are_their_own_source(home, capsys):
+    from inkvault import cli, sources
+    write(desktop_session(".claude", "projects", "-sessions-quiet-amber-otter", "desk-1.jsonl"), *DESKTOP)
+    write(desktop_session(".claude", "projects", "-sessions-quiet-amber-otter", "desk-1", "subagents",
+                          "agent-1.jsonl"), *DESKTOP)
+    write(desktop_session("audit.jsonl"), {"type": "user", "session_id": "desk-1", "message": {"content": "dup"}})
+    sources.sync()
+    rows = index_messages()
+    assert [(r[0], r[4], r[5]) for r in rows] == [
+        ("claude_desktop:d-u1", "USER", "Add retries to the <b>uploader</b>"),
+        ("claude_desktop:d-a1", "ASSISTANT", "Adding backoff."),
+        ("claude_desktop:d-a3", "ASSISTANT", "Done: retries with jitter."),
+    ]
+    assert {(r[2], r[3], r[6]) for r in rows} == {
+        ("claude_desktop:desk-1", "Claude desktop · lantern: Lantern launch plan", "claude_desktop")}
+    capsys.readouterr()
+    cli.main(["status"])
+    assert "Claude desktop: 1 sessions (7 lines kept)" in capsys.readouterr().out
+
+
+def test_a_desktop_folder_listed_twice_is_read_once(home, monkeypatch, capsys):
+    from inkvault import sources
+    write(desktop_session(".claude", "projects", "-sessions-x", "desk-1.jsonl"), *DESKTOP)
+    root = sources.claude_desktop_roots()[0]
+    monkeypatch.setattr(sources, "claude_desktop_roots", lambda: [root, root / "acct" / ".."])  # like %APPDATA%
+    sources.sync()
+    assert "Claude desktop: 1 sessions, 7 new lines" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the 260-character limit is Windows'")
+def test_a_desktop_session_past_the_windows_path_limit_is_read(home):
+    from inkvault import sources
+    path = desktop_session(".claude", "projects", "-sessions-" + "deep" * 30, "desk-1.jsonl")
+    assert len(path) > 260
+    write("\\\\?\\" + path, *DESKTOP)
+    sources.sync()
+    assert vault_rows("SELECT COUNT(*) FROM session_lines WHERE source='claude_desktop'") == [(7,)]
+
+
 def test_the_tool_name_is_never_a_project(home):
     from inkvault import dashboard, paths, sources
     for i in range(4):
@@ -276,6 +326,22 @@ def test_the_tool_name_is_never_a_project(home):
         db.close()
     assert not any("Claude" in t or "Code" == t for t in data["themes"])
     assert sum(d["chats"] for d in data["days"].values()) == 12
+
+
+def test_the_desktop_app_name_is_never_a_project(home):
+    from inkvault import dashboard, paths, sources
+    for i in range(4):
+        write(desktop_session(".claude", "projects", "-sessions-x", f"desk-{i}.jsonl"),
+              *[dict(o, sessionId=f"desk-{i}", uuid=f"{o.get('uuid')}-{i}") for o in DESKTOP])
+    sources.sync()
+    index_messages()
+    db = paths.connect_ro(paths.search_db())
+    try:
+        data = dashboard.collect(db)
+        assert dashboard.chat_sources(db) == ["Claude desktop"]
+    finally:
+        db.close()
+    assert not any("Claude" in t or "desktop" in t.lower() for t in data["themes"])
 
 
 def codex_file(*objs, name="rollout-cx-1.jsonl"):

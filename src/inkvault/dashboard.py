@@ -12,11 +12,11 @@ from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import paths, topics
+from . import paths, sources, topics
 from .times import local
 
 MAX_THEMES = 14
-SOURCE_LABEL = re.compile(r"^(Claude Code|Codex) · ")
+SOURCE_LABEL = re.compile(rf"^({'|'.join(map(re.escape, sources.NAMES.values()))}) · ")
 # Words that never make a project name on their own: function words and generic work words.
 FUNCTION = {"a", "an", "and", "the", "of", "for", "with", "to", "in", "on", "at", "by", "from", "&", "vs", "via", "+", "-"}
 GENERIC = {
@@ -113,7 +113,7 @@ def topic_data(db):
 
 def chat_sources(db):
     """Where the chat messages came from, most first, for the Chat messages tile."""
-    names = {"pieces": "Pieces", "claude_code": "Claude Code", "codex": "Codex"}
+    names = {"pieces": "Pieces", **sources.NAMES}
     try:
         rows = db.execute("SELECT source FROM messages GROUP BY source ORDER BY COUNT(*) DESC").fetchall()
     except sqlite3.OperationalError:  # an index built before 0.2.0 has no source column: all Pieces

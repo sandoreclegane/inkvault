@@ -21,6 +21,16 @@ blocks (`text`, `thinking`, `tool_use`, `tool_result`), plus `uuid`, `sessionId`
 On a real session, tool results and attachments are about 85% of the bytes: file dumps, command output, and any
 secrets those contain.
 
+**Claude desktop app (agent mode):** the desktop app runs agent-mode sessions with Claude Code inside and keeps them
+apart from `~/.claude`, under the app's data folder at
+`local-agent-mode-sessions/<id>/<id>/local_<id>/.claude/projects/<project>/<session-id>.jsonl`. On Windows the app is an MSIX package, so that folder is
+`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\`; `%APPDATA%\Claude\` is redirected to the same place.
+The lines are Claude Code's (same `type`s, `sessionId`, `timestamp`, `isSidechain`; the title line is `ai-title`).
+`cwd` is a path inside the app's sandbox (`/sessions/<name>/...`). Next to each `local_<id>` folder is an
+`audit.jsonl` in another format that repeats the same turns. The full paths run past Windows' 260-character limit,
+and long paths are off by default, so a plain `open` or directory listing fails there. (Seen on 17 real sessions,
+2026-02 to 2026-10, local test 2026-10-08.)
+
 **Codex:** `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` (or `$CODEX_HOME/sessions`). Archived sessions move to
 `archived_sessions/`. Current files wrap each line as `{timestamp, type, payload}`, where `type` is `session_meta`,
 `response_item`, `event_msg` or `turn_context`. What the user typed and what the agent replied come through as
@@ -62,6 +72,11 @@ CREATE TABLE session_files (source TEXT NOT NULL, file TEXT NOT NULL, read_to IN
   line and doesn't shrink the file goes unnoticed.
 - **Deleted files keep their lines.** That is the point: Claude Code's 30-day cleanup no longer loses anything.
 - Only Claude Code's top-level session files are read (`projects/*/*.jsonl`), not subagent transcripts.
+- **Claude desktop** is a third source, `claude_desktop` ("Claude desktop"), with Claude Code's keep rules and reader.
+  Only top-level session files under `local_*/.claude/projects/` are read: not `audit.jsonl`, not subagents. Each
+  data folder is resolved first and read once, so the redirected `%APPDATA%` path doesn't read it twice. On Windows
+  the folder is opened with the `\\?\` long-path prefix. Only the Windows locations above are read; another
+  platform's location is added when it is seen, not guessed.
 - A file that can't be read, or a line that isn't JSON, is skipped (the line still counts as read); one bad file
   never stops a sync.
 - `inkvault sync` takes the same lock as `rescue`, syncs, then rebuilds search. `rescue` and the nightly run sync
@@ -69,12 +84,13 @@ CREATE TABLE session_files (source TEXT NOT NULL, file TEXT NOT NULL, read_to IN
 
 ### 2. Index (`index.py`)
 
-`messages` gets a `source` column (`pieces`, `claude_code`, `codex`). Each session becomes one conversation:
+`messages` gets a `source` column (`pieces`, `claude_code`, `claude_desktop`, `codex`). Each session becomes one
+conversation:
 
-- `conversation_id`: `claude_code:<sessionId>` or `codex:<session id>`.
-- `conversation_name`: `Claude Code · <project>: <title>` or `Codex · <project>: <title>`. The project is the last
-  part of the session's working folder. The title is the session's custom title or summary if it has one, else its
-  first prompt (clipped to 80 characters).
+- `conversation_id`: `claude_code:<sessionId>`, `claude_desktop:<sessionId>` or `codex:<session id>`.
+- `conversation_name`: `Claude Code · <project>: <title>`, likewise `Claude desktop ·` and `Codex ·`.
+  The project is the last part of the session's working folder. The title is the session's custom title or summary
+  if it has one, else its first prompt (clipped to 80 characters).
 - Roles are `USER` and `ASSISTANT`, like Pieces chats, so embeddings, digests and project detection treat them the
   same.
 - Claude Code text: string content or `text` blocks only (no thinking, tool calls or tool results).
@@ -136,6 +152,7 @@ the records an earlier format skipped. Backups made before the upgrade are not r
 - Codex's progress commentary and final reply are both kept as assistant messages. None of 3,245 real assistant
   messages had a field telling them apart, so no distinction is claimed.
 - `compacted` records are stored but not shown anywhere.
+- The Claude desktop app's sessions on macOS and Linux: their location hasn't been seen yet.
 
 ## Testing
 
@@ -146,4 +163,6 @@ Synthetic files under a temporary `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, covering
   keeps its lines, and an archived Codex session isn't duplicated.
 - Index: conversation names and roles, system-reminder stripping, sidechain, meta and command lines skipped, both
   Codex formats, and the `source` column.
+- Claude desktop: its sessions become `claude_desktop` conversations; `audit.jsonl` and subagents are skipped; a
+  folder listed twice is read once; on Windows, a session whose path is over 260 characters is read.
 - Nightly: the step list includes `sync`, before `backup`.

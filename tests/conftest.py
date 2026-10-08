@@ -37,11 +37,14 @@ def only_python_subprocesses(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_real_sessions(tmp_path_factory, monkeypatch):
-    """Sync must never read this machine's own Claude Code or Codex sessions: point both at empty folders.
-    A test that wants sessions writes them under these same variables."""
+    """Sync must never read this machine's own Claude Code, Claude desktop or Codex sessions: point them all at
+    empty folders. A test that wants sessions writes them under these same variables (for the desktop app, under
+    sources.claude_desktop_roots()[0])."""
     base = tmp_path_factory.mktemp("agents")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(base / "claude"))
     monkeypatch.setenv("CODEX_HOME", str(base / "codex"))
+    from inkvault import sources
+    monkeypatch.setattr(sources, "claude_desktop_roots", lambda: [base / "claude-desktop"])
 
 
 @pytest.fixture(autouse=True)

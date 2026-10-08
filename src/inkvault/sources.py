@@ -22,11 +22,22 @@ from pathlib import Path
 from . import export
 from .times import local
 
-NAMES = {"claude_code": "Claude Code", "codex": "Codex"}
+NAMES = {"claude_code": "Claude Code", "claude_desktop": "Claude desktop", "codex": "Codex"}
 
 
 def claude_root():
     return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+
+
+def claude_desktop_roots():
+    """Where the Claude desktop app keeps agent-mode sessions. Only locations seen on a real install are listed:
+    on Windows the app is an MSIX package, and %APPDATA%\\Claude is redirected into its package folder."""
+    if os.name != "nt":
+        return []
+    found = [Path(os.environ["APPDATA"], "Claude")] if os.environ.get("APPDATA") else []
+    if os.environ.get("LOCALAPPDATA"):
+        found += Path(os.environ["LOCALAPPDATA"], "Packages").glob("Claude_*/LocalCache/Roaming/Claude")
+    return [p / "local-agent-mode-sessions" for p in found]
 
 
 def codex_root():
@@ -36,6 +47,21 @@ def codex_root():
 def claude_files():
     root = claude_root()
     return sorted(root.glob("*/*.jsonl")) if root.is_dir() else None  # top-level sessions, not subagents
+
+
+def long_path(p):
+    """p resolved, and on Windows prefixed with \\\\?\\: the desktop app's session paths run past 260 characters."""
+    p = p.resolve()
+    return Path("\\\\?\\" + str(p)) if os.name == "nt" and not str(p).startswith("\\\\") else p
+
+
+def claude_desktop_files():
+    """Top-level agent-mode session files (not subagents, not audit.jsonl), each folder read once."""
+    roots = {long_path(r) for r in claude_desktop_roots() if r.is_dir()}
+    if not roots:
+        return None
+    files = {f.name: f for r in sorted(roots) for f in r.glob("*/*/local_*/.claude/projects/*/*.jsonl")}
+    return sorted(files.values())
 
 
 def codex_files():
@@ -67,7 +93,8 @@ def keep_codex(o):
     return t == "message" or (t is None and "id" in o and "timestamp" in o)  # the older, unwrapped format
 
 
-SOURCES = {"claude_code": (claude_files, keep_claude), "codex": (codex_files, keep_codex)}
+SOURCES = {"claude_code": (claude_files, keep_claude), "claude_desktop": (claude_desktop_files, keep_claude),
+           "codex": (codex_files, keep_codex)}
 # Blocks never stored, even inside a kept line: pasted images and files (often inline base64) and tool output.
 OMITTED = {"image", "input_image", "document", "tool_result"}
 
@@ -213,8 +240,8 @@ def block_text(content, kinds):
     return ""
 
 
-def claude_messages(file, lines):
-    """One Claude Code session -> (id, created, conversation_id, role, text), plus its name."""
+def claude_messages(file, lines, source="claude_code"):
+    """One Claude Code (or Claude desktop) session -> (id, created, conversation_id, role, text), plus its name."""
     title, cwd, session, out = None, None, None, []
     for offset, o in lines:
         t = o.get("type")
@@ -229,10 +256,10 @@ def claude_messages(file, lines):
         text = REMINDER.sub("", block_text((o.get("message") or {}).get("content"), ("text",))).strip()
         if not text or text.startswith(("<command-", "<local-command-")) or not isinstance(o.get("timestamp"), str):
             continue
-        out.append((f"claude_code:{o.get('uuid') or f'{file}:{offset}'}", o["timestamp"], t.upper(), text))
-    conv = f"claude_code:{session or Path(file).stem}"
+        out.append((f"{source}:{o.get('uuid') or f'{file}:{offset}'}", o["timestamp"], t.upper(), text))
+    conv = f"{source}:{session or Path(file).stem}"
     first = next((text for _, _, role, text in out if role == "USER"), "untitled")
-    return conv, conversation_name("claude_code", cwd, title or first), out
+    return conv, conversation_name(source, cwd, title or first), out
 
 
 # Setup Codex puts in front of what the user typed: wrapped context blocks, and AGENTS.md instructions (with or
@@ -351,7 +378,8 @@ def conversation_name(source, cwd, title):
 
 def messages(vault):
     """Every stored session as message rows: (id, created, conversation_id, conversation_name, role, text, source)."""
-    readers = {"claude_code": claude_messages, "codex": codex_messages}
+    readers = {"claude_code": claude_messages, "codex": codex_messages,
+               "claude_desktop": lambda file, lines: claude_messages(file, lines, "claude_desktop")}
     try:
         files = vault.execute("SELECT DISTINCT source, file FROM session_lines").fetchall()
     except sqlite3.OperationalError as e:  # a vault that has never been synced has no session tables
