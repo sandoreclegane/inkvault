@@ -48,6 +48,16 @@ def no_real_sessions(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_browsers(monkeypatch):
+    """No test may read this machine's own browser history: every test starts with no browsers installed. A test
+    that wants browsers builds them with webfixtures.py and points browsers.user_data_dirs at them. The real
+    function stays reachable as browsers.real_user_data_dirs, for tests of the platform paths themselves."""
+    from inkvault import browsers
+    monkeypatch.setattr(browsers, "real_user_data_dirs", browsers.user_data_dirs, raising=False)
+    monkeypatch.setattr(browsers, "user_data_dirs", lambda: [])
+
+
+@pytest.fixture(autouse=True)
 def no_pieces_probe(request, monkeypatch):
     """PiecesOS.find probes several ports and waits on each; no test needs a real PiecesOS. A test can fake find
     itself (that wins), or use @pytest.mark.real_pieces_find."""
