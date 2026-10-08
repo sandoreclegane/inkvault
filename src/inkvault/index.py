@@ -23,9 +23,12 @@ def snippet_row(a):
 
 
 def build():
+    from . import forget  # imported here: forget.py calls index.build
     if not paths.vault_db().exists():
         print("Nothing to index yet: run `inkvault export` first.")
         return False
+    # A removal stopped part-way is finished before anything is read, so its visits can't be indexed again.
+    forget.apply_pending()
     raw = paths.connect_ro(paths.vault_db())
 
     def raws(kind):
@@ -105,4 +108,10 @@ def build():
     os.replace(tmp, paths.search_db())
 
     embed.build()
+    marker = paths.rebuild_marker()
+    if marker.exists() and not forget.pending():
+        # Search is fresh and no removal is pending. The dashboard on disk was built from the old index, so it goes
+        # too; the next dashboard build replaces it.
+        paths.dashboard().unlink(missing_ok=True)
+        marker.unlink()
     return True

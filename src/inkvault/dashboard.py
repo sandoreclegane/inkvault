@@ -183,8 +183,13 @@ def collect(db):
     digests = {}
     if paths.digests_db().exists():
         ddb = paths.connect_ro(paths.digests_db())
-        digests = dict(ddb.execute("SELECT day, digest FROM digests"))
-        ddb.close()
+        try:
+            digests = dict(ddb.execute("SELECT day, digest FROM digests"))
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e):  # a digests.db nothing has written to yet is no digests
+                raise
+        finally:
+            ddb.close()
 
     return {
         "themes": list(themes),

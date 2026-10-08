@@ -181,6 +181,8 @@ def waiting_line(n):
 def sync():
     """Copy the chosen profiles' history into the vault. Never asks: choosing happens before (`inkvault browsers`,
     or the prompt `sync` and `rescue` show in a terminal)."""
+    from . import forget  # imported here: forget.py imports this module
+    forget.apply_pending()  # a removal stopped part-way goes first: its choices are saved before profiles are read
     profiles = browsers.find_profiles()
     choices = browsers.load_choices()
     states = {p.key: browsers.state(p, choices) for p in profiles}
