@@ -404,3 +404,116 @@ def test_a_failed_search_build_leaves_no_file_open(home, monkeypatch):
         index.build()
     paths.search_db().with_suffix(".tmp").unlink()  # Windows can't delete a file that is still open
     paths.vault_db().unlink()
+
+
+def web_vault(home, monkeypatch):
+    """One page opened twice on one day: at 12:00 UTC here, at 12:20 UTC on a phone (synced)."""
+    from inkvault import history, index
+    h = chrome(home, monkeypatch, "Default")["Default"]
+    chromium_visit(h, 1, "https://docs.example.com/retry", T1, title="Retry with backoff")
+    chromium_visit(h, 2, "https://docs.example.com/retry", T2, guid="phone-guid")
+    choose("chrome/Default")
+    history.sync()
+    index.build()
+    return search_rows("SELECT day FROM pages")[0][0]
+
+
+def test_web_pages_in_search_get_memory_timeline_and_stats(home, monkeypatch):
+    from inkvault import server
+    day = web_vault(home, monkeypatch)
+    hits = server.search_memories("backoff", source="web", mode="keyword")
+    assert hits.startswith("[web] web:") and "Retry with backoff — docs.example.com" in hits
+    body = server.get_memory(hits.split()[1])
+    assert "https://docs.example.com/retry" in body and "(title as observed at sync)" in body
+    assert body.count("chrome/Default") == 3 and "synced from another device" in body
+    assert f"{day}  [web] 1 pages; most visited: docs.example.com" in server.timeline(since=day, until=day)
+    stats = server.memory_stats()
+    assert "web: 2 visits (1 synced from other devices), 1 pages" in stats
+    assert "visits by browser: Chrome 2" in stats
+    assert "[web]" in server.search_memories("backoff", mode="keyword")  # "all" includes web
+    assert "[web]" in server.search_memories("anything at all", source="web", mode="meaning")
+
+
+def test_web_time_ranges_follow_every_visit_not_just_the_first(home, monkeypatch):
+    from inkvault import server
+    web_vault(home, monkeypatch)  # visits at 12:00 and 12:20 UTC
+
+    def found(**bounds):
+        return "[web]" in server.search_memories("backoff", source="web", mode="keyword", **bounds)
+    assert found(since="2026-10-05T12:10") and found(until="2026-10-05T12:10")
+    assert found(since="2026-10-05T12:10", until="2026-10-05T12:30")
+    assert not found(since="2026-10-05T12:30")
+    assert not found(since="2026-10-05T12:21", until="2026-10-05T12:30")
+
+
+@pytest.mark.parametrize("hours, when, day", [
+    (14, "2026-10-05T12:00:00Z", "2026-10-06"),   # UTC+14: already the next day
+    (-11, "2026-10-05T05:00:00Z", "2026-10-04"),  # UTC-11: still the day before
+    (0, "2026-10-05T23:59:00Z", "2026-10-05"),    # a minute before midnight
+])
+def test_web_date_ranges_follow_the_local_day(home, monkeypatch, hours, when, day):
+    from datetime import date, datetime, timedelta, timezone
+    from inkvault import history, index, server
+    zone = timezone(timedelta(hours=hours))
+    monkeypatch.setattr(history, "local",
+                        lambda ts: datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(zone))
+    h = chrome(home, monkeypatch, "Default")["Default"]
+    chromium_visit(h, 1, "https://docs.example.com/retry", when, title="Retry with backoff")
+    choose("chrome/Default")
+    history.sync()
+    index.build()
+    assert search_rows("SELECT day FROM pages") == [(day,)]
+    before = (date.fromisoformat(day) - timedelta(days=1)).isoformat()
+    after = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+
+    def found(since, until):
+        return "[web]" in server.search_memories("backoff", source="web", mode="keyword", since=since, until=until)
+    assert found(day, day) and found(before, day) and found(day, after)
+    assert not found(after, after) and not found(before, before)
+
+
+def test_web_time_bounds_compare_as_times_not_text(home, monkeypatch):
+    from inkvault import server
+    web_vault(home, monkeypatch)  # the phone visit is at exactly 12:20:00 UTC
+
+    def found(**bounds):
+        return "[web]" in server.search_memories("backoff", source="web", mode="keyword", **bounds)
+    for at in ("2026-10-05T12:20:00Z", "2026-10-05T12:20:00.000Z", "2026-10-05T12:20", "2026-10-05T14:20:00+02:00"):
+        assert found(since=at), at                    # since is inclusive
+        assert not found(since=at, until=at), at       # until is exclusive
+    assert server.search_memories("backoff", since="yesterday").startswith("Bad date")
+
+
+def test_an_index_from_before_0_3_0_has_no_web_source_yet(home, monkeypatch):
+    from inkvault import paths, server
+    web_vault(home, monkeypatch)
+    db = sqlite3.connect(paths.search_db())
+    db.executescript("DROP TABLE pages_fts; DROP TABLE pages; DROP TABLE visits;")
+    db.close()
+    assert server.search_memories("backoff", source="web") == \
+        "Web pages aren't in the search index yet: run `inkvault index`."
+    assert "No matches" in server.search_memories("backoff", mode="keyword")
+    assert "web:" not in server.memory_stats()
+    server.timeline(since="2026-10-01")  # no error
+
+
+def test_the_tools_refuse_while_a_removal_is_unfinished(home, monkeypatch):
+    from inkvault import paths, server
+    web_vault(home, monkeypatch)
+    paths.rebuild_marker().write_text("removing", encoding="utf-8")
+    for answer in (server.search_memories("backoff"), server.get_memory("web:x"), server.timeline(since="2026-10-01"),
+                   server.memory_stats()):
+        assert answer == server.REBUILDING
+
+
+def test_a_tool_whose_files_were_replaced_while_it_worked_asks_again(home, monkeypatch):
+    from inkvault import paths, server
+    web_vault(home, monkeypatch)
+    real = server.keyword_ranked
+
+    def slow(*a, **k):
+        rows = real(*a, **k)
+        paths.vectors().write_bytes(b"replaced")  # stands in for a search build publishing new files meanwhile
+        return rows
+    monkeypatch.setattr(server, "keyword_ranked", slow)
+    assert server.search_memories("backoff", mode="keyword") == server.CHANGED
