@@ -254,7 +254,7 @@ def index_into(raw, db):
     try:
         rows = raw.execute("SELECT id, profile, visit_id, created, url, address, title, title_observed_at, "
                            "transition, redirected, origin FROM browser_visits ORDER BY created, id").fetchall()
-    except sqlite3.OperationalError:  # a vault from before 0.3.0
+    except sqlite3.OperationalError:  # a vault from before 0.2.1
         rows = []
     pages, visits = {}, []
     for vid, profile, native, created, url, address, title, observed, transition, redirected, origin in rows:

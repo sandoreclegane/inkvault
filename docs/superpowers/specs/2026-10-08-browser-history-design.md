@@ -1,7 +1,7 @@
 # Browser history in the vault
 
 **Status:** design, revised after two Codex reviews (2026-10-08); ready for the implementation plan
-**Release:** v0.3.0. ChatGPT/Claude.ai importers and people are specced separately.
+**Release:** v0.2.1. ChatGPT/Claude.ai importers and people are specced separately (v0.3.0).
 
 ## Why
 

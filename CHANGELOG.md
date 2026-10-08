@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.2.1 (unreleased)
 
 - **Browser history** in the vault: Chrome, Edge, Comet, Brave, Arc, Vivaldi, Opera and Firefox, from the profiles
   you choose with `inkvault browsers` (nothing is read before you choose; the nightly run never asks). Each sync

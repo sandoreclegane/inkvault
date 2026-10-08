@@ -56,7 +56,7 @@ a dashboard of what you have. Run the same command again later and it picks up w
 - **Your Claude Code, Codex and Claude desktop sessions**: your prompts and the replies, side by side with your
   Pieces history, searchable as chats (named like `Claude Code · project: title`), and part of the timeline, the
   digests and the dashboard.
-- **Your browser history** (new in 0.3.0): pages you opened in Chrome, Edge, Comet, Brave, Arc, Vivaldi, Opera or
+- **Your browser history** (new in 0.2.1): pages you opened in Chrome, Edge, Comet, Brave, Arc, Vivaldi, Opera or
   Firefox, from the browser profiles you say are yours. Browsers delete history after about 90 days; the vault
   keeps it. Searchable as `web`, on the timeline, in the digests and on the dashboard.
 - **Daily digests** (optional): a 2-3 sentence summary of each day, written by a *local* model through

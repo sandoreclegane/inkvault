@@ -143,7 +143,7 @@ def collect(db):
     # active hours here (they are in search). Counted apart from Pieces' captures: the two are sampled differently.
     try:
         opened = db.execute("SELECT created, host FROM visits WHERE synced = 0").fetchall()
-    except sqlite3.OperationalError:  # an index built before 0.3.0
+    except sqlite3.OperationalError:  # an index built before 0.2.1
         opened = []
     for ts, host in opened:
         day = touch(ts, "pages")

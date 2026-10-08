@@ -68,7 +68,7 @@ def gather(db):
     titles, hosts = defaultdict(Counter), defaultdict(Counter)
     try:
         opened = db.execute("SELECT v.created, p.title, v.host FROM visits v JOIN pages p ON p.id = v.page_id").fetchall()
-    except sqlite3.OperationalError:  # an index built before 0.3.0
+    except sqlite3.OperationalError:  # an index built before 0.2.1
         opened = []
     for ts, title, host in opened:
         day = local_day(ts)

@@ -140,7 +140,7 @@ def pending():
     try:
         return db.execute("SELECT COUNT(*) FROM browser_removals").fetchone()[0]
     except sqlite3.OperationalError as e:
-        if missing_table(e):  # a vault no 0.3.0 command has opened yet
+        if missing_table(e):  # a vault no 0.2.1 command has opened yet
             return 0
         raise
     finally:
