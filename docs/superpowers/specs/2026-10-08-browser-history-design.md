@@ -136,14 +136,18 @@ A profile's key is `<browser>/<folder>`: `chrome/Profile 2`, `firefox/abcd1234.d
      the pages have in `search.db`) and the current one;
   2. writes a `rebuild-needed` marker file in the InkVault home, and deletes `dashboard.html` (a page on disk can't
      check the marker);
-  3. records the removal in `vault.db` (`browser_removals`: what, which profile or host, the affected days), in one
-     transaction. Until this commits, nothing has changed, and the command reports failure;
+  3. records the removal in `vault.db` (`browser_removals`: what, which profile or host, the affected days). All of
+     a command's removals go in one transaction, and only then are the choices that go with them saved (`no`, or
+     the host on the skip list). Until this commits, nothing has changed, and the command reports failure;
   4. *applies* every recorded removal: makes sure the choice is saved (`no` for the profile, the host on the skip
      list), deletes the affected days' digests, then deletes the visits **and** the removal record in one
      transaction;
   5. rebuilds search (tables and vectors), then the dashboard.
 
-  Applying is idempotent. **Every search build applies pending removals before it reads anything**, and deletes the
+  `--forget` is always queued when asked for; how many visits it matches is counted under the lock, so visits a
+  sync added while the command waited are removed too. Applying is idempotent. **Every search build and every
+  browser sync applies pending removals before it reads anything**, and `inkvault sync` rebuilds search whenever a
+  removal was pending or the marker was up, even with nothing new to sync; and deletes the
   marker only after it has built search with no removal pending. So a removal stopped after step 3 is finished by
   the next `sync`, `index`, rescue or nightly run, never re-indexed. A digest database that can't be written (for
   example, locked) stops the removal with an error and leaves it recorded; only a missing table is taken as
@@ -154,7 +158,9 @@ A profile's key is `<browser>/<folder>`: `chrome/Profile 2`, `firefox/abcd1234.d
 - **One writer at a time.** Every command that writes `vault.db`, `search.db`, `vectors.npz`, `digests.db` or
   `dashboard.html` holds the lock the nightly run uses: `rescue`, `sync` (through its search rebuild), `index`,
   `digest`, `dashboard`, `browsers` (when it changes a choice or removes), and the nightly run. So a search build
-  can't publish visits a removal is deleting, and two builds never share a temp file.
+  can't publish visits a removal is deleting, and two builds never share a temp file. On a drive that can't lock
+  files at all, `browsers` refuses to change choices or remove; the others go ahead unguarded, as rescue and the
+  nightly run always have (so the backup still happens): with no removal possible there, none can be raced.
 - **Choices are written under the lock too.** Answers are collected first (a prompt can wait for a person; the lock
   shouldn't), then the lock is taken, `browsers.json` is read again, the answers are merged in, and it is saved
   (through a uniquely named temp file). If the lock is busy, nothing is changed and the message says so.
@@ -294,7 +300,8 @@ last records also removes their vectors.
 - **MCP `search_memories`:** a new source `web` ("pages you opened, from your browsers' history; best for 'when did
   I look at…'"). A hit reads `[web] <id>  <time>  <title> — <host>` with the address as preview. Date ranges for
   `web` follow the visits, not just the day's first one: a date-only bound (`2026-10-06`) compares the page's
-  local day, and a bound with a time compares the page's visits (stored in UTC, like every other source's times),
+  local day, and a bound with a time compares the page's visits, parsed and converted to the stored UTC form first
+  (`12:20`, `12:20:00Z`, `12:20:00.000Z` and `14:20+02:00` are the same instant; a bound without a zone is UTC),
   so a page opened at 12:00 and again at 12:20 is found by `since="2026-10-05T12:10"`.
 - **`get_memory`** on a page: title (marked as observed at sync), address, profiles, and that day's visit times,
   marking visits synced from another device.
@@ -428,3 +435,14 @@ addresses are used.
 | 9 | Choices were saved outside the lock | Answers collected first, merged and saved under the lock |
 | 10 | A profile whose folder is gone couldn't be forgotten | `--no` accepts keys from `browsers.json` or stored visits |
 | 11 | Embedding used the whole address | Title, host and path; `pages.path` added |
+
+## Changes from Codex's plan recheck (2026-10-08)
+
+| # | Finding | Change |
+|---|---|---|
+| 1 | Choices were saved before the removal was recorded | All of a command's removals recorded in one transaction first, then the choices saved |
+| 2 | A lock failure let writes go ahead | Removing and changing choices refuse; the rest keep today's unguarded behavior, since no removal can run there |
+| 3 | `sync` could skip recovery when nothing was new | `sync` applies pending removals first and rebuilds search whenever one was pending or the marker was up |
+| 4 | `--forget` was decided from an unlocked count | Always queued; matches counted under the lock |
+| 5 | Time bounds compared as text | Parsed and normalized to the stored UTC form |
+| 6 | The manual check could leave copies behind | Connections closed through an ExitStack, `index.build` closes on failure, an undeletable folder is exit code 2; the harness is tested on synthetic history first |

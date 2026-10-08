@@ -45,6 +45,7 @@
 | `tests/test_forget.py` | create | Task 8 |
 | `tests/test_nightly.py` | modify | step list; browser step results; lock purposes |
 | `tests/manual/browser_check.py` | create | Task 10: a read-only, counts-only check against real history |
+| `tests/test_browser_check.py` | create | Task 10: the check, run on synthetic history (counts, cleanup) |
 | `README.md`, `CHANGELOG.md` | modify | Task 10 |
 
 ---
@@ -1578,6 +1579,19 @@ def test_an_old_vault_without_browser_tables_still_indexes(home):
     db.close()
     assert index.build()
     assert search_rows("SELECT COUNT(*) FROM pages") == [(0,)]
+
+
+def test_a_failed_search_build_leaves_no_file_open(home, monkeypatch):
+    from inkvault import export, history, index, paths
+    export.open_vault().close()
+
+    def broken(raw, db):
+        raise RuntimeError("index broke")
+    monkeypatch.setattr(history, "index_into", broken)
+    with pytest.raises(RuntimeError):
+        index.build()
+    paths.search_db().with_suffix(".tmp").unlink()  # Windows can't delete a file that is still open
+    paths.vault_db().unlink()
 ```
 
 - [ ] **Step 2: Run them to see them fail**
@@ -1668,6 +1682,18 @@ In `src/inkvault/index.py`:
         CREATE INDEX visits_page ON visits(page_id);
    ```
 5. The count line: `for t in ("events", "summaries", "messages", "snippets", "pages")`.
+6. Close both databases however the build ends (Windows can't replace or delete a file that is still open):
+   wrap everything from `db = sqlite3.connect(tmp)` through the `print("indexed: …")` line in `try:` /
+   `finally:`, with the two `close()` calls moved into the `finally`:
+   ```python
+    db = sqlite3.connect(tmp)
+    try:
+        …  (the tables, inserts, FTS and the count line, unchanged)
+    finally:
+        db.close()
+        raw.close()
+    os.replace(tmp, paths.search_db())
+   ```
 
 In `src/inkvault/embed.py`, add to `QUERIES` (title, host and path: the query and fragment say little about a page
 and are where leftovers of cleaning would be):
@@ -1775,6 +1801,18 @@ def test_web_date_ranges_follow_the_local_day(home, monkeypatch, hours, when, da
     assert not found(after, after) and not found(before, before)
 
 
+def test_web_time_bounds_compare_as_times_not_text(home, monkeypatch):
+    from inkvault import server
+    web_vault(home, monkeypatch)  # the phone visit is at exactly 12:20:00 UTC
+
+    def found(**bounds):
+        return "[web]" in server.search_memories("backoff", source="web", mode="keyword", **bounds)
+    for at in ("2026-10-05T12:20:00Z", "2026-10-05T12:20:00.000Z", "2026-10-05T12:20", "2026-10-05T14:20:00+02:00"):
+        assert found(since=at), at                    # since is inclusive
+        assert not found(since=at, until=at), at       # until is exclusive
+    assert server.search_memories("backoff", since="yesterday").startswith("Bad date")
+
+
 def test_an_index_from_before_0_3_0_has_no_web_source_yet(home, monkeypatch):
     from inkvault import paths, server
     web_vault(home, monkeypatch)
@@ -1821,7 +1859,7 @@ Expected: FAIL (`Unknown source 'web'`; `AttributeError: ... 'REBUILDING'`).
 
 In `src/inkvault/server.py`:
 
-1. Imports: add `import functools`; `from . import browsers, embed, paths, sources`; `from .times import local`.
+1. Imports: add `import functools` and `from datetime import datetime, timezone`; `from . import browsers, embed, paths, sources`; `from .times import local`.
 2. Instructions: replace the `instructions=` string with:
    ```python
     instructions="The user's long-term memory rescued from Pieces (screen/document captures, AI-written session "
@@ -1873,6 +1911,14 @@ def has_table(conn, name):
     return conn.execute("SELECT 1 FROM sqlite_master WHERE name=?", (name,)).fetchone() is not None
 
 
+def utc_bound(text):
+    """A time bound as stored: UTC, microseconds, "Z". A bound without a zone is UTC, like every stored time."""
+    t = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def web_filter(since, until, params):
     """Pages by when they were opened. A date-only bound compares the page's local day; a bound with a time compares
     its visits (UTC, like every other source's times), so a later visit in the range finds the page."""
@@ -1882,13 +1928,13 @@ def web_filter(since, until, params):
             sql += " AND t.day >= ?"
             params.append(since)
         else:
-            visit.append(("v.created >= ?", since))
+            visit.append(("v.created >= ?", utc_bound(since)))
     if until:
         if len(until) == 10:
             sql += " AND t.day <= ?"
             params.append(until)
         else:
-            visit.append(("v.created < ?", until))
+            visit.append(("v.created < ?", utc_bound(until)))
     if visit:
         sql += (" AND EXISTS (SELECT 1 FROM visits v WHERE v.page_id = t.id AND "
                 + " AND ".join(c for c, _ in visit) + ")")
@@ -1909,6 +1955,12 @@ def range_filter(kind, since, until, params):
    line becomes `since/until: optional ISO dates ("2026-10-01") or UTC times ("2026-10-01T14:30").`. Inside
    `with db() as conn:`, before the keyword loop:
    ```python
+        for bound in (since, until):
+            if bound and len(bound) != 10:
+                try:
+                    utc_bound(bound)
+                except ValueError:
+                    return f"Bad date {bound!r}: use a date (2026-10-05) or a UTC time (2026-10-05T14:30)."
         if source == "web" and not has_table(conn, "pages"):
             return "Web pages aren't in the search index yet: run `inkvault index`."
         kinds = [k for k in kinds if has_table(conn, SOURCES[k][0])]
@@ -2313,6 +2365,25 @@ def test_a_request_in_flight_when_a_removal_starts_never_returns_what_was_remove
     assert answer in (server.REBUILDING, server.CHANGED)
 
 
+def test_a_commands_removals_are_recorded_together(setup, monkeypatch):
+    from inkvault import forget
+
+    def stop():
+        raise RuntimeError("stopped")
+    monkeypatch.setattr(forget, "apply_pending", stop)  # leave them recorded
+    with pytest.raises(RuntimeError):
+        forget.remove([("site", "bank.example"), ("site", "docs.example.com"), ("site", "nowhere.example")])
+    assert forget.pending() == 2  # the two that match anything, in one transaction
+
+
+def test_a_browser_sync_finishes_a_recorded_removal_first(setup):
+    from inkvault import browsers, forget, history, paths
+    assert forget.request([("site", "bank.example")]) == 1  # recorded, then stopped: the skip list wasn't saved
+    history.sync()  # the bank visit is still in Chrome's file; the finished removal's skip list keeps it out
+    assert rows(paths.vault_db(), "SELECT url FROM browser_visits") == [("https://docs.example.com/retry",)]
+    assert forget.pending() == 0 and "bank.example" in browsers.load_choices()["skip_sites"]
+
+
 def test_nothing_to_remove_touches_nothing(setup):
     from inkvault import forget, paths
     before = paths.dashboard().stat().st_mtime_ns
@@ -2383,29 +2454,39 @@ def index_days(ids):
     return days
 
 
-def record(vault, what, value, days):
-    vault.execute("INSERT INTO browser_removals (what, value, days, created) VALUES (?,?,?,?)",
-                  (what, value, json.dumps(sorted(days)), datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
+def record(vault, planned):
+    """All of a command's removals in one transaction: none is recorded unless all are."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    vault.executemany("INSERT INTO browser_removals (what, value, days, created) VALUES (?,?,?,?)",
+                      ((what, value, json.dumps(sorted(days)), now) for what, value, days in planned))
     vault.commit()
 
 
-def request(what, value):
-    """Find what to remove, put the marker up, and record the removal. Returns how many visits match; 0 means
-    nothing was recorded and nothing changed."""
-    if not paths.vault_db().exists():
+def request(removals):
+    """Find what each removal ([(what, value)]) matches, put the marker up, and record them all in one transaction.
+    Returns how many stored visits they match; with none, nothing is recorded and nothing changes. A command saves
+    the choices that go with its removals only after this returns (apply_pending saves them again in case it
+    stopped before)."""
+    if not removals or not paths.vault_db().exists():
         return 0
     vault = export.open_vault()
     try:
-        pick = matcher(what, value)
-        found = [(i, c) for i, c, p, u in vault.execute("SELECT id, created, profile, url FROM browser_visits")
-                 if pick(p, u)]
-        if not found:
+        stored = vault.execute("SELECT id, created, profile, url FROM browser_visits").fetchall()
+        planned, total = [], 0
+        for what, value in removals:
+            pick = matcher(what, value)
+            found = [(i, c) for i, c, p, u in stored if pick(p, u)]
+            if found:
+                days = {local(c).date().isoformat() for _, c in found} | index_days([i for i, _ in found])
+                planned.append((what, value, days))
+                total += len(found)
+        if not planned:
             return 0
-        days = {local(c).date().isoformat() for _, c in found} | index_days([i for i, _ in found])
-        paths.rebuild_marker().write_text(f"removing {what} {value}\n", encoding="utf-8")
+        paths.rebuild_marker().write_text("removing " + ", ".join(f"{w} {v}" for w, v, _ in planned) + "\n",
+                                          encoding="utf-8")
         paths.dashboard().unlink(missing_ok=True)  # a page on disk can't check the marker
-        record(vault, what, value, days)
-        return len(found)
+        record(vault, planned)
+        return total
     finally:
         vault.close()
 
@@ -2480,23 +2561,28 @@ def pending():
         db.close()
 
 
-def remove(what, value):
-    """A whole removal. Returns how many visits it removed. Raises when a step fails; a recorded removal is then
-    finished by the next search build (sync, index, rescue or the nightly run)."""
-    n = request(what, value)
+def finish():
+    """Apply what's recorded, then rebuild search (which takes the marker down) and the dashboard."""
+    apply_pending()
+    index.build()
+    dashboard.build()
+
+
+def remove(removals):
+    """Request and finish removals. Returns how many visits they removed. Raises when a step fails; whatever was
+    recorded is finished by the next search build or browser sync."""
+    n = request(removals)
     if n:
-        apply_pending()
-        index.build()  # applies anything still pending, and takes the marker down
-        dashboard.build()
+        finish()
     return n
 
 
 def forget_profile(key):
-    return remove("profile", key)
+    return remove([("profile", key)])
 
 
 def forget_site(host):
-    return remove("site", host)
+    return remove([("site", host)])
 ```
 
 In `src/inkvault/index.py`, at the start of `build()` (after the vault-exists check) and at its end:
@@ -2521,6 +2607,16 @@ def build():
     return True
 ```
 
+In `src/inkvault/history.py`, at the start of `sync()`:
+
+```python
+def sync():
+    """…  (docstring unchanged)"""
+    from . import forget  # imported here: forget.py imports this module
+    forget.apply_pending()  # a removal stopped part-way goes first: its choices are saved before profiles are read
+    profiles = browsers.find_profiles()
+```
+
 - [ ] **Step 4: Run them to see them pass**
 
 Run: `uv run pytest tests/test_forget.py -q` → all pass. Then `uv run pytest -q` → all pass.
@@ -2528,7 +2624,7 @@ Run: `uv run pytest tests/test_forget.py -q` → all pass. Then `uv run pytest -
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/inkvault/forget.py src/inkvault/index.py tests/test_forget.py
+git add src/inkvault/forget.py src/inkvault/index.py src/inkvault/history.py tests/test_forget.py
 git commit -m "Browsers: removals recorded before they start and finished by the next search build"
 ```
 
@@ -2591,7 +2687,7 @@ def test_a_choice_is_merged_with_what_another_command_saved_while_it_waited(home
 
 (add `import contextlib` to `tests/test_browsers.py`'s imports).
 
-Append to `tests/test_history.py`:
+Append to `tests/test_history.py` (and add `import contextlib` to its imports):
 
 ```python
 def test_no_without_forget_keeps_the_visits_and_says_how_to_remove_them(home, monkeypatch, capsys):
@@ -2605,6 +2701,73 @@ def test_no_without_forget_keeps_the_visits_and_says_how_to_remove_them(home, mo
     assert len(stored()) == 1
     assert cli.main(["browsers", "--no", "chrome/Default", "--forget"]) == 0
     assert stored() == []
+
+
+def test_a_removal_stopped_before_it_is_recorded_changes_nothing(home, monkeypatch):
+    from inkvault import browsers, cli, forget, history
+    h = chrome(home, monkeypatch, "Default")["Default"]
+    chromium_visit(h, 1, "https://bank.example/", T1)
+    choose("chrome/Default")
+    history.sync()
+
+    def stop(*a):
+        raise RuntimeError("stopped")
+    monkeypatch.setattr(forget, "record", stop)
+    assert cli.main(["browsers", "--skip-site", "bank.example"]) == 1
+    assert browsers.load_choices()["skip_sites"] == [] and len(stored()) == 1 and forget.pending() == 0
+
+
+def test_a_forget_stopped_after_it_is_recorded_is_finished_by_the_next_sync(home, monkeypatch):
+    from inkvault import browsers, cli, forget, paths
+    h = chrome(home, monkeypatch, "Default")["Default"]
+    chromium_visit(h, 1, "https://example.com/", T1)
+    choose("chrome/Default")
+    assert cli.main(["sync"]) == 0
+    real = browsers.save_choices
+
+    def stop(*a):
+        raise RuntimeError("stopped")
+    monkeypatch.setattr(browsers, "save_choices", stop)  # recorded, but stopped before the choice was saved
+    assert cli.main(["browsers", "--no", "chrome/Default", "--forget"]) == 1
+    monkeypatch.setattr(browsers, "save_choices", real)
+    assert forget.pending() == 1 and browsers.load_choices()["profiles"]["chrome/Default"]["choice"] == "yes"
+    # The only chosen profile is being forgotten and there are no sessions: sync must still finish the removal.
+    assert cli.main(["sync"]) == 0
+    assert stored() == [] and forget.pending() == 0 and not paths.rebuild_marker().exists()
+    assert browsers.load_choices()["profiles"]["chrome/Default"] == {"choice": "no"}
+
+
+def test_forget_removes_visits_a_sync_added_while_it_waited_for_the_lock(home, monkeypatch):
+    from inkvault import cli, history, nightly
+    h = chrome(home, monkeypatch, "Default")["Default"]
+    chromium_visit(h, 1, "https://example.com/", T1)
+    choose("chrome/Default")  # nothing copied yet: an unlocked count would say there is nothing to forget
+    real = nightly.lock
+
+    @contextlib.contextmanager
+    def lock_after_a_sync(purpose="rescue"):
+        history.sync()  # another process's sync, while this command waited for the lock
+        with real(purpose):
+            yield
+    monkeypatch.setattr(nightly, "lock", lock_after_a_sync)
+    assert cli.main(["browsers", "--no", "chrome/Default", "--forget"]) == 0
+    assert stored() == []
+
+
+def test_removing_refuses_on_a_drive_that_cant_lock_and_the_rest_go_ahead(home, monkeypatch, capsys):
+    from inkvault import browsers, cli, nightly
+
+    @contextlib.contextmanager
+    def no_locking(purpose="rescue"):
+        raise OSError("locking not supported")
+        yield
+    monkeypatch.setattr(nightly, "lock", no_locking)
+    chrome(home, monkeypatch, "Default")
+    assert cli.main(["browsers", "--skip-site", "x.example"]) == 1
+    assert browsers.load_choices()["skip_sites"] == []
+    capsys.readouterr()
+    cli.main(["index"])  # goes ahead unguarded (and finds no vault yet)
+    assert "continuing without it" in capsys.readouterr().out
 
 
 def test_a_profile_whose_folder_is_gone_can_still_be_forgotten(home, monkeypatch):
@@ -2757,9 +2920,11 @@ In `src/inkvault/cli.py`:
 2. After `open_dashboard()`, the lock helper every writing command uses:
    ```python
 @contextlib.contextmanager
-def locked(purpose, nothing_done):
+def locked(purpose, nothing_done, required=False):
     """The nightly lock, for a command that writes the vault, search, vectors, digests or dashboard (spec §1, "One
-    writer at a time"). Yields False, after saying so, when another process holds it."""
+    writer at a time"). Yields False, after saying so, when another process holds it. On a drive that can't lock
+    files at all, a command that removes (required=True) refuses; the others go ahead unguarded, as rescue and the
+    nightly run always have: no removal can run on such a drive, so there is none for them to race."""
     from . import nightly
     with contextlib.ExitStack() as stack:
         try:
@@ -2769,7 +2934,12 @@ def locked(purpose, nothing_done):
                   "(see `inkvault status`).")
             yield False
             return
-        except OSError as e:  # e.g. a drive without file locking: better unguarded than not at all
+        except OSError as e:  # e.g. a drive without file locking
+            if required:
+                print(f"Couldn't take the lock that keeps this apart from the nightly run ({e}); {nothing_done} "
+                      "Changing browser choices and removing need it.")
+                yield False
+                return
             print(f"Couldn't take the lock that keeps this apart from the nightly run ({e}); continuing without it.")
         yield True
    ```
@@ -2796,7 +2966,7 @@ def cmd_rescue(args):
     except KeyboardInterrupt:
         return partial_rescue(args)
     sync_sessions()
-    sync_browsers()
+    sync_browsers()  # applies any removal that was stopped part-way, first
     index.build()
    ```
 5. Replace `sync_sessions` and `cmd_sync`, and add the helpers:
@@ -2833,21 +3003,33 @@ def ask_browsers():
 
 
 def cmd_sync(_args):
-    from . import browsers, index
+    from . import browsers, dashboard, forget, index, paths
     profiles, answers = ask_browsers()
     with locked("sync", "nothing was synced.") as ok:
         if not ok:
+            return 1
+        # A removal stopped part-way is finished first, whatever else there is to do, and search is rebuilt after
+        # it even when nothing is new.
+        recovering = forget.pending() > 0 or paths.rebuild_marker().exists()
+        try:
+            forget.apply_pending()
+        except Exception as e:  # noqa: BLE001
+            print(f"Couldn't finish a removal that was interrupted ({type(e).__name__}: {e}); nothing was synced, and "
+                  "search stays off until it's finished.")
             return 1
         if answers:
             browsers.record_answers(profiles, answers)
         sessions = sync_sessions()
         web = sync_browsers()
-        if sessions == "none" and web == "nothing":
+        if sessions == "none" and web == "nothing" and not recovering:
             print("Nothing to sync: no Claude Code or Codex sessions on this computer, and no browser profile chosen "
                   "(`inkvault browsers`).")
             return 1
         # Still holding the lock: a removal can't start between reading the vault and publishing search.
-        built = index.build() if sessions == "ok" or web in ("ok", "partial") else False
+        built = index.build() if recovering or sessions == "ok" or web in ("ok", "partial") else False
+        if recovering and built:
+            dashboard.build()
+            print("Finished a removal that had been interrupted.")
     return 0 if built and sessions != "failed" and web in ("ok", "nothing") else 1
 
 
@@ -2872,32 +3054,14 @@ def stored_profiles():
         db.close()
 
 
-def remove_now(what, value):
-    """One removal, with the lock already held (forget.py)."""
-    from . import forget
-    label = f"the visits copied from {value}" if what == "profile" else f"the visits to {value}"
-    try:
-        n = forget.remove(what, value)
-    except Exception as e:  # noqa: BLE001
-        later = ("It's recorded: the next `inkvault sync`, `inkvault index` or nightly run finishes it, and search "
-                 "stays off until then." if forget.pending() else "Nothing was removed.")
-        print(f"Removing {label} didn't finish ({type(e).__name__}: {e}). {later}")
-        return 1
-    if not n:
-        print("Nothing had been copied, so there was nothing to remove.")
-        return 0
-    print(f"Removed {n:,} visits ({label}) and rebuilt search and the dashboard. The nightly backups still hold "
-          "them until they rotate out (7 nights).")
-    return 0
-
-
 def cmd_browsers(args):
-    """Work out the change first (asking whatever needs a person), then, holding the lock, read browsers.json again,
-    apply the change, save, and remove what was asked."""
-    from . import browsers
+    """Work out the change first, asking whatever needs a person. Then, holding the lock: record every removal (one
+    transaction), save the choices merged into browsers.json as it is now, and finish the removals. Recording comes
+    first, so a stop anywhere leaves either nothing changed or a recorded removal the next search build finishes."""
+    from . import browsers, forget, paths
     profiles = browsers.find_profiles()
     found = {p.key: p for p in profiles}
-    removals = []
+    removals, keeps = [], None
     if args.skip_site or args.unskip_site:
         host = (args.skip_site or args.unskip_site).strip().lower()
 
@@ -2928,13 +3092,13 @@ def cmd_browsers(args):
 
         def change(choices):
             choices["profiles"][key] = {"choice": "no"}
-        n = stored.get(key, 0)
         said = f"{key}: no"
-        if n and (args.forget or (browsers.interactive() and confirm(
-                f"Also remove the {n:,} visits already copied from it? [y/N] "))):
+        # --forget is always queued: what it matches is counted under the lock, after any sync that ran meanwhile.
+        if args.forget or (browsers.interactive() and stored.get(key) and confirm(
+                f"Also remove the {stored[key]:,} visits already copied from it? [y/N] ")):
             removals.append(("profile", key))
-        elif n:
-            said += f"\n{n:,} visits already copied from it stay in the vault; add --forget to remove them."
+        else:
+            keeps = key
     else:
         if not profiles:
             print("No supported browser found on this computer.")
@@ -2958,17 +3122,41 @@ def cmd_browsers(args):
             for p in profiles:
                 browsers.set_choice(choices, p, answers[p.key])
         said = "Saved."
-    with locked("browsers", "nothing was changed.") as ok:
+    with locked("browsers", "nothing was changed.", required=True) as ok:
         if not ok:
             return 1
-        choices = browsers.load_choices()
-        change(choices)
-        browsers.save_choices(choices)
+        try:
+            n = forget.request(removals)
+        except Exception as e:  # noqa: BLE001
+            print(f"Couldn't record the removal ({type(e).__name__}: {e}); nothing was changed."
+                  + (" Search stays off until `inkvault index` runs." if paths.rebuild_marker().exists() else ""))
+            return 1
+        try:
+            choices = browsers.load_choices()
+            change(choices)
+            browsers.save_choices(choices)
+        except Exception as e:  # noqa: BLE001
+            print(f"Couldn't save your choice ({type(e).__name__}: {e})."
+                  + (" The removal is recorded: the next `inkvault sync`, `inkvault index` or nightly run finishes it "
+                     "and saves the choice that goes with it." if n else ""))
+            return 1
         print(said)
-        code = 0
-        for what, value in removals:
-            code |= remove_now(what, value)
-    return code
+        if keeps and (left := stored_profiles().get(keeps)):
+            print(f"{left:,} visits already copied from it stay in the vault; add --forget to remove them.")
+        if not removals:
+            return 0
+        if not n:
+            print("Nothing had been copied, so there was nothing to remove.")
+            return 0
+        try:
+            forget.finish()
+        except Exception as e:  # noqa: BLE001
+            print(f"Removing didn't finish ({type(e).__name__}: {e}). The next `inkvault sync`, `inkvault index` or "
+                  "nightly run finishes it, and search stays off until then.")
+            return 1
+    print(f"Removed {n:,} visits and rebuilt search and the dashboard. The nightly backups still hold them until "
+          "they rotate out (7 nights).")
+    return 0
    ```
 6. `cmd_status`: inside the vault `try`, after `sessions = session_status(db, meta)`:
    ```python
@@ -3070,7 +3258,7 @@ git commit -m "Browsers: inkvault browsers, one writer at a time, and a nightly 
 **Files:**
 - Modify: `README.md`, `CHANGELOG.md`
 - Modify: `docs/superpowers/specs/2026-10-08-browser-history-design.md` (one sentence)
-- Create: `tests/manual/browser_check.py`
+- Create: `tests/manual/browser_check.py`, `tests/test_browser_check.py`
 
 - [ ] **Step 1: README**
 
@@ -3154,9 +3342,9 @@ to say a successful search build deletes the marker, with the dashboard built fr
 Run: `uv run pytest -q`
 Expected: all pass (230 earlier + the new ones), 1 skipped (2 on macOS/Linux, where the Arc test is Windows-only).
 
-- [ ] **Step 5: The real-history check harness**
+- [ ] **Step 5: The real-history check harness, and its tests**
 
-Create `tests/manual/browser_check.py` (not collected by pytest: its name doesn't start with `test_`):
+Create `tests/manual/browser_check.py` (pytest doesn't collect it: its name doesn't start with `test_`):
 
 ```python
 """A read-only check of browser sync against this PC's real history. Run it by hand, never from pytest:
@@ -3165,9 +3353,12 @@ Create `tests/manual/browser_check.py` (not collected by pytest: its name doesn'
 
 It copies only the History files named in ALLOWED (and their journal or WAL) into a fresh folder under the system
 temp folder, points InkVault at those copies alone, syncs and indexes them there, prints counts only, and deletes
-the folder, however it ends. No browser folder is ever listed, so a profile that isn't named is never looked at.
+the folder however it ends. No browser folder is ever listed, so a profile that isn't named is never looked at.
 Claude Code and Codex sessions aren't read, nothing asks a question, and nothing outside the temp folder is written.
+Exit code: 0 the check ran and its folder is gone; 1 the check failed (the folder is gone); 2 the folder couldn't be
+deleted, so copies of real history are still on disk (the message says where).
 """
+import contextlib
 import os
 import shutil
 import sqlite3
@@ -3188,62 +3379,146 @@ ALLOWED = {
 assert ("chrome", "Profile 2") not in ALLOWED
 
 
-def main():
-    if sys.platform != "win32" or not LOCAL.is_dir():
-        print("This check is written for the Windows PC the profiles above are on.")
-        return 1
-    temp = Path(tempfile.gettempdir()).resolve()
-    base = Path(tempfile.mkdtemp(prefix="inkvault-browser-check-")).resolve()
-    assert base.parent == temp and base.name.startswith("inkvault-browser-check-"), base
+def copy_profiles(allowed, base):
+    """Copy each named History file (and its sidecars) to base/browsers/<browser>/<folder>/History."""
+    roots = {}
+    for (browser, folder), src in allowed.items():
+        if not src.is_file():
+            print(f"{browser}/{folder}: not found, skipped")
+            continue
+        dst = base / "browsers" / browser / folder
+        dst.mkdir(parents=True)
+        for suffix in ("", "-journal", "-wal"):
+            side = Path(str(src) + suffix)
+            if side.is_file():
+                shutil.copyfile(side, Path(str(dst / "History") + suffix))
+        roots[browser] = base / "browsers" / browser
+    return roots
+
+
+def report(result, paths):
+    """Counts only. Every connection is closed however this ends, so the folder can be deleted on Windows."""
+    with contextlib.ExitStack() as stack:
+        vault = sqlite3.connect(paths.vault_db())
+        stack.callback(vault.close)
+        search = sqlite3.connect(paths.search_db())
+        stack.callback(search.close)
+        print(f"\nsync: {result.outcome}, {result.chosen} profiles, failed: {result.failed or 'none'}")
+        for profile, n, synced, cut in vault.execute(
+                "SELECT profile, COUNT(*), SUM(origin IS NOT NULL), SUM(instr(url, '…') > 0) "
+                "FROM browser_visits GROUP BY profile ORDER BY profile"):
+            counted = search.execute("SELECT COUNT(*) FROM visits WHERE profile=?", (profile,)).fetchone()[0]
+            print(f"{profile}: {n:,} stored, {counted:,} counted, {synced or 0:,} synced from other devices, "
+                  f"{cut or 0:,} with a redacted path part")
+        print(f"pages: {search.execute('SELECT COUNT(*) FROM pages').fetchone()[0]:,}")
+        core = Counter(t & 0xFF for (t,) in vault.execute("SELECT transition FROM browser_visits"))
+        print("core transition types stored:", dict(sorted(core.items())))
+
+
+def check(allowed, temp_root):
+    temp_root = Path(temp_root).resolve()
+    base = Path(tempfile.mkdtemp(prefix="inkvault-browser-check-", dir=temp_root)).resolve()
+    assert base.parent == temp_root and base.name.startswith("inkvault-browser-check-"), base
+    code = 1
     try:
         os.environ["INKVAULT_HOME"] = str(base / "vault")
         from inkvault import browsers, embed, history, index, paths
         embed.build = lambda: None  # meaning search would download a model; keyword search is enough here
-        roots = {}
-        for (browser, folder), src in ALLOWED.items():
-            if not src.is_file():
-                print(f"{browser}/{folder}: not found, skipped")
-                continue
-            dst = base / "browsers" / browser / folder
-            dst.mkdir(parents=True)
-            for suffix in ("", "-journal", "-wal"):
-                side = Path(str(src) + suffix)
-                if side.is_file():
-                    shutil.copyfile(side, Path(str(dst / "History") + suffix))
-            roots[browser] = base / "browsers" / browser
+        roots = copy_profiles(allowed, base)
         browsers.user_data_dirs = lambda: [(b, "chromium", r) for b, r in roots.items()]
         found = browsers.find_profiles()
-        assert {p.key for p in found} <= {f"{b}/{f}" for b, f in ALLOWED}, "found a profile that wasn't copied"
+        assert {p.key for p in found} <= {f"{b}/{f}" for b, f in allowed}, "found a profile that wasn't copied"
         browsers.record_answers(found, {p.key: True for p in found})
         result = history.sync()
         index.build()
-        vault = sqlite3.connect(paths.vault_db())
-        search = sqlite3.connect(paths.search_db())
-        try:
-            print(f"\nsync: {result.outcome}, {result.chosen} profiles, failed: {result.failed or 'none'}")
-            for profile, n, synced, cut in vault.execute(
-                    "SELECT profile, COUNT(*), SUM(origin IS NOT NULL), SUM(instr(url, '…') > 0) "
-                    "FROM browser_visits GROUP BY profile ORDER BY profile"):
-                counted = search.execute("SELECT COUNT(*) FROM visits WHERE profile=?", (profile,)).fetchone()[0]
-                print(f"{profile}: {n:,} stored, {counted:,} counted, {synced or 0:,} synced from other devices, "
-                      f"{cut or 0:,} with a redacted path part")
-            print(f"pages: {search.execute('SELECT COUNT(*) FROM pages').fetchone()[0]:,}")
-            core = Counter(t & 0xFF for (t,) in vault.execute("SELECT transition FROM browser_visits"))
-            print("core transition types stored:", dict(sorted(core.items())))
-        finally:
-            vault.close()
-            search.close()
-        return 0
+        report(result, paths)
+        code = 0
+    except Exception as e:  # noqa: BLE001 - say what failed (never a row's contents), then clean up
+        print(f"the check failed: {type(e).__name__}: {e}")
     finally:
         shutil.rmtree(base, ignore_errors=True)
-        print(f"deleted {base}" if not base.exists() else f"couldn't delete {base}: remove it by hand")
+        if base.exists():
+            print(f"COULDN'T DELETE {base}: it holds copies of your browser history. Close any program that may "
+                  "have it open, then delete that folder by hand.")
+            code = 2
+        else:
+            print(f"deleted {base}")
+    return code
+
+
+def main():
+    if sys.platform != "win32" or not LOCAL.is_dir():
+        print("This check is written for the Windows PC the profiles above are on.")
+        return 1
+    return check(ALLOWED, tempfile.gettempdir())
 
 
 if __name__ == "__main__":
     sys.exit(main())
 ```
 
-Run it (PowerShell or Git Bash; the command is the same):
+Create `tests/test_browser_check.py`, which runs the harness on synthetic history first:
+
+```python
+"""The manual real-history check (tests/manual/browser_check.py), run here on synthetic history only."""
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+import webfixtures
+
+
+def load():
+    spec = importlib.util.spec_from_file_location("browser_check", Path(__file__).parent / "manual" / "browser_check.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def harness(tmp_path, monkeypatch):
+    from inkvault import embed
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path / "unused"))  # the check sets its own; this restores it after
+    monkeypatch.setattr(embed, "build", embed.build)  # the check replaces it; this puts it back after
+    h = webfixtures.chromium_profile(tmp_path / "real" / "chrome", "Default", name="Default")
+    webfixtures.chromium_visit(h, 1, "https://example.com/", "2026-10-05T12:00:00Z")
+    allowed = {("chrome", "Default"): h, ("edge", "Default"): tmp_path / "real" / "edge" / "Default" / "History"}
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    return load(), allowed, temp
+
+
+def test_the_check_prints_counts_and_deletes_its_folder(harness, capsys):
+    check, allowed, temp = harness
+    assert check.check(allowed, temp) == 0
+    out = capsys.readouterr().out
+    assert "edge/Default: not found, skipped" in out and "sync: ok, 1 profiles, failed: none" in out
+    assert "chrome/Default: 1 stored, 1 counted, 0 synced from other devices" in out
+    assert "example.com" not in out
+    assert list(temp.iterdir()) == []
+
+
+def test_a_failed_check_still_closes_everything_and_deletes_its_folder(harness, monkeypatch):
+    from inkvault import history
+    check, allowed, temp = harness
+
+    def broken(raw, db):
+        raise RuntimeError("index broke")
+    monkeypatch.setattr(history, "index_into", broken)
+    assert check.check(allowed, temp) == 1
+    assert list(temp.iterdir()) == []  # on Windows this needs every connection closed
+
+
+def test_a_folder_that_cant_be_deleted_is_a_failure_that_says_where(harness, monkeypatch, capsys):
+    check, allowed, temp = harness
+    monkeypatch.setattr(check.shutil, "rmtree", lambda *a, **k: None)
+    assert check.check(allowed, temp) == 2
+    assert "COULDN'T DELETE" in capsys.readouterr().out
+```
+
+Run: `uv run pytest tests/test_browser_check.py -q` → 3 passed. Then run the real check (PowerShell or Git Bash;
+the command is the same):
 
 ```bash
 uv run python tests/manual/browser_check.py
@@ -3251,12 +3526,13 @@ uv run python tests/manual/browser_check.py
 
 Expected: `sync: ok, 5 profiles, failed: none`; one line per profile with stored and counted visits close to
 Codex's measurements (8,302 visits in the files and 7,800 counted on 2026-10-08, more by now, fewer where Chrome's
-90-day cleanup ran); a `deleted …` line at the end. It prints counts only; don't paste anything else from it.
+90-day cleanup ran); `deleted …` at the end and exit code 0. If it ends with `COULDN'T DELETE`, delete that folder
+before doing anything else. It prints counts only; don't paste anything else from it.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add README.md CHANGELOG.md docs/superpowers/specs/2026-10-08-browser-history-design.md tests/manual/browser_check.py
+git add README.md CHANGELOG.md docs/superpowers/specs/2026-10-08-browser-history-design.md tests/manual/browser_check.py tests/test_browser_check.py
 git commit -m "Docs: browser history; a read-only check against real history"
 ```
 
