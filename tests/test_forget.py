@@ -168,3 +168,17 @@ def test_nothing_to_remove_touches_nothing(setup):
     assert forget.forget_site("nowhere.example") == 0
     assert paths.dashboard().stat().st_mtime_ns == before
     assert forget.pending() == 0 and not paths.rebuild_marker().exists()
+
+
+def test_a_removal_clears_digests_for_every_day_its_visits_could_fall_on(setup):
+    """Digests are keyed by the local day when digest ran: any time zone puts an instant within a day of its UTC date."""
+    from inkvault import forget, paths
+    db = sqlite3.connect(paths.digests_db())
+    db.executemany("INSERT OR IGNORE INTO digests VALUES (?, 'a day', 'h', 'm', 'now')",
+                   ((d,) for d in ("2026-10-06", "2026-10-07", "2026-10-08", "2026-10-10")))
+    db.commit()
+    db.close()
+    forget.forget_site("bank.example")
+    left = {d for (d,) in rows(paths.digests_db(), "SELECT day FROM digests")}
+    assert not left & {"2026-10-06", "2026-10-07", "2026-10-08"}
+    assert "2026-10-10" in left

@@ -7,10 +7,9 @@ the digests and the dashboard refuse while it is up. Callers hold the nightly lo
 """
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import browsers, dashboard, export, history, index, paths
-from .times import local
 
 CHUNK = 500  # ids per statement: well under SQLite's limit on bound parameters
 DIGEST_WAIT = 5  # seconds to wait for a busy digests.db before the removal stops (and stays recorded)
@@ -31,22 +30,13 @@ def matcher(what, value):
     return lambda profile, url: history.skipped(url, [value])
 
 
-def index_days(ids):
-    """The days these visits have in search: the time zone of the last index, which may not be today's."""
-    if not paths.search_db().exists():
-        return set()
-    db = paths.connect_ro(paths.search_db())
+def digest_days(visits):
+    """Digests are keyed by the local day when digest ran, in a time zone that may differ from the index's and today's.
+    Every UTC offset from -12 to +14 puts an instant on its UTC date or the day before or after it."""
     days = set()
-    try:
-        for part in chunks(ids):
-            days |= {d for (d,) in db.execute(
-                "SELECT DISTINCT p.day FROM visits v JOIN pages p ON p.id = v.page_id "
-                f"WHERE v.id IN ({','.join('?' * len(part))})", part)}
-    except sqlite3.OperationalError as e:
-        if not missing_table(e):  # an index from before 0.3.0 has no pages; anything else is a real failure
-            raise
-    finally:
-        db.close()
+    for _, created in visits:
+        day = datetime.fromisoformat(created.replace("Z", "+00:00")).astimezone(timezone.utc).date()
+        days |= {(day + timedelta(d)).isoformat() for d in (-1, 0, 1)}
     return days
 
 
@@ -73,7 +63,7 @@ def request(removals):
             pick = matcher(what, value)
             found = [(i, c) for i, c, p, u in stored if pick(p, u)]
             if found:
-                days = {local(c).date().isoformat() for _, c in found} | index_days([i for i, _ in found])
+                days = digest_days(found)
                 planned.append((what, value, days))
                 total += len(found)
         if not planned:
