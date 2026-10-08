@@ -66,16 +66,18 @@ def clean_params(text, depth):
 
 
 def clean_fragment(fragment, depth):
-    bare = unquote(fragment)  # shapes are matched decoded; a harmless fragment keeps its own spelling
+    bare = unquote(fragment)  # one layer, decoded: a mix of encoded and literal separators can't hide a token
     if bare.startswith(("/", "!/")) and "?" in bare:  # an app route with parameters: #/callback?…
-        route, _, query = (fragment if "?" in fragment else bare).partition("?")
+        route, _, query = bare.partition("?")
         query = clean_params(query, depth)
-        return route + ("?" + query if query else "")
-    if "=" in bare:
-        return clean_params(fragment if "=" in fragment else bare, depth)
-    if JWT.fullmatch(bare) or OPAQUE.fullmatch(bare):
+        cleaned = route + ("?" + query if query else "")
+    elif "=" in bare:
+        cleaned = clean_params(bare, depth)
+    elif JWT.fullmatch(bare) or OPAQUE.fullmatch(bare):
         return ""
-    return fragment
+    else:
+        return fragment
+    return fragment if cleaned == bare else cleaned  # nothing removed: keep the browser's own spelling
 
 
 def clean_path(path):

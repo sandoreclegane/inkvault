@@ -49,6 +49,8 @@ JWE = "eyJhbGciOi.a1.b2.c3.d4"
     ("https://x.example/#%65yJhbGciOi.eyJzdWIi.c2ln", "https://x.example/"),
     ("https://x.example/#%61" + "1a" * 20, "https://x.example/"),
     ("https://x.example/cb#access%5Ftoken%3Dabc%26tab%3D2", "https://x.example/cb#tab=2"),
+    ("https://x.example/#data%3D" + JWT + "&tab=2", "https://x.example/#tab=2"),
+    ("https://x.example/#/cb%3Faccess_token=abc", "https://x.example/#/cb"),
     ("http://[::1]:8080/x?q=1", "http://[::1]:8080/x?q=1"),
 ])
 def test_cleaning(raw, cleaned):
