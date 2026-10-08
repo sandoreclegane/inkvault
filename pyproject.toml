@@ -1,14 +1,14 @@
 [project]
 name = "inkvault"
 version = "0.2.1"
-description = "A local long-term memory: rescue your Pieces history, keep every Claude Code and Codex session, and search it all from any MCP client."
+description = "A local long-term memory: rescue your Pieces history, keep every Claude Code and Codex session and your browser history, and search it all from any MCP client."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "T. Matthew Chase", email = "242277862+sandoreclegane@users.noreply.github.com" }]
 requires-python = ">=3.10"
 dependencies = ["mcp>=2.2", "model2vec>=0.9", "numpy>=2"]
-keywords = ["pieces", "memory", "mcp", "export", "local-first", "claude", "claude-code", "codex"]
+keywords = ["pieces", "memory", "mcp", "export", "local-first", "claude", "claude-code", "codex", "browser-history"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
