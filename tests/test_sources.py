@@ -473,3 +473,39 @@ def test_a_format_2_vault_is_cleaned_again(home):
     sources.sync()
     assert "FORMAT2PIXELS" not in "".join(r for (r,) in vault_rows("SELECT raw FROM session_lines"))
     assert vault_rows("SELECT value FROM meta WHERE key='session_lines_format'") == [(sources.FORMAT,)]
+
+
+SCHEMA = {"type": "object", "properties": {"configPath": {"type": ["string", "null"]}}}
+
+
+def meta_with_tools():
+    return {"timestamp": "2026-10-06T09:00:00Z", "type": "session_meta",
+            "payload": {"id": "cx-1", "timestamp": "2026-10-06T09:00:00Z", "cwd": "C:\\work\\garden",
+                        "dynamic_tools": [{"name": "open", "inputSchema": SCHEMA}]}}
+
+
+def test_a_schema_type_list_survives_and_attachments_still_go(home):
+    from inkvault import sources
+    codex_file(meta_with_tools(), compaction_with_image("SCHEMAPIXELS"), *CODEX_NEW[1:])
+    assert sources.sync()
+    stored = [json.loads(r) for (r,) in vault_rows("SELECT raw FROM session_lines ORDER BY offset")]
+    assert stored[0]["payload"]["dynamic_tools"][0]["inputSchema"] == SCHEMA
+    assert "SCHEMAPIXELS" not in json.dumps(stored)
+    assert [r[5] for r in index_messages()] == ["Fix the planner", "Fixed."]
+
+
+def test_a_format_2_vault_with_a_schema_type_list_upgrades(home):
+    from inkvault import export, sources
+    codex_file(CODEX_NEW[0])
+    db = export.open_vault()
+    db.executemany("INSERT INTO session_lines VALUES ('codex', 'rollout-gone.jsonl', ?, ?)",
+                   [(0, json.dumps(meta_with_tools())), (1, json.dumps(compaction_with_image("OLDSCHEMAPIXELS")))])
+    db.execute("INSERT INTO meta VALUES ('session_lines_format', '2')")
+    db.commit()
+    db.close()
+    assert sources.sync()
+    stored = [json.loads(r) for (r,) in vault_rows(
+        "SELECT raw FROM session_lines WHERE file='rollout-gone.jsonl' ORDER BY offset")]
+    assert stored[0]["payload"]["dynamic_tools"][0]["inputSchema"] == SCHEMA
+    assert "OLDSCHEMAPIXELS" not in json.dumps(stored)
+    assert vault_rows("SELECT value FROM meta WHERE key='session_lines_format'") == [(sources.FORMAT,)]

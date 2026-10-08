@@ -82,7 +82,8 @@ def omit_attachments(o):
         if isinstance(x, list):
             return [clean(v) for v in x]
         if isinstance(x, dict):
-            if x.get("type") in OMITTED and x is not o:
+            kind = x.get("type")  # not always a string: a JSON Schema type can be a list, e.g. ["string", "null"]
+            if isinstance(kind, str) and kind in OMITTED and x is not o:
                 changed = True
                 return {"type": x["type"], "omitted": True}
             return {k: clean(v) for k, v in x.items()}
