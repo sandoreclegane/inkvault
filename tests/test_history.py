@@ -1,4 +1,5 @@
 """Browser history: syncing chosen profiles into the vault, counting visits, and pages in search."""
+import contextlib
 import shutil
 import sqlite3
 from pathlib import Path
@@ -573,3 +574,152 @@ def test_browsing_keeps_to_its_share_of_a_days_material(home):
     (m,) = digest.gather(db).values()
     web = m[m.index("Pages opened:"):]
     assert len(m) <= digest.MAX_INPUT and len(web) <= digest.WEB_SHARE and m.startswith("Work sessions: x")
+
+
+def test_no_without_forget_keeps_the_visits_and_says_how_to_remove_them(home, monkeypatch, capsys):
+    from inkvault import cli, history
+    h = chrome(home, monkeypatch, "Default")["Default"]
+    chromium_visit(h, 1, "https://example.com/", T1)
+    choose("chrome/Default")
+    history.sync()
+    assert cli.main(["browsers", "--no", "chrome/Default"]) == 0
+    assert "1 visits already copied from it stay in the vault; add --forget to remove them." in capsys.readouterr().out
+    assert len(stored()) == 1
+    assert cli.main(["browsers", "--no", "chrome/Default", "--forget"]) == 0
+    assert stored() == []
+
+
+def test_a_removal_stopped_before_it_is_recorded_changes_nothing(home, monkeypatch):
+    from inkvault import browsers, cli, forget, history
+    h = chrome(home, monkeypatch, "Default")["Default"]
+    chromium_visit(h, 1, "https://bank.example/", T1)
+    choose("chrome/Default")
+    history.sync()
+
+    def stop(*a):
+        raise RuntimeError("stopped")
+    monkeypatch.setattr(forget, "record", stop)
+    assert cli.main(["browsers", "--skip-site", "bank.example"]) == 1
+    assert browsers.load_choices()["skip_sites"] == [] and len(stored()) == 1 and forget.pending() == 0
+
+
+def test_a_forget_stopped_after_it_is_recorded_is_finished_by_the_next_sync(home, monkeypatch):
+    from inkvault import browsers, cli, forget, paths
+    h = chrome(home, monkeypatch, "Default")["Default"]
+    chromium_visit(h, 1, "https://example.com/", T1)
+    choose("chrome/Default")
+    assert cli.main(["sync"]) == 0
+    real = browsers.save_choices
+
+    def stop(*a):
+        raise RuntimeError("stopped")
+    monkeypatch.setattr(browsers, "save_choices", stop)  # recorded, but stopped before the choice was saved
+    assert cli.main(["browsers", "--no", "chrome/Default", "--forget"]) == 1
+    monkeypatch.setattr(browsers, "save_choices", real)
+    assert forget.pending() == 1 and browsers.load_choices()["profiles"]["chrome/Default"]["choice"] == "yes"
+    # The only chosen profile is being forgotten and there are no sessions: sync must still finish the removal.
+    assert cli.main(["sync"]) == 0
+    assert stored() == [] and forget.pending() == 0 and not paths.rebuild_marker().exists()
+    assert browsers.load_choices()["profiles"]["chrome/Default"] == {"choice": "no"}
+
+
+def test_forget_removes_visits_a_sync_added_while_it_waited_for_the_lock(home, monkeypatch):
+    from inkvault import cli, history, nightly
+    h = chrome(home, monkeypatch, "Default")["Default"]
+    chromium_visit(h, 1, "https://example.com/", T1)
+    choose("chrome/Default")  # nothing copied yet: an unlocked count would say there is nothing to forget
+    real = nightly.lock
+
+    @contextlib.contextmanager
+    def lock_after_a_sync(purpose="rescue"):
+        history.sync()  # another process's sync, while this command waited for the lock
+        with real(purpose):
+            yield
+    monkeypatch.setattr(nightly, "lock", lock_after_a_sync)
+    assert cli.main(["browsers", "--no", "chrome/Default", "--forget"]) == 0
+    assert stored() == []
+
+
+def test_removing_refuses_on_a_drive_that_cant_lock_and_the_rest_go_ahead(home, monkeypatch, capsys):
+    from inkvault import browsers, cli, nightly
+
+    @contextlib.contextmanager
+    def no_locking(purpose="rescue"):
+        raise OSError("locking not supported")
+        yield
+    monkeypatch.setattr(nightly, "lock", no_locking)
+    chrome(home, monkeypatch, "Default")
+    assert cli.main(["browsers", "--skip-site", "x.example"]) == 1
+    assert browsers.load_choices()["skip_sites"] == []
+    capsys.readouterr()
+    cli.main(["index"])  # goes ahead unguarded (and finds no vault yet)
+    assert "continuing without it" in capsys.readouterr().out
+
+
+def test_a_profile_whose_folder_is_gone_can_still_be_forgotten(home, monkeypatch):
+    from inkvault import cli, history
+    h = chrome(home, monkeypatch, "Default")["Default"]
+    chromium_visit(h, 1, "https://example.com/", T1)
+    choose("chrome/Default")
+    history.sync()
+    shutil.rmtree(h.parent)  # the browser was uninstalled
+    assert cli.main(["browsers", "--no", "chrome/Default", "--forget"]) == 0
+    assert stored() == []
+
+
+def test_the_sync_command_reports_browser_outcomes(home, monkeypatch):
+    from inkvault import cli, paths
+    h = chrome(home, monkeypatch, "Default", "Profile 1")
+    chromium_visit(h["Default"], 1, "https://example.com/d", T1)
+    chromium_visit(h["Profile 1"], 1, "https://example.com/p", T1)
+    assert cli.main(["sync"]) == 1  # no sessions and no profile chosen
+    choose("chrome/Default")
+    assert cli.main(["sync"]) == 0 and paths.search_db().exists()  # browsers alone, no sessions, no Pieces
+    choose("chrome/Default", "chrome/Profile 1")
+    h["Profile 1"].write_bytes(b"not a database " * 100)
+    assert cli.main(["sync"]) == 1  # partial: still indexed, but not a success
+    assert search_rows("SELECT COUNT(*) FROM pages") == [(1,)]
+
+
+def test_sync_holds_the_lock_while_it_rebuilds_search(home, monkeypatch):
+    from inkvault import cli, index, nightly
+    h = chrome(home, monkeypatch, "Default")["Default"]
+    chromium_visit(h, 1, "https://example.com/", T1)
+    choose("chrome/Default")
+    real, held = index.build, []
+
+    def build():
+        held.append(nightly.running())  # a second handle on the lock file: True while the lock is held
+        return real()
+    monkeypatch.setattr(index, "build", build)
+    assert cli.main(["sync"]) == 0 and held == [True]
+
+
+def test_commands_that_write_wait_while_another_process_holds_the_lock(home, monkeypatch):
+    from conftest import holder
+    from inkvault import browsers, cli, paths
+    chrome(home, monkeypatch, "Default")
+    with holder(paths.home()):
+        for argv in (["index"], ["digest"], ["dashboard", "--no-open"], ["sync"],
+                     ["browsers", "--skip-site", "x.example"], ["browsers", "--yes", "chrome/Default"]):
+            assert cli.main(argv) == 1, argv
+    assert browsers.load_choices() == {"profiles": {}, "skip_sites": []}  # nothing was changed
+
+
+def test_status_lists_chosen_profiles_and_waiting_ones(home, monkeypatch, capsys):
+    from inkvault import cli, history
+    h = chrome(home, monkeypatch, "Default", "Profile 1")
+    chromium_visit(h["Default"], 1, "https://example.com/", T1)
+    choose("chrome/Default")
+    history.sync()
+    capsys.readouterr()
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "Chrome Default (chrome/Default): 1 visits (2026-10-05 → 2026-10-05), last read 20" in out
+    assert "1 browser profile waiting for you to choose: run `inkvault browsers`." in out
+
+
+def test_rescue_without_piecesos_points_to_sync(home, capsys):
+    from inkvault import cli
+    assert cli.main(["rescue", "--no-open", "--no-digest"]) == 1
+    assert "`inkvault sync` copies them without PiecesOS" in capsys.readouterr().out

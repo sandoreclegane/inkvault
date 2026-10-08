@@ -1,4 +1,5 @@
 """Finding browser profiles, and which ones the user said are theirs."""
+import contextlib
 import hashlib
 import sys
 from pathlib import Path
@@ -149,3 +150,44 @@ def test_an_unreadable_choices_file_means_nothing_is_chosen(home, capsys):
     paths.browsers_file().write_text("{not json", encoding="utf-8")
     assert browsers.load_choices() == {"profiles": {}, "skip_sites": []}
     assert "treating every browser profile as not chosen yet" in capsys.readouterr().out
+
+
+def test_the_browsers_command_lists_and_sets_choices(home, monkeypatch, capsys):
+    from inkvault import browsers, cli
+    root = home / "chrome"
+    webfixtures.chromium_profile(root, "Default", name="Me", user_name="me@example.com")
+    webfixtures.chromium_profile(root, "Profile 2", name="TJ")
+    webfixtures.install(monkeypatch, ("chrome", "chromium", root))
+    assert cli.main(["browsers"]) == 0
+    out = capsys.readouterr().out
+    assert "Chrome: Me (me@example.com)  chrome/Default  [new]" in out and "chrome/Profile 2  [new]" in out
+    assert cli.main(["browsers", "--yes", "chrome/Default"]) == 0
+    assert cli.main(["browsers", "--no", "chrome/Profile 2"]) == 0
+    assert browsers.load_choices()["profiles"]["chrome/Profile 2"] == {"choice": "no"}
+    assert browsers.load_choices()["profiles"]["chrome/Default"]["choice"] == "yes"
+    assert cli.main(["browsers", "--yes", "chrome/Nope"]) == 1
+    assert cli.main(["browsers", "--no", "chrome/Nope"]) == 1
+
+
+def test_skip_site_is_saved_lowercase_and_unskip_takes_it_back(home):
+    from inkvault import browsers, cli
+    assert cli.main(["browsers", "--skip-site", "Bank.Example"]) == 0
+    assert browsers.load_choices()["skip_sites"] == ["bank.example"]
+    assert cli.main(["browsers", "--unskip-site", "bank.example"]) == 0
+    assert browsers.load_choices()["skip_sites"] == []
+
+
+def test_a_choice_is_merged_with_what_another_command_saved_while_it_waited(home, monkeypatch):
+    from inkvault import browsers, cli, nightly
+    real = nightly.lock
+
+    @contextlib.contextmanager
+    def lock_after_someone_else(purpose="rescue"):
+        other = browsers.load_choices()  # another command saves while this one waits for the lock
+        other["skip_sites"].append("first.example")
+        browsers.save_choices(other)
+        with real(purpose):
+            yield
+    monkeypatch.setattr(nightly, "lock", lock_after_someone_else)
+    assert cli.main(["browsers", "--skip-site", "second.example"]) == 0
+    assert browsers.load_choices()["skip_sites"] == ["first.example", "second.example"]

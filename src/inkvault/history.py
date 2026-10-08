@@ -279,3 +279,34 @@ def index_into(raw, db):
     db.executemany("INSERT INTO pages VALUES (?,?,?,?,?,?,?,?,?)", (
         (pid, p["created"], p["day"], p["url"], p["host"], p["path"], p["title"], p["visits"],
          ",".join(sorted(p["profiles"]))) for pid, p in pages.items()))
+
+
+def status_lines(db):
+    """For `inkvault status`: a line per chosen profile, then the profiles waiting for a choice."""
+    profiles = browsers.find_profiles()
+    choices = browsers.load_choices()
+    try:
+        stored = {r[0]: r[1:] for r in db.execute(
+            "SELECT p.profile, COUNT(v.id), MIN(v.created), MAX(v.created), p.last_success, p.last_error "
+            "FROM browser_profiles p LEFT JOIN browser_visits v ON v.profile = p.profile GROUP BY p.profile")}
+    except sqlite3.OperationalError:  # never synced
+        stored = {}
+    lines, waiting = [], 0
+    for p in profiles:
+        choice, why = browsers.state(p, choices)
+        if choice == "yes":
+            n, first, last, success, error = stored.get(p.key, (0, None, None, None, None))
+            line = f"  {browsers.NAMES[p.browser]} {p.name} ({p.key}): {n:,} visits"
+            if n:
+                line += f" ({first[:10]} → {last[:10]})"
+            line += f", last read {success or 'never'}"
+            if error:
+                line += f"; the last try failed: {error}"
+            lines.append(line)
+        elif choice == "new":
+            waiting += 1
+            if why:
+                lines.append(f"  {p.key}: {why}; run `inkvault browsers`")
+    if waiting:
+        lines.append("  " + waiting_line(waiting))
+    return lines
