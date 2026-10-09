@@ -1,5 +1,9 @@
 # InkVault
 
+<p align="center">
+  <img src="docs/assets/inkvault-logo-horizontal.png" alt="InkVault logo" width="560">
+</p>
+
 **A long-term memory you own: rescue what Pieces knew about you, keep every Claude Code and Codex session and the
 pages you open in your browser from here on, and search all of it from your AI tools.**
 
