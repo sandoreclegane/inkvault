@@ -59,6 +59,8 @@ a dashboard of what you have. Run the same command again later and it picks up w
 - **Your browser history** (new in 0.2.1): pages you opened in Chrome, Edge, Comet, Brave, Arc, Vivaldi, Opera or
   Firefox, from the browser profiles you say are yours. Browsers delete history after about 90 days; the vault
   keeps it. Searchable as `web`, on the timeline, in the digests and on the dashboard.
+- **Screen capture** (new in 0.3.0, Windows): a timeline of the windows you used, plus the text of the windows in
+  apps you choose. No images are kept. See [Screen capture](#screen-capture-windows).
 - **Daily digests** (optional): a 2-3 sentence summary of each day, written by a *local* model through
   [Ollama](https://ollama.com). Pieces stopped writing summaries; this picks up where it left off.
 
@@ -110,6 +112,114 @@ or username. Searches (`?q=…`) stay. This catches the common shapes, not every
 while the browser runs, so the newest few visits can wait for the next sync.
 
 Safari isn't supported yet (macOS blocks reading it without Full Disk Access).
+
+## Screen capture (Windows)
+
+Pieces recorded the app in front, its window title and the text on screen. `inkvault watch` brings that back, built
+into InkVault: one app, one store, nothing uploaded. It's Windows-only for now; on macOS and Linux `inkvault watch`
+says so and exits.
+
+**What it records**
+
+- **A timeline, everywhere.** Every foreground window becomes a *stretch*: the app, a cleaned title, and when it
+  started and ended. A window you only flick through isn't kept, and time you're away (no input for 5 minutes, or the
+  screen is locked) isn't counted.
+- **Text, in apps you choose.** After you settle on a window for 30 seconds, InkVault reads its text (Windows' own
+  OCR, on your machine) and stores it if it changed. A given window is read at most every 2 minutes.
+- **No images, ever.** The window image exists in memory just long enough to read, and is never written to disk.
+- Before anything is stored, secrets in titles and text (API keys, tokens, JWTs, `password: ...` values) are masked
+  and URLs are cleaned. This catches the common shapes, not every possible secret.
+
+**Which apps get text.** By default: Comet and Edge; Claude, ChatGPT, Perplexity and Codex; Windows Terminal, VS
+Code and Cursor; Notion, Obsidian and Notepad; and the Microsoft 365 apps (Word, Excel, PowerPoint, Outlook, new
+Outlook, OneNote). Every other app is timeline-only. Two groups are off until you say yes, and `--install` asks:
+
+- **Messaging apps** (Discord, WhatsApp, Telegram, Teams, LinkedIn). Reading them stores other people's messages and
+  names, and Discord's title is the name of the person you're talking to. Off unless you answer yes.
+- **Chrome.** Its window title is just the page and "Google Chrome", with no profile name, so InkVault can't tell
+  your Chrome profiles from anyone else's. Off unless you answer yes.
+
+Without a terminal (for example a scripted install) both stay off. You can add or remove any app yourself.
+
+**Everyone using the Windows account is captured.** The watcher runs in the account that installed it, from sign-in.
+If anyone else uses that account, what they do is recorded too. Use a separate Windows account for anyone who
+shouldn't be.
+
+**Never captured.** Password managers and Windows' sign-in and permission prompts (1Password, Bitwarden, KeePass,
+KeePassXC, the lock screen, UAC) are skipped entirely: no stretch, no text. So are windows whose title contains
+`InPrivate`, `Incognito` or `Private Browsing`, and anything you add with `--never-app` or `--never-title`.
+
+### Install
+
+```bash
+uv tool install "inkvault[screen]"
+inkvault watch --apps       # preview: shows the settings, records nothing
+inkvault watch --install    # asks about messaging apps and Chrome, then starts at every sign-in
+```
+
+`--apps` is a preview: it shows which apps get text and which are never captured, and starts nothing. `--install`
+registers a Task Scheduler task that starts the watcher at sign-in, restarts it if it stops, and checks it's really
+running before it says "screen capture is on". It also adds two desktop shortcuts: *Pause screen capture (1 hour)*
+and *Resume screen capture*. Without the `screen` extra (or without an OCR language installed in Windows) the
+watcher still records the timeline, and `inkvault status` says why there's no text.
+
+### Controls
+
+| Command | Does |
+|---|---|
+| `inkvault watch --apps` | Show which apps get text and which are never captured. Changes nothing |
+| `inkvault watch --install` | Start screen capture now and at every sign-in |
+| `inkvault watch --stop` | Stop the running watcher (it starts again at the next sign-in) |
+| `inkvault watch --pause 30m`, `1h` or `until-tomorrow` | Record nothing for a while. Works even during a nightly run |
+| `inkvault watch --resume` | End a pause |
+| `inkvault watch --add-app EXE` / `--remove-app EXE` | Read text in this app / back to timeline-only |
+| `inkvault watch --never-app EXE` | Never record this app at all |
+| `inkvault watch --never-title TEXT` | Skip any window whose title contains this text |
+| `inkvault watch --reset-settings` | Back to the default settings |
+| `inkvault watch --uninstall` | Stop the watcher and remove the sign-in task |
+
+Settings live in `screen.json` in your InkVault folder, and the watcher picks up a change within a couple of
+seconds. If the file is unreadable or invalid, it records nothing until it's fixed. Executable names ignore case.
+
+### Searching it
+
+- `timeline` shows screen activity **live**: a separate *Screen* section lists the windows in the range, newest
+  first, including the one open now.
+- `search_memories` finds screen text and window titles **after the nightly index** (or `inkvault index`); results
+  say how far the index reaches. Use `source="screen"` for just screen activity.
+- `get_memory` on a screen result shows the window's app, title and times, and its most recent text.
+- `inkvault status` shows the watcher (running, paused, the app in front, last error), the sign-in task, and how many
+  stretches and text reads were stored.
+- The dashboard has a *Screen time* tile and a *Screen time by app* chart, and daily digests include screen time by
+  app and the longest windows. Digests never include screen text.
+
+### Forgetting
+
+```bash
+inkvault forget --screen --app Discord.exe
+inkvault forget --screen --since "2026-10-12 09:00" --until "2026-10-12 11:30"
+```
+
+Times are your **local** time (a date alone means local midnight; add `Z` or an offset for an exact instant).
+Whole windows are removed: any stretch that overlaps the range goes, with all its text, and the command shows the
+span it actually removed before it asks. Search, the dashboard and the digests are rebuilt without it. Nightly
+backups made before then still hold it until they rotate out (7 nights), and an answer an AI tool already received
+can't be recalled. Forgetting removes the past only: to stop recording an app, use `--never-app`.
+
+### Limits
+
+- **Banks and other sensitive sites.** Your browser-history `skip_sites` list holds domains, but a window title
+  rarely contains one, so it can't be applied here. Put the text a bank's page title shows into `--never-title`
+  (for example `--never-title "Example Bank"`).
+- **Private windows.** The markers (`InPrivate`, `Incognito`, `Private Browsing`) are English. A localized browser
+  may use other words, or none: add yours with `--never-title`.
+- **A last moment.** InkVault checks the window just before and just after it reads it, and drops the text if it
+  changed. A window that changes in the instant between the last check and the screen being drawn can't be caught.
+- **Search is nightly, `timeline` is live.** New screen activity shows in `timeline` at once, and in search after the
+  next index.
+- **Store apps are timeline-only.** Windows Store (UWP) apps run inside a frame window that holds no text, so they
+  show up in the timeline but their text isn't read.
+- **Windows only.** macOS and Linux aren't supported.
 
 ## Keep it up to date
 
@@ -170,6 +280,8 @@ and `uv tool upgrade inkvault` updates InkVault.
 | `inkvault dashboard` | Rebuild and open the Memory Atlas |
 | `inkvault serve` | Run the MCP server |
 | `inkvault status` | What's in your vault and where it lives, plus the schedule and last nightly run |
+| `inkvault watch ...` | Screen capture (Windows): preview, install, pause, stop. See [Screen capture](#screen-capture-windows) |
+| `inkvault forget --screen --app EXE` / `--since T --until T` | Remove screen capture from the vault |
 | `inkvault schedule [--at HH:MM] [--wake\|--no-wake] [--off]` | Refresh and back up the vault every night |
 | `inkvault nightly` | One refresh + backup now (what the schedule runs) |
 
@@ -187,6 +299,9 @@ This is your screen history, your chats and your code. InkVault is built so that
   Claude Code's replies include its tool calls, so a file it wrote is kept as written. Tool output (files it read,
   command output), pasted images and attachments are left out: they are most of each file and where secrets tend
   to show up. That lowers the risk; it can't rule it out, since anything you typed or pasted as text is kept.
+- Screen capture (Windows, off until you install it) keeps window titles and, for the apps you choose, their text.
+  Never images, and nothing leaves your machine. Secrets in titles and text are masked before they are stored. See
+  [Screen capture](#screen-capture-windows) for what it can't catch.
 - Captured text was written by other people and apps. The MCP server tells your AI tool to treat it as data, not
   instructions.
 
