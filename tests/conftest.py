@@ -85,3 +85,19 @@ def holder(home):
             p.wait()
         err = p.stderr.read()
         assert not err, f"lock holder crashed: {err}"
+
+
+REAL_POPEN = subprocess.Popen
+
+
+@pytest.fixture(autouse=True)
+def only_python_popen(monkeypatch):
+    """Popen too: a test may start this Python (fake workers, lock holders), never schtasks, powershell or uv."""
+    class Guarded(REAL_POPEN):
+        def __init__(self, args, *a, **k):
+            program = args[0] if isinstance(args, (list, tuple)) and args else args
+            if not (isinstance(program, (str, os.PathLike))
+                    and os.path.normcase(os.fspath(program)) == os.path.normcase(sys.executable)):
+                raise AssertionError(f"a test started a real program: {args}")
+            super().__init__(args, *a, **k)
+    monkeypatch.setattr(subprocess, "Popen", Guarded)
