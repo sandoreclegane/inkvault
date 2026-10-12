@@ -17,22 +17,51 @@ def test_idle_ms_survives_rollover_and_title_hash_is_stable():
     assert winapi.title_sha256("é") == winapi.title_sha256("é") and len(winapi.title_sha256("")) == 64
 
 
+@pytest.fixture(scope="module")
+def own_window():
+    """One tkinter window for the module (a second Tk() in one process can fail on some Python installs)."""
+    import tkinter
+    root = tkinter.Tk(); root.title("inkvault-test-window"); root.geometry("400x200"); root.update()
+    try:
+        yield root
+    finally:
+        root.destroy()
+
+
+INT_RESULT = {"GetWindowTextLengthW", "GetWindowTextW", "ReleaseDC", "SetStretchBltMode", "GetDIBits",
+              "GetAwarenessFromDpiAwarenessContext", "DwmGetWindowAttribute"}
+BOOL_RESULT = {"IsWindowVisible", "IsIconic", "GetWindowRect", "PrintWindow", "GetUserObjectInformationW",
+               "CloseDesktop", "GetLastInputInfo", "SetProcessDpiAwarenessContext", "CloseHandle",
+               "QueryFullProcessImageNameW", "GetProcessTimes", "GetExitCodeProcess", "SetInformationJobObject",
+               "AssignProcessToJobObject", "PeekNamedPipe", "DeleteObject", "DeleteDC", "StretchBlt"}
+HANDLE_RESULT = {"GetForegroundWindow", "GetWindowDC", "OpenInputDesktop", "OpenProcess", "CreateJobObjectW",
+                 "GetCurrentProcess", "CreateCompatibleDC", "CreateCompatibleBitmap", "SelectObject",
+                 "GetThreadDpiAwarenessContext"}
+
+
 @windows
 def test_every_binding_is_typed():
     import ctypes
     from inkvault import winapi
     a = winapi.api()
+    seen = set()
     for dll in (a.user32, a.kernel32, a.gdi32, a.dwmapi):
         for name, f in vars(dll).items():
             if isinstance(f, ctypes._CFuncPtr):
+                seen.add(name)
                 assert f.argtypes is not None, name
+                if name not in INT_RESULT | BOOL_RESULT:   # BOOL is c_long, the same type as c_int
+                    assert f.restype is not ctypes.c_int, name   # default restype would truncate handles
+                if name in HANDLE_RESULT:
+                    assert ctypes.sizeof(f.restype) == ctypes.sizeof(ctypes.c_void_p), name
+    assert HANDLE_RESULT | INT_RESULT | BOOL_RESULT <= seen
 
 
 @windows
-def test_identity_of_our_own_window_then_minimized():
-    import tkinter
+def test_identity_of_our_own_window_then_minimized(own_window):
     from inkvault import winapi
-    root = tkinter.Tk(); root.title("inkvault-test-window"); root.geometry("400x200"); root.update()
+    root = own_window
+    root.deiconify(); root.update()
     try:
         hwnd = int(root.wm_frame(), 16)
         ident = winapi.identity(hwnd)
@@ -41,15 +70,18 @@ def test_identity_of_our_own_window_then_minimized():
         root.iconify(); root.update()
         assert winapi.identity(hwnd) is None
     finally:
-        root.destroy()
+        root.deiconify(); root.update()
 
 
 @windows
-def test_unreadable_process_or_desktop_fails_closed(monkeypatch):           # Review Focus 1 and 2
+def test_unreadable_process_or_desktop_fails_closed(own_window, monkeypatch):   # Review Focus 1 and 2
     from inkvault import winapi
-    a = winapi.api()
+    root = own_window
+    root.deiconify(); root.update()
+    hwnd = int(root.wm_frame(), 16)
+    assert winapi.identity(hwnd) is not None                                # readable before the patch
     monkeypatch.setattr(winapi, "_process", lambda pid: None)               # OpenProcess denied (elevated app)
-    assert winapi.identity(a.user32.GetForegroundWindow()) is None
+    assert winapi.identity(hwnd) is None
     monkeypatch.setattr(winapi, "_input_desktop_name", lambda: None)        # RDP / secure desktop
     assert winapi.input_desktop_default() is False and winapi.locked(None) is True
 
