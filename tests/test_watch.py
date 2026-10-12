@@ -240,3 +240,71 @@ def test_a_restart_never_extends_the_old_row(rig):
     ticks(w2, clock, 20)
     after = rows(conn, "screen_stretches")
     assert before[0] in after and len(after) == 2
+
+
+def remove_everything(gen):
+    from inkvault import export
+    v = export.open_vault()
+    v.execute("DELETE FROM screen_stretches")
+    v.execute("INSERT OR REPLACE INTO meta VALUES ('screen_removal_gen', ?)", (str(gen),)); v.commit(); v.close()
+
+
+def test_after_a_stale_reset_the_generation_is_the_vaults_new_one(rig):
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 16)
+    assert w.gen == 0
+    remove_everything(7)
+    ticks(w, clock, 20)
+    assert w.stale_resets >= 1 and w.gen == 7
+
+
+def test_fail_closed_closes_the_stretch_at_the_last_valid_poll(rig):
+    from inkvault import paths, screen
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 5)                                           # last valid poll sampled at t = 8
+    paths.screen_file().write_text("{nope", encoding="utf-8")
+    ticks(w, clock, 1)
+    assert w.core.open is None
+    assert rows(conn, "screen_stretches")[0][2] == screen.iso(T0 + timedelta(seconds=8))
+
+
+@pytest.mark.parametrize("change", ["locked", "idle", "excluded"])
+def test_acceptance_is_refused_for_each_changed_condition(rig, change):
+    from inkvault import screen, stretches
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 16)
+    assert sup.pending
+    if change == "locked":
+        state["locked"] = True
+    elif change == "idle":
+        state["idle"] = stretches.IDLE_LIMIT + 1
+    else:
+        screen.edit(lambda d: d["never_titles"].append("chat"))
+    read_once(w, clock, sup, ["text that must be refused at acceptance"])
+    assert rows(conn, "screen_text") == []
+
+
+def test_a_removal_gen_read_failure_during_reset_does_not_raise(rig, monkeypatch):
+    import sqlite3
+    from inkvault import screen
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 16)
+    remove_everything(3)
+    real, fails = screen.removal_gen, {"n": 0}
+
+    def flaky(c):
+        if fails["n"] == 0 and w.stale_resets > 0:      # only the read made by the reset
+            fails["n"] += 1
+            raise sqlite3.OperationalError("database is locked")
+        return real(c)
+    monkeypatch.setattr(screen, "removal_gen", flaky)
+    ticks(w, clock, 40)                                          # never raises; the reset is retried and adopts 3
+    assert fails["n"] == 1 and w.stale_resets >= 2 and w.gen == 3
+
+
+def test_a_heartbeat_failure_of_any_kind_never_raises(rig, monkeypatch):
+    from inkvault import screen
+    w, clock, sup, state, conn = rig
+    monkeypatch.setattr(screen, "write_atomic", lambda *a: (_ for _ in ()).throw(TypeError("odd")))
+    ticks(w, clock, 20)
+    assert w.last_error == "heartbeat: TypeError"

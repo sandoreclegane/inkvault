@@ -3,6 +3,7 @@ per-stretch queue, and hands reads to the worker without ever waiting on it."""
 import hashlib
 import json
 import os
+import sqlite3
 import sys
 import time
 import uuid
@@ -21,7 +22,10 @@ class Watcher:
         self.sampler, self.supervisor, self.conn, self.source = sampler, supervisor, conn, source
         self.clock, self.utc = clock, utc
         self.core, self.queue = stretches.Core(), screenstore.Queue()
-        self.gen = screen.removal_gen(conn)
+        try:
+            self.gen = screen.removal_gen(conn)
+        except sqlite3.Error:
+            self.gen = 0       # the first write's Stale reset adopts the real generation
         self.settings, self.settings_gen = None, 0
         self.pending = None                    # (request id, Identity, stretch id, removal gen, settings gen)
         self.stored = {"sid": None, "hash": None}   # last text hash *committed* for the open stretch (P6)
@@ -134,7 +138,11 @@ class Watcher:
         self.supervisor.abandon()
         self.pending = None
         self.stored = {"sid": None, "hash": None}
-        self.gen = screen.removal_gen(self.conn)
+        try:
+            self.gen = screen.removal_gen(self.conn)
+        except sqlite3.Error as e:
+            # keep the old generation: the next write raises Stale again and the reset retries
+            self.db_error = f"database: {type(e).__name__}"
 
     def settings_changed(self):
         """A new settings generation (P3): no text read under the old rules is ever written."""
@@ -177,7 +185,7 @@ class Watcher:
         try:
             screen.write_atomic(paths.watch_heartbeat(), self.heartbeat())
             self.heartbeat_error = None
-        except OSError as e:
+        except Exception as e:  # noqa: BLE001 — a heartbeat must never take the loop down
             self.heartbeat_error = f"heartbeat: {type(e).__name__}"
 
     def log(self, line):
@@ -231,22 +239,28 @@ def run():
         if conn is None:
             paths.watch_stop().unlink(missing_ok=True)
             return 0
-        python = sys.executable.replace("pythonw.exe", "python.exe")
-        sup = worker.Supervisor([python, "-m", "inkvault.screentext", "--worker"])
-        w = Watcher(lambda: winapi.sample(time.monotonic(), screen.now()), sup, conn, screen.SettingsSource())
+        sup = w = None
         try:
+            python = sys.executable.replace("pythonw.exe", "python.exe")
+            sup = worker.Supervisor([python, "-m", "inkvault.screentext", "--worker"])
+            w = Watcher(lambda: winapi.sample(time.monotonic(), screen.now()), sup, conn, screen.SettingsSource())
             next_tick = time.monotonic()
             while w.tick():
-                next_tick += POLL
+                # re-anchor after a stall (sleep/suspend) so it never produces a burst of catch-up ticks
+                next_tick = max(next_tick + POLL, time.monotonic())
                 time.sleep(max(0.0, next_tick - time.monotonic()))
             return 0
         except Exception as e:  # noqa: BLE001
-            w.log(f"fatal: {type(e).__name__}")
+            if w is not None:
+                w.log(f"fatal: {type(e).__name__}")
             return 1
         finally:
-            sup.close()
-            conn.close()
-            paths.watch_heartbeat().unlink(missing_ok=True)
-            nightly.unlock(fd)
+            for cleanup in (sup.close if sup else None, conn.close,
+                            lambda: paths.watch_heartbeat().unlink(missing_ok=True), lambda: nightly.unlock(fd)):
+                try:
+                    if cleanup:
+                        cleanup()
+                except Exception:  # noqa: BLE001 — cleanup must not replace the return value
+                    pass
     finally:
         os.close(fd)
