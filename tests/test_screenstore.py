@@ -88,3 +88,66 @@ def test_busy_within_budget_even_at_connect(store):                        # P11
         assert time.monotonic() - t < 1.5
     finally:
         blocker.rollback(); blocker.close()
+
+
+def test_coalescing_and_dependency_order(store):
+    ss, conn = store
+    q = ss.Queue()
+    q.push(opened(ss))
+    for i in range(200):
+        q.push(ss.Write("extend", "screen:1", 0, ended=f"2026-10-12T15:{i % 60:02d}:00.000000Z"))
+    q.push(text(ss))
+    assert len(q) == 1
+    r = q.flush(conn)
+    assert r.written == 2 and [w.text_id for w in r.texts] == ["screentext:1"] and len(q) == 0
+
+
+def test_flush_stops_at_busy_and_at_its_budget(store):
+    from inkvault import export
+    ss, conn = store
+    q = ss.Queue()
+    for i in range(30):
+        q.push(opened(ss, sid=f"screen:{i}"))
+    blocker = export.open_vault(); blocker.execute("BEGIN IMMEDIATE")
+    try:
+        r = q.flush(conn)
+        assert r.busy and r.written == 0 and len(q) == 30
+    finally:
+        blocker.rollback(); blocker.close()
+    assert q.flush(conn, max_writes=20).written == 20 and len(q) == 10           # P11: write budget
+    ticks = iter([0.0, 0.0, 0.3, 0.3, 0.3])
+    assert q.flush(conn, clock=lambda: next(ticks)).written == 1                 # P11: time budget
+
+
+def test_the_cap_refuses_new_stretches_but_not_their_closes(store):
+    ss, _ = store
+    q = ss.Queue(max_stretches=3)
+    assert all(q.push(opened(ss, sid=f"screen:{i}")) for i in range(3))
+    assert q.blocked() and q.push(opened(ss, sid="screen:new")) is False
+    assert q.push(ss.Write("close", "screen:2", 0, ended=E)) and len(q) == 3
+
+
+def test_text_cap_and_has_text(store):
+    ss, _ = store
+    q = ss.Queue(max_text_bytes=100)
+    q.push(opened(ss))
+    for i in range(5):
+        q.push(text(ss, tid=f"t{i}", body="z" * 40))
+    assert q.text_bytes <= 100 and q.dropped_text == 3
+    assert q.has_text("screen:1", "t4") and not q.has_text("screen:1", "t0")
+
+
+def test_drop_text(store):
+    ss, _ = store
+    q = ss.Queue()
+    q.push(opened(ss)); q.push(text(ss))
+    assert q.drop_text(lambda w: True) == 1 and q.text_bytes == 0 and len(q) == 1
+
+
+def test_a_non_busy_error_keeps_the_write_and_reports(store, monkeypatch):
+    ss, conn = store
+    q = ss.Queue()
+    q.push(opened(ss))
+    monkeypatch.setattr(ss, "apply", lambda *_: (_ for _ in ()).throw(ss.StoreError("OperationalError: disk full")))
+    r = q.flush(conn)
+    assert r.error.endswith("disk full") and len(q) == 1

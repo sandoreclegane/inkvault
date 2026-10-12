@@ -2,7 +2,9 @@
 removal generation it was observed under, and for an extend, close or text, that its stretch still exists.
 Otherwise it raises Stale and writes nothing: a stretch a removal deleted is never recreated (F1)."""
 import sqlite3
-from dataclasses import dataclass
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
 
 from . import export, screen
 
@@ -87,3 +89,126 @@ def apply(conn, w):
         if isinstance(e, sqlite3.Error):
             raise classify(e) from None
         raise
+
+
+@dataclass
+class Flush:
+    written: int = 0
+    stale: bool = False
+    busy: bool = False
+    error: object = None
+    texts: list = field(default_factory=list)
+
+
+class Entry:
+    def __init__(self):
+        self.open, self.state, self.texts = None, None, []
+
+    def empty(self):
+        return self.open is None and self.state is None and not self.texts
+
+
+class Queue:
+    """Pending writes by stretch (spec §5, R4, P11). An unwritten open absorbs later extends and its close; text
+    follows its open in order. One flush per poll, stopping at the first failure, after max_writes, or budget_s."""
+
+    def __init__(self, max_stretches=50, max_text_bytes=2_000_000):
+        self.max_stretches, self.max_text_bytes = max_stretches, max_text_bytes
+        self.entries, self.text_bytes, self.dropped_text = OrderedDict(), 0, 0
+
+    def __len__(self):
+        return len(self.entries)
+
+    def blocked(self):
+        return len(self.entries) >= self.max_stretches
+
+    def push(self, w):
+        if w.kind == "open" and w.stretch_id not in self.entries and self.blocked():
+            return False
+        e = self.entries.setdefault(w.stretch_id, Entry())
+        if w.kind == "open":
+            e.open = w
+        elif w.kind in ("extend", "close"):
+            if e.open is not None:
+                e.open.ended = w.ended
+            elif not (e.state and e.state.kind == "close" and w.kind == "extend"):
+                e.state = w
+        else:
+            e.texts.append(w)
+            self.text_bytes += w.size()
+            self._trim()
+        return True
+
+    def _trim(self):
+        while self.text_bytes > self.max_text_bytes:
+            for sid, e in self.entries.items():
+                if e.texts:
+                    self.text_bytes -= e.texts.pop(0).size()
+                    self.dropped_text += 1
+                    if e.empty():
+                        del self.entries[sid]
+                    break
+            else:
+                return
+
+    def has_text(self, sid, h):
+        e = self.entries.get(sid)
+        return bool(e) and any(w.text_hash == h for w in e.texts)
+
+    def drop_text(self, pred):
+        n = 0
+        for sid in list(self.entries):
+            e = self.entries[sid]
+            keep = []
+            for w in e.texts:
+                if pred(w):
+                    self.text_bytes -= w.size()
+                    n += 1
+                else:
+                    keep.append(w)
+            e.texts = keep
+            if e.empty():
+                del self.entries[sid]
+        self.dropped_text += n
+        return n
+
+    def clear(self):
+        self.entries.clear()
+        self.text_bytes = 0
+
+    def flush(self, conn, max_writes=20, budget_s=0.25, clock=time.monotonic):
+        r, start = Flush(), clock()
+
+        def one(w):
+            if r.written >= max_writes or clock() - start > budget_s:
+                return False
+            try:
+                apply(conn, w)
+            except Stale:
+                r.stale = True
+                return False
+            except Busy:
+                r.busy = True
+                return False
+            except StoreError as e:
+                r.error = str(e)
+                return False
+            r.written += 1
+            if w.kind == "text":
+                r.texts.append(w)
+            return True
+
+        for sid in list(self.entries):
+            e = self.entries[sid]
+            for slot in ("open", "state"):
+                w = getattr(e, slot)
+                if w is not None:
+                    if not one(w):
+                        return r
+                    setattr(e, slot, None)
+            while e.texts:
+                if not one(e.texts[0]):
+                    return r
+                self.text_bytes -= e.texts.pop(0).size()
+            del self.entries[sid]
+        return r
