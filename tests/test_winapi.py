@@ -17,15 +17,15 @@ def test_idle_ms_survives_rollover_and_title_hash_is_stable():
     assert winapi.title_sha256("é") == winapi.title_sha256("é") and len(winapi.title_sha256("")) == 64
 
 
-@pytest.fixture(scope="module")
-def own_window():
-    """One tkinter window for the module (a second Tk() in one process can fail on some Python installs)."""
+@pytest.fixture
+def own_window(tk_root):
+    """A titled Toplevel on the session's shared Tk root."""
     import tkinter
-    root = tkinter.Tk(); root.title("inkvault-test-window"); root.geometry("400x200"); root.update()
+    win = tkinter.Toplevel(tk_root); win.title("inkvault-test-window"); win.geometry("400x200"); win.update()
     try:
-        yield root
+        yield win
     finally:
-        root.destroy()
+        win.destroy()
 
 
 INT_RESULT = {"GetWindowTextLengthW", "GetWindowTextW", "ReleaseDC", "SetStretchBltMode", "GetDIBits",

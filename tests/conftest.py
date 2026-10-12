@@ -101,3 +101,18 @@ def only_python_popen(monkeypatch):
                 raise AssertionError(f"a test started a real program: {args}")
             super().__init__(args, *a, **k)
     monkeypatch.setattr(subprocess, "Popen", Guarded)
+
+
+@pytest.fixture(scope="session")
+def tk_root():
+    """The one Tk root for the whole run: a second tkinter.Tk() in a process can fail with TclError on some Python
+    installs. Tests make Toplevels on it. Windows only."""
+    if sys.platform != "win32":
+        pytest.skip("Windows only")
+    import tkinter
+    root = tkinter.Tk()
+    root.withdraw()
+    try:
+        yield root
+    finally:
+        root.destroy()

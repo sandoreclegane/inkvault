@@ -11,17 +11,6 @@ windows = pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
 REQ = {"id": 7, "hwnd": 1, "pid": 2, "created": 3, "exe": "x.exe", "title_sha256": "0" * 64}
 
 
-@pytest.fixture(scope="module")
-def tk_root():
-    """One Tk root for the module (a second Tk() in one process can fail on some Python installs)."""
-    import tkinter
-    root = tkinter.Tk(); root.withdraw()
-    try:
-        yield root
-    finally:
-        root.destroy()
-
-
 def test_changed_when_the_window_moved_on(monkeypatch):
     from inkvault import screentext, winapi
     monkeypatch.setattr(winapi, "matches", lambda r: False)
