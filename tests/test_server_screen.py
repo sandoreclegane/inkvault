@@ -101,3 +101,16 @@ def test_search_screen_keyword_meaning_and_one_hit_per_stretch(vault):
     assert "keyword-only" in server.search_memories("docs", source="screen", mode="meaning")
     hits = [l for l in server.search_memories("backoff", mode="keyword", limit=50).splitlines() if l.startswith("[")]
     assert not any(l.startswith("[screen] screen:a") for l in hits)              # the OCR rows win
+
+
+def test_an_empty_search_still_says_no_matches_before_the_notes(vault):
+    from inkvault import index, server
+    index.build()
+    out = server.search_memories("zzzqqq", source="screen", mode="keyword")
+    assert out.startswith("No matches") and "search covers screen activity up to" in out
+
+
+def test_timeline_rejects_unparseable_bounds_with_an_index_present(vault):
+    from inkvault import index, server
+    index.build()
+    assert server.timeline("yesterday").startswith("Bad range")

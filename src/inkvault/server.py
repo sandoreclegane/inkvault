@@ -286,11 +286,12 @@ def search_memories(query: str, source: str = "all", mode: str = "hybrid",
                 scores[key] = scores.get(key, 0) + 1 / (RRF_K + rank)
 
         hits = []
+        has_stretch = has_column(conn, "events", "stretch_id")
         for kind, id_ in sorted(scores, key=scores.get, reverse=True):
             table, _, title, _, body = SOURCES[kind]
             created = "t.started" if kind == "screen" else "t.created"
             stretch = ("t.id" if kind == "screen" else
-                       "t.stretch_id" if kind == "events" and has_column(conn, "events", "stretch_id") else "NULL")
+                       "t.stretch_id" if kind == "events" and has_stretch else "NULL")
             params = [id_]
             r = conn.execute(f"SELECT {created} AS created, {title} AS title, substr(t.{body}, 1, 300) AS preview, "
                              f"{stretch} AS stretch FROM {table} t WHERE t.id = ?"
@@ -315,7 +316,7 @@ def search_memories(query: str, source: str = "all", mode: str = "hybrid",
                 c := conn.execute("SELECT value FROM meta WHERE key='screen_cutoff'").fetchone()):
             notes.append(f"(search covers screen activity up to {local(c[0]):%Y-%m-%d %H:%M}; "
                          "timeline() shows it live)")
-    return "\n".join([*out, *notes]) or f"No matches for {query!r} in {source}."
+    return "\n".join([*out, *notes] if out else [f"No matches for {query!r} in {source}.", *notes])
 
 
 def screen_memory(id_, max_chars):
@@ -411,13 +412,14 @@ def timeline(since: str, until: str = "", limit: int = 50) -> str:
     """
     if not 1 <= limit <= TIMELINE_MAX:
         return f"limit must be 1-{TIMELINE_MAX}."
+    try:
+        screen.bounds(since, until)
+    except ValueError as e:
+        return f"Bad range: {e}"
     items = indexed_items(since, until)
     items.sort(key=lambda x: x[0])
     body = "\n".join(line for _, line in items[:limit])
-    try:
-        live = screen_lines(since, until, limit)
-    except ValueError as e:
-        return f"Bad range: {e}"
+    live = screen_lines(since, until, limit)
     if live:
         body = (body + "\n\n" if body else "") + "Screen (live, newest first):\n" + "\n".join(live)
     return body or "Nothing in that range."
