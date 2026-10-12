@@ -86,6 +86,36 @@ def rebuild_marker() -> Path:
     return home() / "rebuild-needed"
 
 
+def screen_file() -> Path:
+    """Screen capture settings: text apps, never rules, pause (`inkvault watch --apps`)."""
+    return home() / "screen.json"
+
+
+def screen_lock() -> Path:
+    """Held briefly while screen.json is read, changed and saved (never by the watcher)."""
+    return home() / "screen.lock"
+
+
+def watch_lock() -> Path:
+    """Held by the running watcher for its whole life; holds its process id."""
+    return home() / "watch.lock"
+
+
+def watch_stop() -> Path:
+    """Asks the running watcher to stop (`inkvault watch --stop`, uninstall)."""
+    return home() / "watch.stop"
+
+
+def watch_heartbeat() -> Path:
+    """The watcher's state, rewritten every 30 s: time, app in front, paused, error, counts. Never titles or text."""
+    return home() / "watch.heartbeat"
+
+
+def watch_log() -> Path:
+    """The watcher's diagnostics: app names, counts, times and error classes; never titles, text or settings."""
+    return home() / "watch.log"
+
+
 def connect_ro(path):
     """Open a SQLite file read-only. as_uri() escapes characters like # ? % that would break a hand-built
     "file:" URI. SQLite rejects the host part of a network (UNC) path's URI, so those connect plainly."""
