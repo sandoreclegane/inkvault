@@ -264,3 +264,343 @@ def run():
                     pass
     finally:
         os.close(fd)
+
+
+MIN_TOOL = (0, 3, 0)
+
+
+def lock_held():
+    from . import nightly
+    if not paths.watch_lock().exists():
+        return False
+    fd = os.open(paths.watch_lock(), os.O_RDWR)
+    try:
+        if nightly.try_lock(fd):
+            nightly.unlock(fd)
+            return False
+        return True
+    finally:
+        os.close(fd)
+
+
+def lock_owner():
+    try:
+        return int((paths.watch_lock().read_text(errors="replace").splitlines() or [""])[0])
+    except (OSError, ValueError):
+        return None
+
+
+def heartbeat():
+    try:
+        return json.loads(paths.watch_heartbeat().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def heartbeat_ok(hb, since=None, max_age=10.0):
+    """A heartbeat from the live lock holder, 0–max_age s old, and (if since) written after since (R4)."""
+    try:
+        t = screen.parse(hb["utc"])
+    except (TypeError, KeyError, ValueError):
+        return False
+    age = (screen.now() - t).total_seconds()
+    return (0 <= age <= max_age and hb.get("pid") == lock_owner() and lock_held()
+            and (since is None or t >= since))
+
+
+def running_confirmed(wait, since):
+    end = time.monotonic() + wait
+    while time.monotonic() < end:
+        if heartbeat_ok(heartbeat(), since):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def stop_watcher(wait=None):
+    """Cooperative stop (spec §7): ask through watch.stop, then wait for watch.lock to be released. Never kills a
+    pid from a file. True only when the lock was actually released."""
+    wait = STOP_WAIT if wait is None else wait
+    if not lock_held():
+        return True
+    paths.watch_stop().write_text("stop\n", encoding="utf-8")
+    end = time.monotonic() + wait
+    while time.monotonic() < end:
+        if not lock_held():
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def change(edit, done):
+    """Settings edits touch only screen.json under screen.lock: no vault, no nightly lock (R1, R2). Only a home
+    with no screen.json at all is prepared first (a true first use, or lost settings, which prepare refuses)."""
+    try:
+        if not paths.screen_file().exists():
+            screen.prepare()
+        screen.edit(edit)
+    except screen.SettingsBusy:
+        print("Another command is changing screen capture settings right now; nothing changed. Try again.")
+        return 1
+    except screen.SettingsError as e:
+        print(f"Nothing changed: {e}")
+        return 1
+    print(f"{done} Saved; a running watcher applies it within 2 seconds.")
+    return 0
+
+
+def add_to(key, value):
+    def f(d):
+        if value.lower() not in {x.lower() for x in d[key]}:
+            d[key].append(value)
+    return f
+
+
+def remove_from(key, value):
+    return lambda d: d.update({key: [x for x in d[key] if x.lower() != value.lower()]})
+
+
+def show_apps():
+    s = screen.validate(screen.read_file())
+    print("text:  " + ", ".join(sorted(s.text_apps)))
+    print("never: " + ", ".join(sorted(s.never_apps)))
+    print("never titles: " + ", ".join(s.never_titles))
+    try:
+        from . import browsers
+        sites = browsers.load_choices()["skip_sites"]
+    except Exception:  # noqa: BLE001
+        sites = []
+    print("Banks and other sites: add their page-title text with --never-title (browser-history's skip list holds "
+          "domains, which titles often don't show)" + (f"; your skip list: {', '.join(sites)}" if sites else "") + ".")
+
+
+def expected_task(pythonw, user):
+    return {"command": str(pythonw), "arguments": ["-m", "inkvault", "--home", str(paths.home()), "watch"],
+            "user": user, "logon_type": "InteractiveToken", "limit": "PT0S", "restart": ("PT1M", "3"),
+            "instances": "IgnoreNew", "enabled": True, "trigger_enabled": True, "trigger_user": user}
+
+
+def install(ask=None, confirm_wait=None):
+    from . import schedule
+    from .schedulers import windows
+    screen.prepare()
+    tool = schedule.tool_python()
+    if not tool or (schedule.installed_version(tool) or (0,)) < MIN_TOOL:
+        print("Install or update the tool with screen capture first: "
+              "uv tool install --force \"inkvault[screen]\"")
+        return 1
+    pythonw = tool.with_name("pythonw.exe")
+    argv = [str(pythonw), "-m", "inkvault", "--home", str(paths.home()), "watch"]
+    try:
+        schedule.check_task_scheduler_argv(argv)
+    except schedule.ScheduleError as e:
+        print(e)
+        return 1
+    if ask is None:
+        from . import browsers
+        from .cli import confirm
+        ask = confirm if browsers.interactive() else (lambda q: False)
+    messaging = ask("Read text in messaging apps (Discord, WhatsApp, Telegram, Teams, LinkedIn)? This stores other "
+                    "people's messages and names. [y/N] ")
+    chrome = ask("Read text in Chrome? Chrome's window titles don't say which profile they are, so this includes "
+                 "every Chrome profile on this Windows account, including other people's. [y/N] ")
+
+    def apply_answers(d):
+        for app in screen.MESSAGING_APPS:
+            (add_to if messaging else remove_from)("text_apps", app)(d)
+        (add_to if chrome else remove_from)("text_apps", screen.CHROME)(d)
+    if change(apply_answers, "Text apps chosen.") != 0:
+        return 1
+    user = windows.current_user()
+    windows.install_logon(argv, user)
+    try:
+        rb = windows.read_back(windows.WATCH_TASK)
+    except windows.TaskUnknown:
+        rb = None
+    if rb != expected_task(pythonw, user):
+        try:
+            windows.remove(task=windows.WATCH_TASK)
+        except RuntimeError:
+            pass
+        print("The sign-in task didn't read back as expected, so it was removed; nothing new is recording.")
+        return 1
+    make_shortcuts(pythonw)
+    if lock_held():   # R4: a watcher already running (started by hand) isn't proof the task's action works
+        print(f"A watcher is already running (pid {lock_owner()}) and keeps recording. The sign-in task is set up "
+              "and starts screen capture from the next sign-in.")
+        return 0
+    since = screen.now()
+    windows.run_task(windows.WATCH_TASK)
+    if not running_confirmed(STOP_WAIT if confirm_wait is None else confirm_wait, since):
+        print("The sign-in task is registered, but the watcher hasn't confirmed it's running. "
+              "Check `inkvault status` and watch.log.")
+        return 1
+    print("Screen capture is on now and at every sign-in. Pause it with the desktop shortcut or "
+          "`inkvault watch --pause 1h`.")
+    return 0
+
+
+def make_shortcuts(pythonw):
+    """Two desktop shortcuts (spec §4). A failure is reported, not fatal."""
+    import subprocess
+    home = str(paths.home())
+    script = "; ".join(
+        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop')+"
+        f"'\\{name}.lnk'); $s.TargetPath='{pythonw}'; $s.Arguments='-m inkvault --home \"{home}\" watch {args}'; "
+        "$s.Save()" for name, args in (("Pause screen capture (1 hour)", "--pause 1h"),
+                                       ("Resume screen capture", "--resume")))
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True)
+    if r.returncode:
+        print("Couldn't add the desktop shortcuts; use `inkvault watch --pause 1h` and `--resume`.")
+
+
+def task_home(rb):
+    args = rb["arguments"] if rb else []
+    return args[args.index("--home") + 1] if "--home" in args and args.index("--home") + 1 < len(args) else None
+
+
+def uninstall():
+    """Spec §7 (R9, P5, R2, R4): needs no vault and no settings. Known state only; matching home; disable and
+    verify; cooperative stop; delete and verify. Never force-ends; a stop that times out leaves the task disabled."""
+    from .schedulers import windows
+    try:
+        rb = windows.read_back(windows.WATCH_TASK)
+        if rb is not None:
+            home = task_home(rb)
+            if home is None:
+                print("Can't tell which vault the InkVault Watch task belongs to; nothing was changed.")
+                return 1
+            if os.path.normcase(home) != os.path.normcase(str(paths.home())):
+                print(f"The InkVault Watch task belongs to another vault ({home}); nothing was changed.")
+                return 1
+            windows.set_enabled(False, task=windows.WATCH_TASK)
+            after = windows.read_back(windows.WATCH_TASK)
+            if after is None or after["enabled"]:
+                print("The sign-in task couldn't be confirmed disabled; nothing else was changed.")
+                return 1
+        if not stop_watcher():
+            print("Screen capture may still be running: the watcher didn't stop within 15 seconds. The sign-in "
+                  "task is disabled; run `inkvault watch --uninstall` again.")
+            return 1
+        if rb is not None:
+            windows.remove(task=windows.WATCH_TASK)
+            if windows.read_back(windows.WATCH_TASK) is not None:
+                print("Screen capture is stopped, but the sign-in task couldn't be removed.")
+                return 1
+    except windows.TaskUnknown as e:
+        print(f"Task Scheduler couldn't say what's there ({e}); nothing more was changed.")
+        return 1
+    except RuntimeError as e:
+        print(f"Task Scheduler refused ({e}); nothing more was changed.")
+        return 1
+    print("Screen capture is off and won't start at sign-in.")
+    return 0
+
+
+def cmd(args):
+    # Controls first, before any vault or settings work: they need only the home, the lock and the task (R2).
+    if args.stop:
+        if not lock_held():
+            print("Screen capture isn't running.")
+            return 0
+        ok = stop_watcher()
+        print("Stopped." if ok else "Screen capture may still be running: it didn't stop within 15 seconds.")
+        return 0 if ok else 1
+    if args.uninstall:
+        if sys.platform != "win32":
+            print("screen capture is Windows-only for now")
+            return 1
+        return uninstall()
+    # Settings edits touch screen.json only.
+    if args.add_app:
+        if args.add_app.lower() == screen.CHROME:
+            print("Note: Chrome's window titles don't say which profile they are, so this reads text from every "
+                  "Chrome profile on this Windows account.")
+        return change(add_to("text_apps", args.add_app), f"{args.add_app} gets text capture.")
+    if args.remove_app:
+        return change(remove_from("text_apps", args.remove_app), f"{args.remove_app} is timeline-only.")
+    if args.never_app:
+        return change(add_to("never_apps", args.never_app), f"{args.never_app} is never captured.")
+    if args.never_title:
+        return change(add_to("never_titles", args.never_title), "Windows with that title text are skipped.")
+    if args.pause:
+        try:
+            until = screen.parse_pause(args.pause)
+        except ValueError as e:
+            print(e)
+            return 1
+        return change(lambda d: d.update(paused_until=screen.iso(until)),
+                      f"Paused until {until.astimezone():%Y-%m-%d %H:%M}.")
+    if args.resume:
+        return change(lambda d: d.update(paused_until=None), "Resumed.")
+    if args.reset_settings:
+        with screen.settings_lock():
+            screen.write_atomic(paths.screen_file(), screen.defaults())
+        try:
+            screen.prepare()
+        except Exception as e:  # noqa: BLE001 — the file is written; the marker can wait for the next start
+            print(f"(The vault couldn't be opened to record the setup: {type(e).__name__}.)")
+        print("Screen capture settings reset to the defaults (messaging apps and Chrome are timeline-only).")
+        return 0
+    # First use and running: these prepare the home.
+    try:
+        screen.prepare()
+    except screen.SettingsError as e:
+        print(f"Screen capture settings need attention: {e}")
+        return 1
+    if args.apps:
+        show_apps()
+        return 0
+    if sys.platform != "win32":
+        print("screen capture is Windows-only for now")
+        return 1
+    if args.install:
+        return install()
+    return run()
+
+
+def status_lines():
+    out = []
+    try:
+        hb = json.loads(paths.watch_heartbeat().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        hb = None
+    if hb and lock_held():
+        age = int((screen.now() - screen.parse(hb["utc"])).total_seconds())
+        state = hb.get("state") or ("paused" if hb.get("paused") else
+                                    ("on, in " + hb["open"]["app"] if hb.get("open") else "on"))
+        out.append(f"screen capture: {state} (heartbeat {age} s ago, pid {hb.get('pid')})")
+        for key, label in (("settings_error", "settings"), ("db_error", "database"), ("heartbeat_error", "heartbeat")):
+            if hb.get(key):
+                out.append(f"  {label}: {hb[key]}")
+        if hb.get("cooling"):
+            out.append("  text paused after a slow read: " + ", ".join(hb["cooling"]))
+        if hb.get("job_error"):
+            out.append(f"  {hb['job_error']}")
+        if hb.get("dropped_text") or hb.get("busy_gaps"):
+            out.append(f"  dropped text: {hb.get('dropped_text', 0)}, busy gaps: {hb.get('busy_gaps', 0)} polls")
+    else:
+        out.append("screen capture: not running")
+    if sys.platform == "win32":
+        from .schedulers import windows
+        try:
+            rb = windows.read_back(windows.WATCH_TASK)
+            task = ("enabled" if rb["enabled"] and rb["trigger_enabled"] else "disabled") if rb else "not set up"
+        except windows.TaskUnknown:
+            task = "unknown (Task Scheduler couldn't be read)"
+        out.append(f"  sign-in task: {task}")
+        from . import screentext
+        if not screentext.ocr_available():
+            out.append("  text capture unavailable: install inkvault[screen] and an OCR language")
+    if paths.vault_db().exists():
+        db = paths.connect_ro(paths.vault_db())
+        try:
+            today = screen.iso(screen.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0))
+            n, t = db.execute("SELECT COUNT(*), SUM(started >= ?) FROM screen_stretches", (today,)).fetchone()
+            texts = db.execute("SELECT COUNT(*) FROM screen_text").fetchone()[0]
+            out.append(f"  {n:,} windows recorded ({t or 0:,} today), {texts:,} text reads")
+        except Exception:  # noqa: BLE001 — a vault no 0.3.0 command has opened
+            pass
+        finally:
+            db.close()
+    return out

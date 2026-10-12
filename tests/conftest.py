@@ -36,6 +36,16 @@ def only_python_subprocesses(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_watch_task(request, monkeypatch):
+    """`inkvault status` reads the sign-in task; on Windows no test may reach the real Task Scheduler. A test that
+    wants a task state fakes windows.read_back itself (that wins); test_schedulers tests the real one."""
+    if request.node.path.name == "test_schedulers.py":
+        return
+    from inkvault.schedulers import windows
+    monkeypatch.setattr(windows, "read_back", lambda task: None)
+
+
+@pytest.fixture(autouse=True)
 def no_real_sessions(tmp_path_factory, monkeypatch):
     """Sync must never read this machine's own Claude Code, Claude desktop or Codex sessions: point them all at
     empty folders. A test that wants sessions writes them under these same variables (for the desktop app, under

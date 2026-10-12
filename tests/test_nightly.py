@@ -418,7 +418,7 @@ def test_status_works_when_the_home_has_uri_special_characters(tmp_path, monkeyp
     make_vault().close()
     assert cli.main(["status"]) == 0
     out = capsys.readouterr().out
-    assert "1 captures" in out
+    assert "1 Pieces captures" in out
 
 
 def test_a_damaged_vault_does_not_hide_the_nightly_lines(home, monkeypatch, capsys):

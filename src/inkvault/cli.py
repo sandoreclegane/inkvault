@@ -356,7 +356,7 @@ def cmd_status(_args):
             print(f"vault: {paths.vault_db().stat().st_size / 1e6:,.0f} MB, last export {meta.get('last_export', '?')}"
                   f"{' (partial; continues next run)' if meta.get('last_export_partial') == '1' else ''} "
                   f"from PiecesOS {meta.get('pieces_version', '?')}")
-            print(f"  {events[0]:,} captures ({(events[1] or '')[:10]} → {(events[2] or '')[:10]}), "
+            print(f"  {events[0]:,} Pieces captures ({(events[1] or '')[:10]} → {(events[2] or '')[:10]}), "
                   f"{kinds.get('summary', 0):,} summaries, {kinds.get('message', 0):,} chat messages, "
                   f"{kinds.get('asset', 0):,} snippets")
             for line in sessions + web:
@@ -370,6 +370,9 @@ def cmd_status(_args):
     print(f"search index: {'ready' if paths.search_db().exists() else 'not built'}; "
           f"digests: {'yes' if paths.digests_db().exists() else 'none'}; "
           f"dashboard: {paths.dashboard() if paths.dashboard().exists() else 'not built'}")
+    from . import watch
+    for line in watch.status_lines():
+        print(line)
     pos, version = PiecesOS.find()
     print(f"PiecesOS: {'running ' + version + ' at ' + pos.base if pos else 'not reachable'}")
     from . import nightly, schedule
@@ -435,6 +438,19 @@ def main(argv=None):
                    help="don't wake it; run the next time it's awake")
     s.add_argument("--off", action="store_true", help="stop the nightly run (keeps the vault and backups)")
     sub.add_parser("nightly", help="one refresh + backup now (what the schedule runs)")
+    wp = sub.add_parser("watch", help="screen capture: which window you're in, and text from the apps you allow")
+    wg = wp.add_mutually_exclusive_group()
+    wg.add_argument("--apps", action="store_true", help="show which apps get text capture and which are never captured")
+    wg.add_argument("--add-app", metavar="EXE", help="read text in this app (for example Discord.exe)")
+    wg.add_argument("--remove-app", metavar="EXE", help="back to timeline-only for this app")
+    wg.add_argument("--never-app", metavar="EXE", help="never record this app, not even in the timeline")
+    wg.add_argument("--never-title", metavar="TEXT", help="skip windows whose title contains this text")
+    wg.add_argument("--pause", metavar="FOR", help="pause capture, for example 1h or 30m")
+    wg.add_argument("--resume", action="store_true", help="end a pause")
+    wg.add_argument("--stop", action="store_true", help="stop the running watcher")
+    wg.add_argument("--install", action="store_true", help="start screen capture at every sign-in")
+    wg.add_argument("--uninstall", action="store_true", help="stop screen capture and remove the sign-in task")
+    wg.add_argument("--reset-settings", action="store_true", help="restore the default capture settings")
     args = p.parse_args(argv)
 
     if args.home:
@@ -488,6 +504,9 @@ def dispatch(args):
         from . import server
         server.run()
         return 0
+    if args.cmd == "watch":
+        from . import watch
+        return watch.cmd(args)
     if args.cmd == "status":
         return cmd_status(args)
     if args.cmd == "schedule":
