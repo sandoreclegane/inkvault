@@ -250,6 +250,12 @@ def search_memories(query: str, source: str = "all", mode: str = "hybrid",
         return f"Unknown source {source!r}. Use one of: all, {', '.join(SOURCES)}"
     if mode not in ("hybrid", "keyword", "meaning"):
         return f"Unknown mode {mode!r}. Use hybrid, keyword, or meaning."
+    for bound in (since, until):
+        if bound and len(bound) != 10:
+            try:
+                utc_bound(bound)
+            except ValueError:
+                return f"Bad date {bound!r}: use a date (2026-10-05) or a UTC time (2026-10-05T14:30)."
     if since or until:
         try:
             screen.bounds(since or "1970-01-01", until)
@@ -260,12 +266,6 @@ def search_memories(query: str, source: str = "all", mode: str = "hybrid",
 
     scores, snippets = {}, {}  # reciprocal rank fusion: each list adds 1/(k + rank) per hit
     with db() as conn:
-        for bound in (since, until):
-            if bound and len(bound) != 10:
-                try:
-                    utc_bound(bound)
-                except ValueError:
-                    return f"Bad date {bound!r}: use a date (2026-10-05) or a UTC time (2026-10-05T14:30)."
         if source == "web" and not has_table(conn, "pages"):
             return "Web pages aren't in the search index yet: run `inkvault index`."
         kinds = [k for k in kinds if has_table(conn, SOURCES[k][0])]
