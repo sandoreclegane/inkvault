@@ -519,6 +519,16 @@ def test_logon_task_xml_and_read_back(monkeypatch):
                   "trigger_enabled": True, "trigger_user": "PC\\me"}
 
 
+def test_read_back_survives_a_leading_bom(monkeypatch):
+    from inkvault.schedulers import windows
+    xml = "\ufeff" + windows.render_logon(["C:\\T\\pythonw.exe", "-m", "inkvault", "watch"], "PC\\me")
+    monkeypatch.setattr(windows.subprocess, "run",
+                        lambda cmd, **k: proc(0, xml) if "/XML" in cmd else proc(1))
+    assert windows.read_back("InkVault Watch")["user"] == "PC\\me"
+    with open(windows.__file__, encoding="utf-8") as f:
+        assert "\ufeff" not in f.read()   # written as the escape, not the character
+
+
 def test_split_args_round_trips_list2cmdline():
     from inkvault.schedulers import windows
     args = ["-m", "inkvault", "--home", "C:\\Users\\Jos\u00e9 \u00d1\\My Vault\\", "a\"b", "", "x y\\\\", "watch"]

@@ -103,7 +103,8 @@ class Watcher:
             return
         fresh = self.sampler()
         if (gen != self.gen
-                or fresh.window != ident or fresh.locked or fresh.idle_s >= stretches.IDLE_LIMIT
+                or fresh.window is None or not stretches.same_window(fresh.window, ident)
+                or fresh.locked or fresh.idle_s >= stretches.IDLE_LIMIT
                 or settings.paused(fresh.utc) or settings.never(ident.exe, ident.title)
                 or not settings.text_app(ident.exe) or self.core.open is None or self.core.open.id != sid):
             return
@@ -124,8 +125,10 @@ class Watcher:
         for w in r.texts:
             self.stored = {"sid": w.stretch_id, "hash": w.text_hash}
         if r.error:
-            self.db_error = f"database: {r.error}"
-            self.log(self.db_error)
+            error = f"database: {r.error}"
+            if error != self.db_error:        # log a failure when it starts or changes, not on every tick
+                self.log(error)
+            self.db_error = error
         elif r.written:
             self.db_error = None
         if r.stale:
@@ -380,6 +383,18 @@ def expected_task(pythonw, user):
             "instances": "IgnoreNew", "enabled": True, "trigger_enabled": True, "trigger_user": user}
 
 
+def same_task(read, expected):
+    """The install read-back check (R4, I2). Task Scheduler may export a principal or trigger user as the user's SID,
+    or in another case; those two fields accept either form of the current user. Everything else is exact."""
+    user = expected["user"]
+    sid = winapi.current_user_sid()
+    ok_user = lambda v: isinstance(v, str) and (v.lower() == user.lower() or (bool(sid) and v.upper() == sid.upper()))
+    if not (ok_user(read.get("user")) and ok_user(read.get("trigger_user"))):
+        return False
+    skip = ("user", "trigger_user")
+    return ({k: v for k, v in read.items() if k not in skip} == {k: v for k, v in expected.items() if k not in skip})
+
+
 def install(ask=None, confirm_wait=None):
     from . import schedule
     from .schedulers import windows
@@ -399,6 +414,9 @@ def install(ask=None, confirm_wait=None):
         screen.prepare()
     except screen.SettingsError as e:
         print(f"Screen capture settings need attention: {e}")
+        return 1
+    except Exception as e:  # noqa: BLE001 — e.g. the vault can't be opened
+        print(f"Couldn't set up screen capture ({type(e).__name__}); nothing new is recording.")
         return 1
     if ask is None:
         from . import browsers
@@ -426,7 +444,7 @@ def install(ask=None, confirm_wait=None):
         rb = windows.read_back(windows.WATCH_TASK)
     except windows.TaskUnknown:
         rb = None
-    if rb != expected_task(pythonw, user):
+    if rb is None or not same_task(rb, expected_task(pythonw, user)):
         try:
             windows.remove(task=windows.WATCH_TASK)
             try:
@@ -563,13 +581,14 @@ def cmd(args):
             print(f"(The vault couldn't be opened to record the setup: {type(e).__name__}.)")
         print("Screen capture settings reset to the defaults (messaging apps and Chrome are timeline-only).")
         return 0
-    # First use and running: these prepare the home.
-    try:
-        screen.prepare()
-    except screen.SettingsError as e:
-        print(f"Screen capture settings need attention: {e}")
-        return 1
     if args.apps:
+        # --apps and --install prepare the home (a first use, or lost settings, which prepare refuses). The run path
+        # doesn't: run() prepares with a catch-all, fails closed and retries, so a broken home never ends it early.
+        try:
+            screen.prepare()
+        except screen.SettingsError as e:
+            print(f"Screen capture settings need attention: {e}")
+            return 1
         show_apps()
         return 0
     if sys.platform != "win32":

@@ -287,7 +287,7 @@ def read_back(task):
             return None
         raise TaskUnknown(f"the task {task!r} exists but couldn't be read")
     try:
-        root = ET.fromstring(re.sub(r"^﻿?\s*<\?xml[^>]*\?>", "", decode(r.stdout)))
+        root = ET.fromstring(re.sub(r"^\ufeff?\s*<\?xml[^>]*\?>", "", decode(r.stdout)))
     except ET.ParseError:
         raise TaskUnknown(f"the task {task!r} couldn't be parsed") from None
     f = lambda path: (root.findtext(path, None, NS) or "").strip()

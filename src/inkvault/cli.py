@@ -215,6 +215,10 @@ def fmt_span(lo, hi):
 
 def cmd_forget(args):
     from . import browsers, forget, screen
+    if args.until and not args.since:
+        print("--until only goes with --since (a time range); --app removes everything of that app. "
+              "Nothing was removed.")
+        return 1
     if args.app:
         what, value, asked = "screen-app", args.app, None
     else:

@@ -308,3 +308,24 @@ def test_a_heartbeat_failure_of_any_kind_never_raises(rig, monkeypatch):
     monkeypatch.setattr(screen, "write_atomic", lambda *a: (_ for _ in ()).throw(TypeError("odd")))
     ticks(w, clock, 20)
     assert w.last_error == "heartbeat: TypeError"
+
+
+def test_a_spinner_tick_between_submit_and_answer_keeps_the_read(rig):       # I3
+    from inkvault.stretches import Identity
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 16)
+    state["window"] = Identity(1, 10, 1, "Discord.exe", "⠙ Chat")
+    read_once(w, clock, sup, ["text read while the title spinner ticked"])
+    assert len(rows(conn, "screen_text")) == 1
+
+
+def test_a_persistent_database_error_is_logged_once(rig, monkeypatch):      # log only when it changes
+    from inkvault import paths, screenstore
+    w, clock, sup, state, conn = rig
+
+    def broken(c, wr):
+        raise screenstore.StoreError("OperationalError: disk I/O error")
+    monkeypatch.setattr(screenstore, "apply", broken)
+    ticks(w, clock, 12)
+    lines = [x for x in paths.watch_log().read_text(encoding="utf-8").splitlines() if "database:" in x]
+    assert len(lines) == 1 and "disk I/O" in w.last_error

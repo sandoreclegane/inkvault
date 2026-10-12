@@ -71,3 +71,9 @@ def test_an_error_while_recording_is_reported(home, capsys, monkeypatch):
     monkeypatch.setattr("inkvault.forget.screen_request", boom)
     assert run("forget", "--screen", "--app", "discord.exe", "--yes") == 1
     assert "RuntimeError" in capsys.readouterr().out
+
+
+def test_until_without_since_is_rejected_and_removes_nothing(home, capsys):
+    assert run("forget", "--screen", "--app", "Discord.exe", "--until", "2026-10-12", "--yes") == 1
+    assert "--until only goes with --since" in capsys.readouterr().out
+    assert recorded() == []

@@ -113,3 +113,48 @@ def test_drop_forgets_without_writing():
     run(c, [(win(), 0, False)] * 3)
     c.drop()
     assert c.open is None and c.close(T0) == []
+
+
+def test_a_spinner_in_the_title_is_one_stretch_and_a_read_comes_due():     # I3
+    glyphs = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    polls = [(win(f"{glyphs[i % len(glyphs)]} task"), 0, False) for i in range(20)]
+    acts = run(core(), polls, s=settings())
+    assert kinds(acts).count("Opened") == 1 and "Closed" not in kinds(acts)
+    reads = [(i, a) for i, a in acts if type(a).__name__ == "ReadDue"]
+    assert [i for i, _ in reads] == [15] and reads[0][1].identity.title == f"{glyphs[15 % 10]} task"
+    assert acts[0][1].identity.title == "⠋ task"                           # the stretch keeps its first title
+
+
+def test_alternating_symbols_and_a_ticking_timer_are_one_stretch_each():   # I3
+    for titles in (["✳ Claude Code", "✶ Claude Code"] * 6, [f"Build 0:{40 + i}" for i in range(12)]):
+        acts = run(core(), [(win(t), 0, False) for t in titles])
+        assert kinds(acts).count("Opened") == 1 and "Closed" not in kinds(acts)
+
+
+def test_a_real_title_change_is_still_two_stretches():                    # I3
+    acts = run(core(), [(win("Inbox"), 0, False)] * 3 + [(win("Drafts"), 0, False)] * 3)
+    assert kinds(acts) == ["Opened", "Closed", "Opened"]
+
+
+def test_a_changed_process_is_never_merged_by_a_matching_title():          # I3
+    for other in (win("Chat", hwnd=2), win("Chat", pid=11), win("Chat", created=2), win("Chat", exe="Teams.exe")):
+        acts = run(core(), [(win(), 0, False)] * 3 + [(other, 0, False)] * 3)
+        assert kinds(acts)[:2] == ["Opened", "Closed"], other
+
+
+def test_title_key():
+    from inkvault.stretches import title_key
+    assert title_key("⠋ task ⠙") == "task" and title_key("Build 0:41") == title_key("Build 0:42") == "Build #:#"
+    assert title_key("") == "" and title_key(None) == "" and title_key("...") == ""
+
+
+def test_ended_never_goes_backwards_when_the_clock_steps_back():          # M: monotonic ended
+    from inkvault.stretches import Extended, Sample
+    c, s, w, out = core(), settings(), win(), []
+    utcs = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52,
+            54, 56, 58, 60, -300, -298, -296, -294, -292, -290, -288, -286, -284, -282, -280, -278, -276, -274, -272,
+            -270, -268]
+    for i, u in enumerate(utcs):
+        out += c.step(Sample(i * 2.0, T0 + timedelta(seconds=u), w, 0, False), s)
+    ended = [a.ended for a in out if isinstance(a, Extended)]
+    assert len(ended) >= 2 and ended == sorted(ended)

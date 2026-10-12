@@ -15,6 +15,9 @@ SYNCHRONIZE = 0x00100000
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 JobObjectExtendedLimitInformation = 9
 GR_GDIOBJECTS = 0
+TOKEN_QUERY = 0x0008
+TokenUser = 1
+MB_OK, MB_ICONINFORMATION, MB_SETFOREGROUND = 0x0, 0x40, 0x10000
 _api = None
 
 
@@ -55,6 +58,7 @@ def api():
     k = ctypes.WinDLL("kernel32", use_last_error=True)
     g = ctypes.WinDLL("gdi32", use_last_error=True)
     d = ctypes.WinDLL("dwmapi", use_last_error=True)
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
     H, P = W.HANDLE, ctypes.POINTER
     _sig(u.GetForegroundWindow, W.HWND)
     _sig(u.IsWindowVisible, W.BOOL, W.HWND)
@@ -74,6 +78,7 @@ def api():
     _sig(u.GetThreadDpiAwarenessContext, H)
     _sig(u.GetAwarenessFromDpiAwarenessContext, ctypes.c_int, H)
     _sig(u.GetGuiResources, W.DWORD, H, W.DWORD)
+    _sig(u.MessageBoxW, ctypes.c_int, W.HWND, W.LPCWSTR, W.LPCWSTR, W.UINT)
     _sig(k.OpenProcess, H, W.DWORD, W.BOOL, W.DWORD)
     _sig(k.CloseHandle, W.BOOL, H)
     _sig(k.QueryFullProcessImageNameW, W.BOOL, H, W.DWORD, W.LPWSTR, P(W.DWORD))
@@ -81,6 +86,7 @@ def api():
     _sig(k.GetExitCodeProcess, W.BOOL, H, P(W.DWORD))
     _sig(k.GetTickCount64, ctypes.c_ulonglong)
     _sig(k.GetCurrentProcess, H)
+    _sig(k.LocalFree, ctypes.c_void_p, ctypes.c_void_p)
     _sig(k.CreateJobObjectW, H, ctypes.c_void_p, W.LPCWSTR)
     _sig(k.SetInformationJobObject, W.BOOL, H, ctypes.c_int, ctypes.c_void_p, W.DWORD)
     _sig(k.AssignProcessToJobObject, W.BOOL, H, H)
@@ -95,8 +101,11 @@ def api():
          W.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, W.DWORD)
     _sig(g.GetDIBits, ctypes.c_int, W.HDC, W.HBITMAP, W.UINT, W.UINT, ctypes.c_void_p, ctypes.c_void_p, W.UINT)
     _sig(d.DwmGetWindowAttribute, ctypes.c_long, W.HWND, W.DWORD, ctypes.c_void_p, W.DWORD)
+    _sig(adv.OpenProcessToken, W.BOOL, H, W.DWORD, P(H))
+    _sig(adv.GetTokenInformation, W.BOOL, H, ctypes.c_int, ctypes.c_void_p, W.DWORD, P(W.DWORD))
+    _sig(adv.ConvertSidToStringSidW, W.BOOL, ctypes.c_void_p, P(ctypes.c_void_p))
     # Resolve every function now, so test_every_binding_is_typed sees them all.
-    _api = SimpleNamespace(user32=u, kernel32=k, gdi32=g, dwmapi=d)
+    _api = SimpleNamespace(user32=u, kernel32=k, gdi32=g, dwmapi=d, advapi32=adv)
     return _api
 
 
@@ -231,3 +240,34 @@ def process_alive(pid):
 def gdi_objects():
     a = api()
     return a.user32.GetGuiResources(a.kernel32.GetCurrentProcess(), GR_GDIOBJECTS)
+
+
+def current_user_sid():
+    """The signed-in user's SID as a string (S-1-5-21-...), or None if anything fails. Task Scheduler may export
+    a task's user as this instead of the domain and account name."""
+    try:
+        a = api()
+        k, adv = a.kernel32, a.advapi32
+        token = W.HANDLE()
+        if not adv.OpenProcessToken(k.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(token)):
+            return None
+        try:
+            size = W.DWORD()
+            adv.GetTokenInformation(token, TokenUser, None, 0, ctypes.byref(size))   # fails, filling in the size
+            if not size.value:
+                return None
+            buf = ctypes.create_string_buffer(size.value)
+            if not adv.GetTokenInformation(token, TokenUser, buf, size.value, ctypes.byref(size)):
+                return None
+            sid = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]   # TOKEN_USER starts with the SID pointer
+            text = ctypes.c_void_p()
+            if not sid or not adv.ConvertSidToStringSidW(sid, ctypes.byref(text)):
+                return None
+            try:
+                return ctypes.wstring_at(text.value)
+            finally:
+                k.LocalFree(text)
+        finally:
+            k.CloseHandle(token)
+    except Exception:  # noqa: BLE001 — a missing SID only makes the install check stricter
+        return None

@@ -273,3 +273,70 @@ def test_status_unknown_task_state(home, monkeypatch):
         raise windows.TaskUnknown("x")
     monkeypatch.setattr(windows, "read_back", unknown)
     assert any("sign-in task: unknown" in l for l in watch.status_lines())
+
+
+def test_the_run_path_reaches_run_with_lost_settings(home, monkeypatch):           # I1
+    from inkvault import paths, screen, watch
+    screen.prepare()
+    paths.screen_file().unlink()                                                   # marker set, settings lost
+    called = []
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(watch, "run", lambda: called.append(1) or 0)
+    assert run("watch") == 0 and called == [1]
+
+
+def test_the_run_path_reaches_run_when_the_vault_cant_be_opened(home, monkeypatch):   # I1
+    import sqlite3
+
+    from inkvault import export, watch
+    monkeypatch.setattr(sys, "platform", "win32")
+    called = []
+
+    def broken():
+        raise sqlite3.OperationalError("unable to open database file")
+    monkeypatch.setattr(export, "open_vault", broken)
+    monkeypatch.setattr(watch, "run", lambda: called.append(1) or 0)
+    assert run("watch") == 0 and called == [1]
+
+
+def test_install_reports_a_vault_that_cant_be_opened(win, monkeypatch, capsys):    # I1
+    import sqlite3
+
+    from inkvault import export, watch
+    monkeypatch.setattr(export, "open_vault", lambda: (_ for _ in ()).throw(sqlite3.OperationalError("locked")))
+    assert watch.install(ask=lambda q: False) == 1
+    assert "OperationalError" in capsys.readouterr().out and win["calls"] == []
+
+
+SID = "S-1-5-21-111-222-333-1001"
+
+
+def read_back_with(win, monkeypatch, **changes):
+    from inkvault import winapi
+    from inkvault.schedulers import windows
+    monkeypatch.setattr(winapi, "current_user_sid", lambda: SID)
+    base = windows.read_back
+
+    def patched(task):
+        rb = base(task)
+        return None if rb is None else {**rb, **changes}
+    monkeypatch.setattr(windows, "read_back", patched)
+
+
+@pytest.mark.parametrize("changes", [
+    {"user": SID, "trigger_user": SID},                       # exported as the SID
+    {"user": "pc\\ME", "trigger_user": "PC\\me"},            # another case
+])
+def test_install_accepts_the_same_user_in_another_form(win, monkeypatch, changes):   # I2
+    from inkvault import watch
+    read_back_with(win, monkeypatch, **changes)
+    assert watch.install(ask=lambda q: False) == 0 and "delete" not in win["calls"]
+
+
+@pytest.mark.parametrize("changes", [{"user": "PC\\other"}, {"trigger_user": "S-1-5-21-9-9-9-1001"},
+                                     {"limit": "PT72H"}])
+def test_install_rejects_another_user_or_any_other_difference(win, monkeypatch, changes, capsys):   # I2
+    from inkvault import watch
+    read_back_with(win, monkeypatch, **changes)
+    assert watch.install(ask=lambda q: False) == 1 and "delete" in win["calls"]
+    assert "didn't read back as expected" in capsys.readouterr().out

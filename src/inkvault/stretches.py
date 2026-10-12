@@ -4,6 +4,8 @@ A stretch is written from its second poll (one poll is a flick), extended every 
 poll for a window change, lock, pause or exclusion; at the last input (never before its start) for idle; at the
 earlier poll when two polls are more than 30 s apart. Reads need 30 s of dwell in the stretch AND 120 s since this
 window (hwnd, pid, process creation time) was last read."""
+import re
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
@@ -27,6 +29,29 @@ class Identity:
     @property
     def window(self):
         return self.hwnd, self.pid, self.created
+
+
+def _kept(ch):
+    return unicodedata.category(ch)[0] in "LN"
+
+
+def title_key(title):
+    """A title's identity for stretch purposes (I3): the ends lose anything that isn't a letter or digit (spinner
+    glyphs, braille patterns, symbols, punctuation, spaces) and runs of digits become one "#", so an animated or
+    ticking title ("Build 0:41" -> "Build 0:42") stays one window while a real change ("Inbox" -> "Drafts") doesn't."""
+    t = title or ""
+    lo, hi = 0, len(t)
+    while lo < hi and not _kept(t[lo]):
+        lo += 1
+    while hi > lo and not _kept(t[hi - 1]):
+        hi -= 1
+    return re.sub(r"\d+", "#", t[lo:hi])
+
+
+def same_window(a, b):
+    """The same window showing the same thing: hwnd, pid, creation time and exe exactly; title by title_key."""
+    return ((a.hwnd, a.pid, a.created, a.exe) == (b.hwnd, b.pid, b.created, b.exe)
+            and title_key(a.title) == title_key(b.title))
 
 
 @dataclass(frozen=True)
@@ -96,8 +121,8 @@ class Core:
                 out += self.close(s.utc)
             return out
         o = self.open
-        if o and o.identity == w:
-            o.last, o.last_mono, o.polls = max(s.utc, o.started), s.mono, o.polls + 1
+        if o and same_window(o.identity, w):
+            o.last, o.last_mono, o.polls = max(s.utc, o.last), s.mono, o.polls + 1
             if not o.written and o.polls >= MIN_POLLS:
                 o.written, o.extended_mono = True, s.mono
                 out.append(Opened(o.id, o.identity, o.started, o.last))

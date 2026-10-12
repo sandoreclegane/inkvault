@@ -29,14 +29,15 @@ def own_window(tk_root):
 
 
 INT_RESULT = {"GetWindowTextLengthW", "GetWindowTextW", "ReleaseDC", "SetStretchBltMode", "GetDIBits",
-              "GetAwarenessFromDpiAwarenessContext", "DwmGetWindowAttribute"}
+              "GetAwarenessFromDpiAwarenessContext", "DwmGetWindowAttribute", "MessageBoxW"}
 BOOL_RESULT = {"IsWindowVisible", "IsIconic", "GetWindowRect", "PrintWindow", "GetUserObjectInformationW",
                "CloseDesktop", "GetLastInputInfo", "SetProcessDpiAwarenessContext", "CloseHandle",
                "QueryFullProcessImageNameW", "GetProcessTimes", "GetExitCodeProcess", "SetInformationJobObject",
-               "AssignProcessToJobObject", "PeekNamedPipe", "DeleteObject", "DeleteDC", "StretchBlt"}
+               "AssignProcessToJobObject", "PeekNamedPipe", "DeleteObject", "DeleteDC", "StretchBlt",
+               "OpenProcessToken", "GetTokenInformation", "ConvertSidToStringSidW"}
 HANDLE_RESULT = {"GetForegroundWindow", "GetWindowDC", "OpenInputDesktop", "OpenProcess", "CreateJobObjectW",
                  "GetCurrentProcess", "CreateCompatibleDC", "CreateCompatibleBitmap", "SelectObject",
-                 "GetThreadDpiAwarenessContext"}
+                 "GetThreadDpiAwarenessContext", "LocalFree"}
 
 
 @windows
@@ -45,7 +46,7 @@ def test_every_binding_is_typed():
     from inkvault import winapi
     a = winapi.api()
     seen = set()
-    for dll in (a.user32, a.kernel32, a.gdi32, a.dwmapi):
+    for dll in (a.user32, a.kernel32, a.gdi32, a.dwmapi, a.advapi32):
         for name, f in vars(dll).items():
             if isinstance(f, ctypes._CFuncPtr):
                 seen.add(name)
@@ -104,3 +105,10 @@ def test_job_kills_the_child_when_its_parent_dies():
     finally:
         if p.poll() is None:
             p.kill()
+
+
+@windows
+def test_current_user_sid_is_a_sid_string():
+    from inkvault import winapi
+    sid = winapi.current_user_sid()
+    assert isinstance(sid, str) and sid.startswith("S-1-")
