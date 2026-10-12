@@ -93,7 +93,7 @@ def test_a_deaf_worker_never_blocks_submit():
         s.close()
 
 
-@pytest.mark.parametrize("mode", ["huge", "garbage", "array", "null", "badstatus", "badlines"])
+@pytest.mark.parametrize("mode", ["huge", "garbage", "array", "null", "badstatus", "badlines", "nested"])
 def test_bad_answers_restart_the_worker(mode):                               # P10
     s = sup(mode, timeout=2.0)
     try:
@@ -148,3 +148,28 @@ def test_close_reaps_without_waiting_on_a_hang():
     t = time.monotonic()
     s.close()
     assert time.monotonic() - t < 2.0 and proc.poll() is not None
+
+
+def test_a_spawn_failure_is_not_raised_to_the_loop(monkeypatch):
+    from inkvault import worker
+    real = worker.spawn
+    monkeypatch.setattr(worker, "spawn", lambda argv: (_ for _ in ()).throw(OSError(2, "missing")))
+    s = sup("ok")
+    try:
+        assert s.submit(req()) is None and s.proc is None and not s.busy()
+        monkeypatch.setattr(worker, "spawn", real)
+        rid = s.submit(req())
+        assert wait_for(s)["id"] == rid
+    finally:
+        s.close()
+
+
+def test_requests_carry_exactly_their_keys():
+    s = sup("ok")
+    try:
+        assert s.submit({**req(), "title": "secret"}) is None and s.dropped_requests == 1
+        no_exe = req(); del no_exe["exe"]
+        assert s.submit(no_exe) is None and s.dropped_requests == 2
+        assert s.submit(req(exe=5)) is None and s.dropped_requests == 3
+    finally:
+        s.close()

@@ -32,10 +32,12 @@ def _int(v):
 
 
 HEX = frozenset("0123456789abcdef")
+REQUEST_KEYS = frozenset(("id", "hwnd", "pid", "created", "exe", "title_sha256"))
 
 
 def check_request(o):
-    if not (isinstance(o, dict) and all(_int(o.get(k)) for k in ("id", "hwnd", "pid", "created"))
+    if not (isinstance(o, dict) and set(o) == REQUEST_KEYS
+            and all(_int(o.get(k)) for k in ("id", "hwnd", "pid", "created"))
             and isinstance(o.get("exe"), str) and isinstance(o.get("title_sha256"), str)
             and len(o["title_sha256"]) == 64 and set(o["title_sha256"]) <= HEX):
         raise ProtocolError("bad request")
@@ -74,7 +76,7 @@ class Decoder:
             body, self.buf = self.buf[4:4 + n], self.buf[4 + n:]
             try:
                 obj = json.loads(body)
-            except ValueError:
+            except (ValueError, RecursionError):
                 raise ProtocolError("not JSON") from None
             out.append(self.check(obj))
         return out
@@ -131,20 +133,26 @@ class Supervisor:
         return until is not None and self.clock() < until
 
     def submit(self, request):
-        if self.busy() or self.cooling(request["exe"]):
+        if self.busy():
             return None
-        full = {**request, "id": self.next_id + 1}
+        full = {**request, "id": self.next_id + 1} if isinstance(request, dict) else None
         try:
             check_request(full)
         except ProtocolError:
             self.dropped_requests += 1
+            return None
+        if self.cooling(full["exe"]):
             return None
         msg = encode(full)
         if len(msg) > MAX_REQUEST:
             self.dropped_requests += 1
             return None
         if self.proc is None:
-            self.proc, self.job, self.job_error = spawn(self.argv)
+            try:
+                self.proc, self.job, self.job_error = spawn(self.argv)
+            except OSError:
+                self.restarts += 1
+                return None
             self.decoder = Decoder(MAX_RESPONSE, check_response)
         self.next_id += 1
         try:

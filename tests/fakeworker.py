@@ -31,6 +31,8 @@ while True:
         send({"array": [], "null": None,
               "badstatus": {"id": req["id"], "status": "maybe", "lines": [], "colors": 0, "error": ""},
               "badlines": {"id": req["id"], "status": "ok", "lines": "text", "colors": 0, "error": ""}}[mode])
+    elif mode == "nested":
+        out.write(struct.pack(">I", 200000) + b"[" * 200000); out.flush()
     elif mode == "partial":
         out.write(struct.pack(">I", 50) + b'{"id"'); out.flush(); time.sleep(3600)
     elif mode == "late":                 # answers after a delay (abandon/late-answer tests)
