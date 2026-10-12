@@ -27,7 +27,9 @@ def missing_table(e):
 def matcher(what, value):
     if what == "profile":
         return lambda profile, url: profile == value
-    return lambda profile, url: history.skipped(url, [value])
+    if what == "site":
+        return lambda profile, url: history.skipped(url, [value])
+    raise ValueError(f"unknown removal kind {what!r}")
 
 
 def digest_days(visits):
@@ -38,6 +40,90 @@ def digest_days(visits):
         day = datetime.fromisoformat(created.replace("Z", "+00:00")).astimezone(timezone.utc).date()
         days |= {(day + timedelta(d)).isoformat() for d in (-1, 0, 1)}
     return days
+
+
+SCREEN_KINDS = ("screen-app", "screen-range")
+
+
+def screen_days(spans):
+    """Every UTC date a stretch touches, ±1 day: the superset digest_days uses (spec §8, R6)."""
+    from . import screen
+    days = set()
+    for started, ended in spans:
+        day, last = screen.parse(started).date(), screen.parse(ended).date()
+        while day <= last:
+            days |= {(day + timedelta(d)).isoformat() for d in (-1, 0, 1)}
+            day += timedelta(1)
+    return days
+
+
+def screen_select(db, what, value):
+    from . import screen
+    if what == "screen-app":
+        return db.execute("SELECT id, started, ended FROM screen_stretches WHERE lower(app) = lower(?)",
+                          (value,)).fetchall()
+    if what == "screen-range":
+        r = json.loads(value)
+        return db.execute("SELECT id, started, ended FROM screen_stretches WHERE 1=1" + screen.overlap_sql(),
+                          (r["until"], r["since"])).fetchall()
+    raise ValueError(f"unknown removal kind {what!r}")
+
+
+def span(found):
+    return (min(f[1] for f in found), max(f[2] for f in found)) if found else (None, None)
+
+
+def screen_preview(what, value):
+    if not paths.vault_db().exists():
+        return 0, None, None
+    db = paths.connect_ro(paths.vault_db())
+    try:
+        found = screen_select(db, what, value)
+    finally:
+        db.close()
+    return (len(found), *span(found))
+
+
+def screen_request(what, value):
+    """Select, record the exact targets and their days, and bump the removal generation, in one BEGIN IMMEDIATE:
+    the watcher's writes take the same lock, so nothing grows or appears in between (R3)."""
+    if not paths.vault_db().exists():
+        return 0, None, None
+    vault = export.open_vault()
+    vault.commit()
+    vault.isolation_level = None
+    try:
+        vault.execute("BEGIN IMMEDIATE")
+        found = screen_select(vault, what, value)
+        if not found:
+            vault.execute("ROLLBACK")
+            return 0, None, None
+        days = sorted(screen_days([(f[1], f[2]) for f in found]))
+        paths.rebuild_marker().write_text(f"removing {what}\n", encoding="utf-8")
+        paths.dashboard().unlink(missing_ok=True)
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        rid = vault.execute("INSERT INTO browser_removals (what, value, days, created) VALUES (?,?,?,?)",
+                            (what, value, json.dumps(days), now)).lastrowid
+        vault.executemany("INSERT INTO screen_removal_targets VALUES (?,?)", ((rid, f[0]) for f in found))
+        vault.execute("INSERT OR REPLACE INTO meta VALUES ('screen_removal_gen', CAST(coalesce((SELECT value FROM "
+                      "meta WHERE key='screen_removal_gen'), 0) + 1 AS TEXT))")
+        vault.execute("COMMIT")
+        return (len(found), *span(found))
+    except BaseException:
+        if vault.in_transaction:
+            vault.execute("ROLLBACK")
+        raise
+    finally:
+        vault.close()
+
+
+def delete_screen(vault, rid):
+    ids = [r[0] for r in vault.execute("SELECT stretch_id FROM screen_removal_targets WHERE removal_id=?", (rid,))]
+    for part in chunks(ids):
+        marks = ",".join("?" * len(part))
+        vault.execute(f"DELETE FROM screen_text WHERE stretch_id IN ({marks})", part)
+        vault.execute(f"DELETE FROM screen_stretches WHERE id IN ({marks})", part)
+    vault.execute("DELETE FROM screen_removal_targets WHERE removal_id=?", (rid,))
 
 
 def record(vault, planned):
@@ -117,6 +203,12 @@ def apply_pending():
     try:
         pending_rows = vault.execute("SELECT id, what, value, days FROM browser_removals ORDER BY id").fetchall()
         for rid, what, value, days in pending_rows:
+            if what in SCREEN_KINDS:
+                delete_digests(json.loads(days))
+                delete_screen(vault, rid)
+                vault.execute("DELETE FROM browser_removals WHERE id=?", (rid,))
+                vault.commit()
+                continue
             keep_choice(what, value)
             delete_digests(json.loads(days))
             pick = matcher(what, value)
