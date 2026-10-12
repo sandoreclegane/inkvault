@@ -54,3 +54,14 @@ def test_long_unicode_titles_survive():
     from inkvault import redact
     out = redact.clean_title("@名前 🎮 " * 60 + "- Discord")
     assert len(out) == 300 and out.startswith("@名前 🎮")
+
+
+def test_secret_straddling_the_clip_is_fully_masked():
+    from inkvault import redact
+    out = redact.clean_title("a" * 290 + " ghp_0123456789abcdefABCDEF0123456789abcd")
+    assert "ghp_" not in out and len(out) == 300
+
+
+def test_clean_text_drops_a_line_that_is_only_a_secret():
+    from inkvault import redact
+    assert redact.clean_text(["ghp_0123456789abcdefABCDEF0123456789abcd"]) is None
