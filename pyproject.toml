@@ -19,6 +19,15 @@ classifiers = [
     "Topic :: Utilities",
 ]
 
+[project.optional-dependencies]
+screen = [
+    "winrt-Windows.Media.Ocr>=3; sys_platform == 'win32'",
+    "winrt-Windows.Graphics.Imaging>=3; sys_platform == 'win32'",
+    "winrt-Windows.Storage.Streams>=3; sys_platform == 'win32'",
+    "winrt-Windows.Foundation>=3; sys_platform == 'win32'",
+    "winrt-Windows.Foundation.Collections>=3; sys_platform == 'win32'",
+]
+
 [project.urls]
 Homepage = "https://github.com/sandoreclegane/inkvault"
 Issues = "https://github.com/sandoreclegane/inkvault/issues"
@@ -27,7 +36,7 @@ Issues = "https://github.com/sandoreclegane/inkvault/issues"
 inkvault = "inkvault.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "tzdata>=2024.1"]
+dev = ["pytest>=8", "tzdata>=2024.1", "inkvault[screen]"]
 
 [build-system]
 requires = ["hatchling"]
