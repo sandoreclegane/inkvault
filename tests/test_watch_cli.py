@@ -151,6 +151,8 @@ def test_install_refuses_an_old_tool(win, capsys):
     win["version"] = (0, 2, 1)
     assert watch.install(ask=lambda q: False) == 1 and "inkvault[screen]" in capsys.readouterr().out
     assert win["calls"] == []
+    from inkvault import paths
+    assert not paths.screen_file().exists()
 
 
 def test_install_removes_a_task_that_reads_back_wrong(win, monkeypatch, capsys):
@@ -194,3 +196,80 @@ def test_status_lines(home, monkeypatch):
     from inkvault.schedulers import windows
     monkeypatch.setattr(windows, "read_back", lambda task: None)
     assert any(l.startswith("screen capture:") for l in watch.status_lines())
+
+
+def test_install_reports_a_failed_removal_truthfully(win, monkeypatch, capsys):
+    from inkvault import watch
+    from inkvault.schedulers import windows
+    real = windows.read_back
+    monkeypatch.setattr(windows, "read_back", lambda t: {**real(t), "limit": "PT72H"} if real(t) else None)
+
+    def boom(task=None):
+        raise RuntimeError("denied")
+    monkeypatch.setattr(windows, "remove", boom)
+    assert watch.install(ask=lambda q: False) == 1
+    out = capsys.readouterr().out
+    assert "couldn't be removed" in out and "so it was removed" not in out
+
+
+def test_install_handles_an_unknown_read_back(win, monkeypatch, capsys):
+    from inkvault import watch
+    from inkvault.schedulers import windows
+
+    def unknown(task):
+        raise windows.TaskUnknown("access denied")
+    monkeypatch.setattr(windows, "read_back", unknown)
+    assert watch.install(ask=lambda q: False) == 1
+    assert "so it was removed" not in capsys.readouterr().out
+
+
+def test_install_reports_a_registration_failure(win, monkeypatch, capsys):
+    from inkvault import watch
+    from inkvault.schedulers import windows
+
+    def refuse(*a, **k):
+        raise RuntimeError("no")
+    monkeypatch.setattr(windows, "install_logon", refuse)
+    assert watch.install(ask=lambda q: False) == 1 and "refused to register" in capsys.readouterr().out
+
+
+def test_install_reports_a_start_failure(win, monkeypatch, capsys):
+    from inkvault import watch
+    from inkvault.schedulers import windows
+
+    def refuse(task):
+        raise RuntimeError("no")
+    monkeypatch.setattr(windows, "run_task", refuse)
+    assert watch.install(ask=lambda q: False) == 1 and "couldn't be started now" in capsys.readouterr().out
+
+
+def test_status_lock_held_without_a_heartbeat(home, monkeypatch):
+    from inkvault import watch
+    monkeypatch.setattr(watch, "lock_held", lambda: True)
+    monkeypatch.setattr(watch, "lock_owner", lambda: 99)
+    assert "screen capture: running (pid 99 from watch.lock), heartbeat unreadable" in watch.status_lines()
+
+
+def test_status_shows_heartbeat_errors_and_never_raises_on_a_malformed_one(home, monkeypatch):
+    from inkvault import paths, screen, watch
+    monkeypatch.setattr(watch, "lock_held", lambda: True)
+    monkeypatch.setattr(watch, "lock_owner", lambda: 5)
+    paths.watch_heartbeat().write_text(json.dumps(
+        {"pid": 5, "utc": screen.iso(screen.now()), "settings_error": "SettingsError", "db_error": "OperationalError"}))
+    out = watch.status_lines()
+    assert "  settings: SettingsError" in out and "  database: OperationalError" in out
+    for bad in ('{"pid": 5}', '{"utc": "garbage"}', '{"utc": 5, "open": 3}', '[1, 2]', 'not json',
+                json.dumps({"utc": screen.iso(screen.now()), "open": "x", "cooling": 4})):
+        paths.watch_heartbeat().write_text(bad)
+        assert any("heartbeat unreadable" in l for l in watch.status_lines()), bad
+
+
+def test_status_unknown_task_state(home, monkeypatch):
+    from inkvault import watch
+    from inkvault.schedulers import windows
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    def unknown(task):
+        raise windows.TaskUnknown("x")
+    monkeypatch.setattr(windows, "read_back", unknown)
+    assert any("sign-in task: unknown" in l for l in watch.status_lines())

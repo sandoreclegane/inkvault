@@ -383,7 +383,6 @@ def expected_task(pythonw, user):
 def install(ask=None, confirm_wait=None):
     from . import schedule
     from .schedulers import windows
-    screen.prepare()
     tool = schedule.tool_python()
     if not tool or (schedule.installed_version(tool) or (0,)) < MIN_TOOL:
         print("Install or update the tool with screen capture first: "
@@ -395,6 +394,11 @@ def install(ask=None, confirm_wait=None):
         schedule.check_task_scheduler_argv(argv)
     except schedule.ScheduleError as e:
         print(e)
+        return 1
+    try:
+        screen.prepare()
+    except screen.SettingsError as e:
+        print(f"Screen capture settings need attention: {e}")
         return 1
     if ask is None:
         from . import browsers
@@ -411,8 +415,13 @@ def install(ask=None, confirm_wait=None):
         (add_to if chrome else remove_from)("text_apps", screen.CHROME)(d)
     if change(apply_answers, "Text apps chosen.") != 0:
         return 1
-    user = windows.current_user()
-    windows.install_logon(argv, user)
+    try:
+        user = windows.current_user()
+        windows.install_logon(argv, user)
+    except (RuntimeError, OSError) as e:
+        print(f"Task Scheduler refused to register the sign-in task ({e}); nothing new is recording. "
+              "Run `inkvault watch --uninstall` to clear anything left over.")
+        return 1
     try:
         rb = windows.read_back(windows.WATCH_TASK)
     except windows.TaskUnknown:
@@ -420,9 +429,17 @@ def install(ask=None, confirm_wait=None):
     if rb != expected_task(pythonw, user):
         try:
             windows.remove(task=windows.WATCH_TASK)
-        except RuntimeError:
-            pass
-        print("The sign-in task didn't read back as expected, so it was removed; nothing new is recording.")
+            try:
+                gone = windows.read_back(windows.WATCH_TASK) is None
+            except windows.TaskUnknown:
+                gone = False
+        except (RuntimeError, OSError):
+            gone = False
+        if gone:
+            print("The sign-in task didn't read back as expected, so it was removed; nothing new is recording.")
+        else:
+            print("The sign-in task didn't read back as expected and couldn't be removed or confirmed gone; "
+                  "run `inkvault watch --uninstall`. Nothing new is recording.")
         return 1
     make_shortcuts(pythonw)
     if lock_held():   # R4: a watcher already running (started by hand) isn't proof the task's action works
@@ -430,7 +447,11 @@ def install(ask=None, confirm_wait=None):
               "and starts screen capture from the next sign-in.")
         return 0
     since = screen.now()
-    windows.run_task(windows.WATCH_TASK)
+    try:
+        windows.run_task(windows.WATCH_TASK)
+    except (RuntimeError, OSError) as e:
+        print(f"The sign-in task is registered, but couldn't be started now ({e}); it starts at the next sign-in.")
+        return 1
     if not running_confirmed(STOP_WAIT if confirm_wait is None else confirm_wait, since):
         print("The sign-in task is registered, but the watcher hasn't confirmed it's running. "
               "Check `inkvault status` and watch.log.")
@@ -561,24 +582,31 @@ def cmd(args):
 
 def status_lines():
     out = []
-    try:
-        hb = json.loads(paths.watch_heartbeat().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        hb = None
-    if hb and lock_held():
-        age = int((screen.now() - screen.parse(hb["utc"])).total_seconds())
-        state = hb.get("state") or ("paused" if hb.get("paused") else
-                                    ("on, in " + hb["open"]["app"] if hb.get("open") else "on"))
-        out.append(f"screen capture: {state} (heartbeat {age} s ago, pid {hb.get('pid')})")
+    held = lock_held()
+    hb = heartbeat()
+    line = None
+    if isinstance(hb, dict) and held:
+        try:
+            age = int((screen.now() - screen.parse(hb["utc"])).total_seconds())
+            open_ = hb.get("open")
+            state = hb.get("state") or ("paused" if hb.get("paused") else
+                                        ("on, in " + open_["app"] if open_ else "on"))
+            line = f"screen capture: {state} (heartbeat {age} s ago, pid {hb.get('pid')})"
+        except (TypeError, KeyError, ValueError, AttributeError):
+            line = None
+    if line:
+        out.append(line)
         for key, label in (("settings_error", "settings"), ("db_error", "database"), ("heartbeat_error", "heartbeat")):
             if hb.get(key):
                 out.append(f"  {label}: {hb[key]}")
-        if hb.get("cooling"):
-            out.append("  text paused after a slow read: " + ", ".join(hb["cooling"]))
+        if isinstance(hb.get("cooling"), list):
+            out.append("  text paused after a slow read: " + ", ".join(str(x) for x in hb["cooling"]))
         if hb.get("job_error"):
             out.append(f"  {hb['job_error']}")
         if hb.get("dropped_text") or hb.get("busy_gaps"):
             out.append(f"  dropped text: {hb.get('dropped_text', 0)}, busy gaps: {hb.get('busy_gaps', 0)} polls")
+    elif held:
+        out.append(f"screen capture: running (pid {lock_owner()} from watch.lock), heartbeat unreadable")
     else:
         out.append("screen capture: not running")
     if sys.platform == "win32":
