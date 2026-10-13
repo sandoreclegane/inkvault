@@ -21,9 +21,9 @@ def setup(tmp_path, monkeypatch):
     """Chrome/Default with a docs visit (day 1) and a bank visit (day 2), synced and indexed with real (fake-model)
     vectors, a dashboard, and digests for both days plus a Pieces-only day."""
     monkeypatch.setenv("INKVAULT_HOME", str(tmp_path / "vault"))
-    from inkvault import browsers, dashboard, digest, embed, forget, history, index, paths, server
+    from inkvault import browsers, dashboard, digest, embed, forget, history, index, paths, retrieval, server
     monkeypatch.setattr(embed, "load_model", FakeModel)
-    monkeypatch.setattr(server, "_model", None)
+    monkeypatch.setattr(retrieval, "_model", None)
     monkeypatch.setattr(forget, "DIGEST_WAIT", 0)  # a locked digest database fails at once, not after 5 s
     root = tmp_path / "chrome"
     h = webfixtures.chromium_profile(root, "Default", name="Default")
@@ -129,8 +129,8 @@ def test_a_digest_database_without_its_table_is_nothing_to_delete(setup):
 
 
 def test_a_request_in_flight_when_a_removal_starts_never_returns_what_was_removed(setup, monkeypatch):
-    from inkvault import forget, server
-    real = server.keyword_ranked
+    from inkvault import forget, retrieval, server
+    real = retrieval.keyword_ranked
 
     def paused(*a, **k):
         found = real(*a, **k)  # the old index has the bank page
@@ -139,7 +139,7 @@ def test_a_request_in_flight_when_a_removal_starts_never_returns_what_was_remove
         except OSError:  # Windows can't replace search.db while this request has it open: the removal stays recorded
             pass
         return found
-    monkeypatch.setattr(server, "keyword_ranked", paused)
+    monkeypatch.setattr(retrieval, "keyword_ranked", paused)
     answer = server.search_memories("bank", source="web", mode="keyword")
     assert answer in (server.REBUILDING, server.CHANGED)
 

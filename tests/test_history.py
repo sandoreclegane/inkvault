@@ -21,9 +21,9 @@ class FakeModel:
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("INKVAULT_HOME", str(tmp_path / "vault"))
-    from inkvault import embed, server
+    from inkvault import embed, retrieval, server
     monkeypatch.setattr(embed, "load_model", FakeModel)
-    monkeypatch.setattr(server, "_model", None)
+    monkeypatch.setattr(retrieval, "_model", None)
     return tmp_path
 
 
@@ -508,15 +508,15 @@ def test_the_tools_refuse_while_a_removal_is_unfinished(home, monkeypatch):
 
 
 def test_a_tool_whose_files_were_replaced_while_it_worked_asks_again(home, monkeypatch):
-    from inkvault import paths, server
+    from inkvault import paths, retrieval, server
     web_vault(home, monkeypatch)
-    real = server.keyword_ranked
+    real = retrieval.keyword_ranked
 
     def slow(*a, **k):
         rows = real(*a, **k)
         paths.vectors().write_bytes(b"replaced")  # stands in for a search build publishing new files meanwhile
         return rows
-    monkeypatch.setattr(server, "keyword_ranked", slow)
+    monkeypatch.setattr(retrieval, "keyword_ranked", slow)
     assert server.search_memories("backoff", mode="keyword") == server.CHANGED
 
 
