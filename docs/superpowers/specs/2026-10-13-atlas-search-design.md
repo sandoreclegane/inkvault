@@ -69,8 +69,10 @@ Everything MCP's `search_memories` and `get_memory` do today moves here and retu
   - `SearchResult`: `hits`, `more` (bool), `keyword_only` (bool, true when vectors or the model are missing),
     `generation` (the `published()` stamp the answer was read under).
   - `Hit`: `kind`, `id`, `title`, `time` (UTC ISO), `source_label`, `excerpt`, `match`.
-    `match` is either `{"type": "keyword", "spans": [[start, end], ...]}` (character offsets into `excerpt`, built
-    from the FTS snippet markers, never from HTML) or `{"type": "meaning"}`; a meaning-only hit's excerpt is the
+    `match` is either `{"type": "keyword", "spans": [[start, end], ...]}` (UTF-16 offsets into `excerpt`, never
+    from HTML) or `{"type": "meaning"}`. Spans come from FTS snippets made twice with two different private-use
+    marker pairs: a character that differs between the two copies is an inserted boundary, one that matches is the
+    record's own text (kept, even if it equals a marker), so a record can't fake a highlight. A meaning-only hit's excerpt is the
     record's opening text and is never highlighted.
 - `record(ref, around=None, cursor=None) -> Record`
   - `ref` is the namespaced `(kind, id)` pair from a hit, so ids never need to be globally unique.
@@ -135,6 +137,8 @@ freshness.
     `/open?code=…` and exits. If no answer arrives in time, the launcher says "The Atlas is starting or busy; try
     again in a moment" and exits, without starting a second helper.
   - Two simultaneous launches therefore produce exactly one helper: one wins the lock, the other becomes a client.
+  - A lock that can't be taken at all (an error other than "held", e.g. a drive without file locking) starts
+    nothing and says so: no helper runs without owning the lock.
   - `/control/code` accepts only that header, is subject to the same Host check, and is never reachable with the
     browser cookie alone.
 - **Lifetime.** Each open Atlas tab sends `/api/ping` every 60 seconds while visible. With no ping for 30 minutes
@@ -145,9 +149,17 @@ freshness.
   - `GET /api/atlas`: the current `atlas.json`, read fresh on every request (forgetting can delete it at any time).
     If it is missing and no removal is pending, it is built once (under the nightly lock, non-blocking: if the lock
     is busy the page shows "being updated, try again shortly").
-  - `POST /api/search`, `POST /api/record`: JSON in, JSON out, through `retrieval`.
-  - `POST /api/ping`: keep-alive; returns the current generation so an open page can notice a removal.
-- Request bodies over 16 KB are refused (413). Query text is limited to 500 characters.
+  - `POST /api/search`, `POST /api/record`: JSON in, JSON out, through `retrieval`. Every answer carries the
+    generation it was read under. Opening a record sends the generation the page shows; a different current one
+    answers `changed`.
+  - `POST /api/ping`: keep-alive; returns the current generation so an open page can notice a removal, and the
+    **Atlas revision** (from `atlas.json`'s published file, or none), so charts rebuilt on their own are redrawn
+    while the search stays. `/api/atlas` returns the same revision, read before and after the file so one file's
+    data is never labelled with another's revision.
+- Request bodies over 16 KB are refused (413) at once, without reading them. A missing, negative or non-numeric
+  length, or any `Transfer-Encoding`, is refused (400) before reading. Each connection has a 10-second socket
+  timeout: an idle connection or a body that never fully arrives is closed without an answer and never holds a
+  thread. Query text is limited to 500 characters.
 - The vault and search files are opened read-only, per request, exactly as MCP does today.
 
 ### 3.5 `atlas/` (new): the page
@@ -198,7 +210,7 @@ and custom range, the stat tiles, and every existing chart and its table view.
   are highlighted from `spans`; meaning matches say "related by meaning".
 - Screen text is labelled "Screen text". Timeline-only apps show app, window title and times only.
 - Freshness line: "Search index updated 3:04 AM". When screen capture has recorded activity after that, it adds
-  "Newer screen activity appears after tonight's update."
+  "Newer screen activity appears after the next search update."
 - Reader: chats show role and time per message, the matched message marked, **Earlier** / **Later** buttons;
   **Show all** on a cut message. Snippets keep code formatting. Web history shows "Browser history: the page
   itself isn't saved"; its address opens only on click, in a new tab, without a referrer.
@@ -305,11 +317,12 @@ tab the user opened.
   300,000-character message returns all of it in order with no gaps or repeats.
 - **Single instance:** two launches started at the same moment yield one helper; a helper that is slow to answer
   is never replaced; a killed helper's lock is free immediately and the next launch starts a new one.
-- **Real history, on a disposable copy.** Near the end of the build, and again in the code review, the helper runs
-  against a coherent copy of a real vault: `vault.db`, `search.db` and `vectors.npz` taken together under the
-  nightly lock (SQLite backup API for the databases), placed in a temporary InkVault home, used, then deleted.
-  The live vault is never opened by the helper under test. Results are reported as counts and timings only, never
-  content.
+- **Real history, on a disposable snapshot.** Near the end of the build, and again in the code review, the Atlas
+  runs against a snapshot made from **one finished nightly backup** (and, optionally, the model folder), both
+  named by the maintainer and copied as plain files: no live vault, search file, lock or SQLite sidecar is opened,
+  and no other source is read. Search, vectors and the Atlas data are built inside the snapshot, which is created,
+  used and deleted in one `try`/`finally`, so a failure at any step leaves nothing behind. Queries are typed
+  without echo, never put on a command line. Results are counts and timings only, never content.
 - **Speed:** cold and warm search time, reader time, response size and peak memory on a synthetic vault of about
   100,000 records and on the disposable real copy, on stated hardware. Targets: warm search under 2 s, first reader under 1 s. Misses are
   investigated, not promised away.

@@ -376,15 +376,25 @@ def test_atlas_markers_give_spans_in_utf16_units(vault, monkeypatch):
     assert [start, start + len("beacon")] in spans
 
 
-def test_marker_characters_inside_the_text_never_fake_a_highlight(vault):
+@pytest.mark.parametrize("raw", [
+    "a \ue000 lone beacon",                    # unpaired literal marker
+    "\ue000fake\ue001 beacon",                 # balanced literal pair (Codex plan review #5)
+    "\ue001crossed\ue000 beacon",              # crossed
+    "\ue000\ue000nested\ue001 beacon \ue001",  # nested around the real match (private-use characters are word
+                                               # characters to FTS, so "beacon\ue001" would be one token: keep a space)
+    "\ue002second\ue003 pair beacon",          # the second marker pair, literally
+])
+def test_marker_characters_in_the_text_are_kept_and_never_highlighted(vault, raw):
     from inkvault import index, paths, retrieval
     v = sqlite3.connect(paths.vault_db())
-    v.execute("UPDATE raw_records SET raw=json_set(raw, '$.text', ?) WHERE id='a1'", ("a \ue000 trick beacon",))
+    v.execute("UPDATE raw_records SET raw=json_set(raw, '$.text', ?) WHERE id='a1'", (raw,))
     v.commit(); v.close()
     index.build()
     r = retrieval.search("beacon", kinds=["summaries"], markers=retrieval.ATLAS_MARKERS, mode="keyword")
     text, spans = retrieval.excerpt(r.hits[0])
-    assert spans == [] and "\ue000" not in text and "\ue001" not in text
+    assert [text[a:b] for a, b in spans] == ["beacon"]  # all characters here are in the BMP: UTF-16 = Python offsets
+    for ch in "\ue000\ue001\ue002\ue003":
+        assert text.count(ch) == raw.count(ch)  # the record's own characters survive
 
 
 def test_meaning_only_hits_have_no_spans(vault):
@@ -503,7 +513,10 @@ FACTS = {
     "web": (("pages", "host"), None),
 }
 MCP_MARKERS = ("[", "]")
-ATLAS_MARKERS = ("\ue000", "\ue001")  # private-use characters: brackets in the text itself can't fake a match
+ATLAS_MARKERS = ("\ue000", "\ue001")  # the Atlas's markers (private-use characters)\u2026
+SECOND_MARKERS = ("\ue002", "\ue003")  # \u2026and a second pair: each snippet is made with both, so a character that
+# differs between the two copies is a marker FTS inserted, and one that's the same is the record's own text, even when
+# the record itself contains marker characters (Codex plan review #5)
 # The Atlas's source chips (spec §4.2): the kinds each searches, and which events.source it keeps.
 CHIPS = {
     "all": (None, None),
@@ -703,8 +716,12 @@ def keyword_ranked(conn, kind, query, since, until, **opts):
     """opts (Atlas only; MCP passes none): markers=(open, close), event_source="pieces"|"screen"."""
     table, fts, _, col, _, _ = SOURCES[kind]
     o, c = opts.get("markers", MCP_MARKERS)
+    second = ""
+    if (o, c) != MCP_MARKERS:
+        p, q = SECOND_MARKERS
+        second = f", snippet({fts}, {col}, '{p}', '{q}', ' … ', 40) AS snip2"
     params = [fts_query(query)]
-    sql = (f"SELECT t.id, snippet({fts}, {col}, '{o}', '{c}', ' … ', 40) AS snip FROM {fts} JOIN {table} t "
+    sql = (f"SELECT t.id, snippet({fts}, {col}, '{o}', '{c}', ' … ', 40) AS snip{second} FROM {fts} JOIN {table} t "
            f"ON t.rowid = {fts}.rowid WHERE {fts} MATCH ?" + range_filter(kind, since, until, params))
     if kind == "events" and opts.get("event_source") and has_column(conn, "events", "source"):
         sql += " AND t.source = ?"
@@ -740,6 +757,7 @@ class Hit:
     preview: str | None     # the record's first 300 characters
     fact1: str | None = None
     fact2: str | None = None
+    snippet2: str | None = None  # the Atlas only: the same snippet made with SECOND_MARKERS
 
 
 @dataclass
@@ -789,7 +807,7 @@ def search(query, source="all", mode="hybrid", since="", until="", limit=10, *, 
     if event_source:
         opts["event_source"] = event_source
     meaning = mode != "keyword" and (meaning_ready() or not require_model)
-    scores, snippets = {}, {}  # reciprocal rank fusion: each list adds 1/(k + rank) per hit
+    scores, snippets, snippets2 = {}, {}, {}  # reciprocal rank fusion: each list adds 1/(k + rank) per hit
     with db() as conn:
         if source == "web" and not has_table(conn, "pages"):
             return SearchResult(error="Web pages aren't in the search index yet: run `inkvault index`.")
@@ -806,6 +824,8 @@ def search(query, source="all", mode="hybrid", since="", until="", limit=10, *, 
                     key = (kind, r["id"])
                     scores[key] = scores.get(key, 0) + 1 / (RRF_K + rank)
                     snippets[key] = r["snip"]
+                    if "snip2" in r.keys():
+                        snippets2[key] = r["snip2"]
         if meaning:
             for rank, key in enumerate(meaning_ranked([k for k in kinds if k != "screen"], query)):
                 scores[key] = scores.get(key, 0) + 1 / (RRF_K + rank)
@@ -837,7 +857,7 @@ def search(query, source="all", mode="hybrid", since="", until="", limit=10, *, 
                     continue      # one hit per stretch; the OCR row wins (screen spec §6)
                 seen.add(r["stretch"])
             out.append(Hit(kind, id_, r["created"], r["title"], r["display"], snippets.get((kind, id_)), r["preview"],
-                           r["fact1"], r["fact2"]))
+                           r["fact1"], r["fact2"], snippets2.get((kind, id_))))
             if len(out) > offset + limit:
                 break
         notes = []
@@ -852,27 +872,34 @@ def search(query, source="all", mode="hybrid", since="", until="", limit=10, *, 
 
 
 def excerpt(hit, markers=ATLAS_MARKERS):
-    """(text, spans): the snippet without its markers, and where they were, as [start, end) offsets in UTF-16 code
-    units (what the page's JavaScript counts). Meaning-only hits, and snippets whose markers don't pair up
-    (the text itself held a marker character), get no spans: a highlight is never invented."""
-    o, c = markers
+    """(text, spans) for the Atlas: the snippet without the markers FTS inserted, and where they were, as [start, end)
+    offsets in UTF-16 code units (what the page's JavaScript counts).
+
+    The snippet was made twice, with ATLAS_MARKERS and with SECOND_MARKERS. Walking both together, a position where
+    they agree is the record's own character (kept, even if it equals a marker); a position where one has an opening
+    marker and the other the matching opening marker of the second pair is an inserted boundary. Anything else, or
+    two snippets that don't line up, gets no spans: a highlight is never invented. Meaning-only hits have no snippet
+    and show the record's opening text."""
+    plain = " ".join((hit.preview or "").split())
     if not hit.snippet:
-        return " ".join((hit.preview or "").split()), []
+        return plain, []
+    a, b = hit.snippet, hit.snippet2 or ""
+    (ao, ac), (bo, bc) = markers, SECOND_MARKERS
+    if len(a) != len(b):
+        return plain, []
     text, spans, start, pos = [], [], None, 0
-    for ch in hit.snippet:
-        if ch == o and start is None:
+    for x, y in zip(a, b):
+        if x == y:
+            text.append(x)
+            pos += 2 if ord(x) > 0xFFFF else 1
+        elif (x, y) == (ao, bo) and start is None:
             start = pos
-        elif ch == c and start is not None:
+        elif (x, y) == (ac, bc) and start is not None:
             spans.append([start, pos])
             start = None
-        elif ch in (o, c):
-            return hit.snippet.replace(o, "").replace(c, ""), []
         else:
-            text.append(ch)
-            pos += 2 if ord(ch) > 0xFFFF else 1
-    if start is not None:
-        return "".join(text), []
-    return "".join(text), spans
+            return plain, []
+    return "".join(text), ([] if start is not None else spans)
 
 
 def when(ts):
@@ -1208,9 +1235,10 @@ def decode_cursor(s):
     return d
 
 
-def item(kind, id_, created, text, gen, role=None, matched=False, share=ITEM_SHARE):
+def item(kind, id_, created, text, gen, role=None, matched=False, share=ITEM_SHARE, full=None):
+    """full: the whole text's length, when text was already cut by the query."""
     text = text or ""
-    cut = len(text) > share
+    cut = (len(text) if full is None else (full or 0)) > share
     return {"id": id_, "time": when(created), "role": role, "text": text[:share], "truncated": cut,
             "expand": encode_cursor({"op": "expand", "k": kind, "i": id_, "g": gen, "off": share}) if cut else None,
             "matched": matched}
@@ -1239,20 +1267,24 @@ def chat(mid, cursor, gen):
                             (mid,)).fetchone()
         if not head:
             return {"status": "missing"}
-        msgs = conn.execute("SELECT id, created, role, text FROM messages WHERE conversation_id=? "
+        # Lengths only: a long conversation never loads every message's text (Codex plan review, limits).
+        msgs = conn.execute("SELECT id, created, role, length(text) AS n FROM messages WHERE conversation_id=? "
                             "ORDER BY created, rowid", (head["conversation_id"],)).fetchall()
-    sizes = [min(len(m["text"] or ""), ITEM_SHARE) for m in msgs]
-    n = len(msgs)
-    if cursor is None:
-        center = next(i for i, m in enumerate(msgs) if m["id"] == mid)
-        lo, hi = window(sizes, center - CHAT_WINDOW, center + CHAT_WINDOW + 1, center)
-    elif cursor["op"] == "earlier":
-        at = min(cursor["at"], n)
-        lo, hi = window(sizes, at - CHAT_WINDOW, at, at)
-    else:
-        at = min(cursor["at"], n)
-        lo, hi = window(sizes, at, at + CHAT_WINDOW, at)
-    items = [item("chats", m["id"], m["created"], m["text"], gen, role=m["role"],
+        sizes = [min(m["n"] or 0, ITEM_SHARE) for m in msgs]
+        n = len(msgs)
+        if cursor is None:
+            center = next(i for i, m in enumerate(msgs) if m["id"] == mid)
+            lo, hi = window(sizes, center - CHAT_WINDOW, center + CHAT_WINDOW + 1, center)
+        elif cursor["op"] == "earlier":
+            at = min(cursor["at"], n)
+            lo, hi = window(sizes, at - CHAT_WINDOW, at, at)
+        else:
+            at = min(cursor["at"], n)
+            lo, hi = window(sizes, at, at + CHAT_WINDOW, at)
+        shown = [m["id"] for m in msgs[lo:hi]]  # at most 2 * CHAT_WINDOW + 1 ids
+        texts = dict(conn.execute(f"SELECT id, substr(text, 1, {ITEM_SHARE}) FROM messages WHERE id IN "
+                                  f"({','.join('?' * len(shown))})", shown).fetchall()) if shown else {}
+    items = [item("chats", m["id"], m["created"], texts.get(m["id"]), gen, role=m["role"], full=m["n"],
                   matched=cursor is None and m["id"] == mid) for m in msgs[lo:hi]]
     cur = lambda op, at: encode_cursor({"op": op, "k": "chats", "i": mid, "g": gen, "at": at})
     return {"status": "ok", "kind": "chats", "id": mid, "title": head["conversation_name"] or "Conversation",
@@ -1642,7 +1674,8 @@ Create `tests/test_atlasserve.py`:
 import http.client
 import json
 import threading
-from datetime import timedelta, timezone
+import time
+from datetime import timedelta
 
 import pytest
 
@@ -1728,9 +1761,58 @@ def test_methods_sizes_and_paths(helper, session):
     assert req(helper, "GET", "/api/search", headers=h)[0] == 405
     for method in ("PUT", "DELETE", "PATCH", "OPTIONS"):
         assert req(helper, method, "/", headers=h)[0] == 405
-    assert req(helper, "POST", "/api/search", b"x" * 20000, h)[0] == 413
     for path in ("/assets/../vault.db", "/assets/%2e%2e%2fvault.db", "/assets/nope.js", "/vault.db", "/?x=1"):
         assert req(helper, "GET", path, headers=session)[0] == 404
+
+
+def raw(h, head, session, body=b"", wait=5.0):
+    """Send exactly these bytes and return what comes back before the server closes (or `wait` passes)."""
+    import socket
+    s = socket.create_connection(("127.0.0.1", h.port), timeout=wait)
+    s.sendall(head.format(port=h.port, cookie=session["Cookie"]).encode() + body)
+    got = b""
+    try:
+        while chunk := s.recv(65536):
+            got += chunk
+    except OSError:
+        pass
+    s.close()
+    return got
+
+
+HEAD = ("POST /api/search HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {cookie}\r\nX-InkVault: 1\r\n"
+        "Content-Type: application/json\r\n")
+
+
+def test_bad_lengths_are_refused_before_reading(helper, session):          # Codex plan review #6
+    assert raw(helper, HEAD + "Content-Length: -1\r\n\r\n", session).startswith(b"HTTP/1.1 400")
+    assert raw(helper, HEAD + "Content-Length: abc\r\n\r\n", session).startswith(b"HTTP/1.1 400")
+    assert raw(helper, HEAD + "Transfer-Encoding: chunked\r\n\r\n", session).startswith(b"HTTP/1.1 400")
+    t = time.monotonic()
+    got = raw(helper, HEAD + "Content-Length: 20000\r\n\r\n", session)  # declared, never sent
+    assert got.startswith(b"HTTP/1.1 413") and time.monotonic() - t < 3  # answered at once, nothing drained
+
+
+def test_stalled_and_idle_connections_time_out_and_never_block_others(helper, session, monkeypatch):
+    import socket
+    from inkvault import atlasserve
+    monkeypatch.setattr(atlasserve.Handler, "timeout", 1)
+    idle = socket.create_connection(("127.0.0.1", helper.port))                    # connects, says nothing
+    stalled = socket.create_connection(("127.0.0.1", helper.port))                 # promises 100 bytes, sends 10
+    stalled.sendall((HEAD + "Content-Length: 100\r\n\r\n").format(port=helper.port, cookie=session["Cookie"]).encode()
+                    + b'{"query":')
+    t = time.monotonic()
+    assert api(helper, session, "/api/search", {"query": "backoff"})[1]["status"] == "ok"
+    assert time.monotonic() - t < 3
+    for s in (idle, stalled):
+        s.settimeout(5)
+        try:
+            got = s.recv(1024)
+        except ConnectionResetError:
+            got = b""
+        assert got == b""  # closed after the timeout, without an answer (and without a traceback)
+        s.close()
+    assert api(helper, session, "/api/ping", {})[1]["status"] == "ok"  # and the helper keeps serving
 
 
 def test_control_code_needs_the_secret_not_the_cookie(helper, session):
@@ -1786,12 +1868,23 @@ def test_day_bounds_cover_local_days_across_daylight_saving():
 
 
 def test_record_api(helper, session):
-    _, r = api(helper, session, "/api/record", {"kind": "chats", "id": "m1"})
-    assert r["status"] == "ok" and r["items"][0]["matched"]
-    _, missing = api(helper, session, "/api/record", {"kind": "chats", "id": "nope"})
+    _, first = api(helper, session, "/api/search", {"query": "jitter"})
+    gen = first["generation"]
+    _, r = api(helper, session, "/api/record", {"kind": "chats", "id": "m1", "generation": gen})
+    assert r["status"] == "ok" and r["items"][0]["matched"] and r["generation"] == gen
+    _, missing = api(helper, session, "/api/record", {"kind": "chats", "id": "nope", "generation": gen})
     assert missing["status"] == "missing"
-    for body in ({"kind": "zzz", "id": "1"}, {"cursor": "garbage"}, {"kind": "chats"}):
+    for body in ({"kind": "zzz", "id": "1", "generation": gen}, {"cursor": "garbage"}, {"kind": "chats", "generation": gen},
+                 {"kind": "chats", "id": "m1"}):  # an initial open must say which vault state the page shows
         assert api(helper, session, "/api/record", body)[0] == 400
+
+
+def test_a_record_opened_after_a_rebuild_is_refused(helper, session):   # Codex plan review #2
+    from inkvault import paths
+    _, first = api(helper, session, "/api/search", {"query": "jitter"})
+    atlasdata.bump(paths.vectors())  # rebuilt between choosing the hit and opening it
+    _, r = api(helper, session, "/api/record", {"kind": "chats", "id": "m1", "generation": first["generation"]})
+    assert r["status"] == "changed" and "items" not in r
 
 
 def test_atlas_api_builds_missing_data_then_serves_it(helper, session):
@@ -1826,6 +1919,22 @@ def test_ping_keeps_alive_and_reports_generation(helper, session):
     helper.last_ping = 0
     _, a = api(helper, session, "/api/ping", {})
     assert a["status"] == "ok" and len(a["generation"]) == 16 and helper.last_ping > 0
+
+
+def test_atlas_data_has_its_own_revision(helper, session):              # Codex plan review #7
+    from inkvault import dashboard, paths
+    _, a = api(helper, session, "/api/atlas")
+    rev = a["atlas_revision"]
+    assert rev and api(helper, session, "/api/ping", {})[1]["atlas_revision"] == rev
+    gen = a["generation"]
+    atlasdata.bump(paths.dashboard())            # charts rebuilt; search.db and vectors untouched
+    _, p = api(helper, session, "/api/ping", {})
+    assert p["generation"] == gen and p["atlas_revision"] not in (None, rev)
+    paths.dashboard().unlink()                   # removed (as forgetting does)
+    assert api(helper, session, "/api/ping", {})[1]["atlas_revision"] is None
+    dashboard.build()
+    _, again = api(helper, session, "/api/atlas")
+    assert again["atlas_revision"] == api(helper, session, "/api/ping", {})[1]["atlas_revision"]
 
 
 def test_nothing_is_logged(helper, session, capfd):
@@ -1875,6 +1984,7 @@ MAX_QUERY = 500
 PAGE_SIZE = 25
 MAX_OFFSET = 10_000
 IDLE = 30 * 60
+READ_TIMEOUT = 10  # seconds a connection may sit silent, or a body may take to arrive, before it's closed
 COOKIE = "inkvault_atlas"
 DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 CLOSED_TEXT = ("This Atlas link has already been used or has expired. Open the Atlas again from the "
@@ -1921,6 +2031,20 @@ class BadRequest(Exception):
 
 class TooLarge(Exception):
     pass
+
+
+class Stalled(Exception):
+    """The body never arrived in full: the connection is closed without an answer."""
+
+
+def atlas_revision():
+    """Which atlas.json is published (Codex plan review #7): it changes whenever the charts' data is rebuilt, replaced
+    or removed, independently of search's generation, so an open page refreshes its charts. None when there's none."""
+    try:
+        st = paths.dashboard().stat()
+    except FileNotFoundError:
+        return None
+    return retrieval.generation((st.st_mtime_ns, st.st_size))
 
 
 def day_bounds(from_, to, tz=None):
@@ -1976,19 +2100,23 @@ def atlas_payload():
             return {"status": "busy"}
 
     def read():
+        rev = atlas_revision()
         try:
             data = json.loads(paths.dashboard().read_text(encoding="utf-8"))
         except FileNotFoundError:
             data = None
-        return data, retrieval.freshness(), retrieval.sources_present()
+        if atlas_revision() != rev:  # replaced while being read: never label one file's data with another's revision
+            raise retrieval.Refused("changed")
+        return data, rev, retrieval.freshness(), retrieval.sources_present()
     try:
-        (data, fresh, chips), gen = retrieval.guarded_call(read)
+        (data, rev, fresh, chips), gen = retrieval.guarded_call(read)
     except retrieval.Refused as r:
         return {"status": r.status}
     if data is None:
         return {"status": "no-days" if built == "no-days" else "rebuilding", "generation": gen,
-                "freshness": fresh, "sources": chips}
-    return {"status": "ok", "generation": gen, "data": data, "freshness": fresh, "sources": chips}
+                "atlas_revision": None, "freshness": fresh, "sources": chips}
+    return {"status": "ok", "generation": gen, "atlas_revision": rev, "data": data, "freshness": fresh,
+            "sources": chips}
 
 
 def api_search(body):
@@ -2028,19 +2156,24 @@ def api_record(body):
         kind, id_ = None, None
     else:
         cursor, kind, id_ = None, body.get("kind"), body.get("id")
-        if kind not in retrieval.SOURCES or not isinstance(id_, str) or not 0 < len(id_) <= 200:
+        expected = body.get("generation")  # the vault state the page is showing (Codex plan review #2)
+        if (kind not in retrieval.SOURCES or not isinstance(id_, str) or not 0 < len(id_) <= 200
+                or not isinstance(expected, str)):
             raise BadRequest("Bad record.")
     try:
-        r, _ = retrieval.guarded_call(retrieval.record, kind, id_, cursor)
+        r, gen = retrieval.guarded_call(retrieval.record, kind, id_, cursor)
     except retrieval.Refused as e:
         return {"status": e.status}
-    return r
+    if cursor is None and expected != gen:  # rebuilt between choosing the hit and opening it
+        return {"status": "changed"}
+    return {**r, "generation": gen}
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "InkVault"
     sys_version = ""
     protocol_version = "HTTP/1.1"
+    timeout = READ_TIMEOUT  # socket timeout: a silent or stalled connection is closed, never holds a thread forever
 
     def log_message(self, *args):  # spec §5 rule 10: no request log, so no query or record text anywhere
         pass
@@ -2081,18 +2214,23 @@ class Handler(BaseHTTPRequestHandler):
         return self.session_ok() and self.headers.get("X-InkVault") == "1"
 
     def body(self):
+        """The JSON object sent, read only after its length is known to be sane (Codex plan review #6)."""
         if self.headers.get("Transfer-Encoding"):
             raise BadRequest("Send a plain request body.")
-        try:
-            n = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
-            raise BadRequest("Bad length.") from None
+        length = (self.headers.get("Content-Length") or "0").strip()
+        if not length.isdigit():  # also refuses "-1", which rfile.read would treat as "read until the end"
+            raise BadRequest("Bad length.")
+        n = int(length)
         if n > MAX_BODY:
-            # Read (up to 1 MB) and drop it, so the 413 arrives instead of a reset connection; then close.
-            self.rfile.read(min(n, 1 << 20))
-            raise TooLarge
+            raise TooLarge  # answered at once and the connection closed: nothing is read or drained
         try:
-            obj = json.loads(self.rfile.read(n) or b"{}")
+            data = self.rfile.read(n)
+        except OSError:  # includes the socket timeout (READ_TIMEOUT)
+            raise Stalled from None
+        if len(data) < n:
+            raise Stalled
+        try:
+            obj = json.loads(data or b"{}")
         except ValueError:
             raise BadRequest("Send JSON.") from None
         if not isinstance(obj, dict):
@@ -2141,12 +2279,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.helper.last_ping = self.helper.now()
                 stamp = retrieval.published()
                 return self.answer(200, {"status": "ok", "generation": retrieval.generation(stamp),
-                                         "rebuilding": bool(stamp[0])})
+                                         "rebuilding": bool(stamp[0]), "atlas_revision": atlas_revision()})
             return self.answer(200, api_search(body) if path == "/api/search" else api_record(body))
         except TooLarge:
             self.close_connection = True
             return self.send(413)
+        except Stalled:
+            self.close_connection = True  # no answer: the request never arrived
+            return None
         except BadRequest as e:
+            self.close_connection = True  # what's left of a bad request can't be trusted as the next one
             return self.answer(400, {"status": "bad", "message": str(e)})
 
     def refuse(self):
@@ -2334,6 +2476,20 @@ def test_info_file_is_private_on_posix(home, monkeypatch):
         stop(p)
 
 
+def test_a_lock_error_starts_nothing(tmp_path, monkeypatch, capsys):      # Codex plan review #1
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    from inkvault import atlasserve, nightly
+
+    def broken(fd):
+        raise OSError(38, "Function not implemented")
+    monkeypatch.setattr(nightly, "try_lock", broken)
+    monkeypatch.setattr(atlasserve, "Helper", lambda *a, **k: pytest.fail("no helper may start without the lock"))
+    monkeypatch.setattr(atlasserve, "open_in_browser", lambda url: pytest.fail("nothing may open"))
+    assert atlasserve.serve(open_browser=True) == 1
+    assert not (tmp_path / "atlas-helper.json").exists()
+    assert "Nothing was started" in capsys.readouterr().out
+
+
 def test_the_helper_process_is_offline(monkeypatch):
     from inkvault import atlasserve
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
@@ -2428,9 +2584,10 @@ def serve(open_browser=True, idle=IDLE, wait=10.0):
     try:
         try:
             mine = nightly.try_lock(fd)
-        except OSError as e:  # a drive without file locking: run, without the one-helper guarantee
-            print(f"Couldn't take the Atlas lock ({e}); starting anyway.")
-            mine = True
+        except OSError as e:  # e.g. a drive without file locking: without the lock there's no safe owner (review #1)
+            print(f"The Atlas can't start: its lock couldn't be taken ({e}). Nothing was started. If your InkVault "
+                  "folder is on a network or synced drive, move it to a local drive (`--home`).")
+            return 1
         if not mine:
             return reuse(open_browser, wait)
         helper = Helper()
@@ -3039,6 +3196,175 @@ def test_every_id_the_scripts_use_is_in_the_page():
 Run: `uv run pytest tests/test_atlas_page.py -q`
 Expected: the first new test FAILS (search.js is a stub).
 
+- [ ] **Step 1b: Write the behaviour tests that drive `search.js` in Node**
+
+These run `search.js` against a stand-in page with controlled, delayed answers (Codex plan review #2, #4, #7). They need Node (`node --version`); GitHub's runners have it, and the pytest wrapper skips where it's missing. Files are `.cjs` and the harness loads `search.js` with `vm`, so a `package.json` with `"type": "module"` in a parent folder can't change how they run.
+
+Create `tests/js/harness.cjs`:
+
+```js
+// A stand-in page for search.js: just enough DOM, storage and fetch to drive it without a browser. Fictional data.
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
+const SEARCH = path.join(__dirname, "..", "..", "src", "inkvault", "atlas", "search.js");
+
+module.exports = function load({saved = null, answer}) {
+  const handlers = {}, calls = [];
+  const mk = id => ({id, value: "", textContent: "", hidden: false, scrollTop: 0, dataset: {}, children: [], disabled: false,
+    replaceChildren(...c) { this.children = c; }, append(...c) { this.children.push(...c); },
+    setAttribute() {}, addEventListener(ev, fn) { handlers[id + ":" + ev] = fn; }, querySelector() { return null; },
+    focus() {}, scrollIntoView() {}, remove() {}, replaceWith() {}});
+  // Elements exist from the first touch, by the page or by a test.
+  const els = new Proxy({}, {get: (t, id) => (typeof id === "string" ? (t[id] || (t[id] = mk(id))) : t[id])});
+  const store = saved ? {"inkvault-search": JSON.stringify(saved)} : {};
+  const atlas = {shown: 0, cleared: 0};
+  Object.assign(global, {
+    document: {getElementById: id => els[id] || (els[id] = mk(id)), querySelectorAll: () => [], createElement: t => mk(t),
+               visibilityState: "visible", addEventListener: (ev, fn) => { handlers["document:" + ev] = fn; }},
+    window: {addEventListener: (ev, fn) => { handlers["window:" + ev] = fn; }},
+    sessionStorage: {getItem: k => store[k] ?? null, setItem: (k, v) => { store[k] = v; }, removeItem: k => { delete store[k]; }},
+    Atlas: {show() { atlas.shown++; }, clear() { atlas.cleared++; }},
+    setInterval: () => 0, clearInterval: () => {},
+    fetch: async (p, o) => {
+      const body = o.body ? JSON.parse(o.body) : null;
+      calls.push([p, body]);
+      const a = await answer(p, body);
+      return {status: 200, json: async () => a};
+    },
+  });
+  vm.runInThisContext(fs.readFileSync(SEARCH, "utf8"), {filename: SEARCH});
+  return {els, handlers, calls, store, atlas, sleep: ms => new Promise(r => setTimeout(r, ms))};
+};
+```
+
+Create `tests/js/restore.cjs` (a reload brings back query, filters, view and a selected record that isn't on the first page):
+
+```js
+const load = require("./harness.cjs");
+const page = load({
+  saved: {view: "search", query: "beacon", source: "all", from: "", to: "", selected: {kind: "chats", id: "m9"},
+          scroll: 40, generation: "g1"},
+  answer: p => p === "/api/atlas" ? {status: "ok", generation: "g1", atlas_revision: "r1", data: {days: {}}, freshness: {}, sources: {}}
+    : p === "/api/search" ? {status: "ok", generation: "g1", more: false, keyword_only: false,
+        hits: [{kind: "summaries", id: "s1", time: "", title: "t", source_label: "x", excerpt: "beacon",
+                match: {type: "keyword", spans: [[0, 6]]}}]}
+    : p === "/api/record" ? {status: "ok", generation: "g1", title: "r", items: [], code: false} : {status: "ok"},
+});
+page.sleep(200).then(() => {
+  const search = page.calls.find(c => c[0] === "/api/search");
+  const record = page.calls.find(c => c[0] === "/api/record");
+  const saved = JSON.parse(page.store["inkvault-search"]);
+  const ok = search && search[1].query === "beacon" && record && record[1].id === "m9" && record[1].generation === "g1"
+    && saved.query === "beacon" && saved.selected.id === "m9" && saved.view === "search";
+  if (!ok) { console.error("restore failed", JSON.stringify({search, record, saved})); process.exit(1); }
+});
+```
+
+Create `tests/js/late_record.cjs` (a slow record answer from the old results never appears after a new search):
+
+```js
+const load = require("./harness.cjs");
+const page = load({
+  saved: {view: "search", query: "first", source: "all", from: "", to: "", selected: {kind: "chats", id: "slow"},
+          scroll: 0, generation: "g1"},
+  answer: async (p, b) => {
+    if (p === "/api/atlas") return {status: "ok", generation: "g1", atlas_revision: "r1", data: {days: {}}, freshness: {}, sources: {}};
+    if (p === "/api/search") return {status: "ok", generation: "g1", more: false, keyword_only: false,
+      hits: [{kind: "summaries", id: b.query, time: "", title: b.query, source_label: "x", excerpt: "e", match: {type: "meaning"}}]};
+    if (p === "/api/record") { await new Promise(r => setTimeout(r, 300)); return {status: "ok", generation: "g1", title: "STALE", items: [], code: false}; }
+    return {status: "ok"};
+  },
+});
+(async () => {
+  await page.sleep(50);                                       // restore has started the slow record open
+  page.els.q.value = "second";
+  page.handlers["search-form:submit"]({preventDefault() {}}); // a new search replaces the results
+  await page.sleep(500);                                      // the slow answer has arrived
+  const reader = page.els.reader.children.map(c => c.textContent).join(" ");
+  if (reader.includes("STALE")) { console.error("a record from the old results appeared"); process.exit(1); }
+})();
+```
+
+Create `tests/js/rebuild_between.cjs` (the vault changed between choosing a hit and its record arriving: everything is cleared, nothing from the newer state sits beside older results):
+
+```js
+const load = require("./harness.cjs");
+let atlasCalls = 0;
+const page = load({answer: p => {
+  if (p === "/api/atlas") { atlasCalls++; return {status: "ok", generation: atlasCalls === 1 ? "g1" : "g2", atlas_revision: "r", data: {days: {}}, freshness: {}, sources: {}}; }
+  if (p === "/api/search") return {status: "ok", generation: "g1", more: false, keyword_only: false,
+    hits: [{kind: "chats", id: "m1", time: "", title: "t", source_label: "x", excerpt: "e", match: {type: "meaning"}}]};
+  if (p === "/api/record") return {status: "ok", generation: "g2", title: "NEWER STATE", items: [], code: false};
+  return {status: "ok"};
+}});
+(async () => {
+  await page.sleep(50);
+  page.els.q.value = "beacon";
+  page.handlers["search-form:submit"]({preventDefault() {}});
+  await page.sleep(50);
+  page.handlers["button:click"]();   // the one hit's button
+  await page.sleep(100);
+  const reader = page.els.reader.children.map(c => c.textContent).join(" ");
+  const savedQuery = JSON.parse(page.store["inkvault-search"] || "{}").query;
+  if (reader.includes("NEWER STATE") || page.els.results.children.length || savedQuery || atlasCalls < 2) {
+    console.error("a record from a newer vault state was shown beside older results", reader, atlasCalls);
+    process.exit(1);
+  }
+})();
+```
+
+Create `tests/js/atlas_revision.cjs` (the charts' data changed on its own: the charts reload and the search stays):
+
+```js
+const load = require("./harness.cjs");
+let atlasCalls = 0;
+const page = load({answer: p => {
+  if (p === "/api/atlas") { atlasCalls++; return {status: "ok", generation: "g1", atlas_revision: "r" + atlasCalls, data: {days: {}}, freshness: {}, sources: {}}; }
+  if (p === "/api/ping") return {status: "ok", generation: "g1", rebuilding: false, atlas_revision: "r9"};
+  if (p === "/api/search") return {status: "ok", generation: "g1", more: false, keyword_only: false, hits: []};
+  return {status: "ok"};
+}});
+(async () => {
+  await page.sleep(50);
+  page.els.q.value = "keep me";
+  page.handlers["search-form:submit"]({preventDefault() {}});
+  await page.sleep(50);
+  const shown = page.atlas.shown;
+  page.handlers["window:focus"]();   // focus pings; the ping reports a different atlas revision
+  await page.sleep(100);
+  if (!(atlasCalls === 2 && page.atlas.shown === shown + 1 && page.els.q.value === "keep me")) {
+    console.error("charts didn't reload, or the search was lost", atlasCalls, page.atlas.shown, page.els.q.value);
+    process.exit(1);
+  }
+})();
+```
+
+Create `tests/test_atlas_page_js.py`:
+
+```python
+"""search.js driven in Node against a stand-in page (Codex plan review #2, #4, #7). Skipped where Node isn't installed."""
+import shutil
+from pathlib import Path
+
+import pytest
+
+from conftest import REAL_RUN  # conftest allows only this Python; Node is the one other program these tests start
+
+JS = Path(__file__).parent / "js"
+NODE = shutil.which("node")
+
+
+@pytest.mark.skipif(not NODE, reason="Node isn't installed")
+@pytest.mark.parametrize("scenario", ["restore", "late_record", "rebuild_between", "atlas_revision"])
+def test_search_js(scenario):
+    r = REAL_RUN([NODE, str(JS / f"{scenario}.cjs")], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr or r.stdout
+```
+
+Run: `uv run pytest tests/test_atlas_page_js.py -q`
+Expected: FAIL (search.js is still a stub, so the scenarios find no calls).
+
 - [ ] **Step 2: Write `search.js`**
 
 ```js
@@ -3056,15 +3382,23 @@ const TEXT = {
   busy: "The Atlas is being updated. Trying again shortly…",
   noDays: "Nothing to chart yet. Search still works.",
 };
+// Read before anything can save (Codex plan review #4): startup must never overwrite what it's about to restore.
+const SAVED = readSaved();
 let generation = null;                        // the vault state everything on screen came from
+let atlasRevision;                            // which atlas.json the charts show; undefined until first loaded
 const turn = {atlas: 0, search: 0, reader: 0}; // answers to older turns are ignored (spec §4.4)
 let pollTimer = null, pingTimer = null;
+let restored = false, restoring = false;
 let state = blank();
 let hits = [];
 
 function blank() { return {view: "atlas", query: "", source: "all", from: "", to: "", selected: null, scroll: 0}; }
 function next(kind) { return ++turn[kind]; }
 function el(tag, text, cls) { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
+
+function readSaved() {
+  try { return JSON.parse(sessionStorage.getItem(STATE)); } catch (e) { return null; }
+}
 
 async function api(path, body) {
   const options = {method: body === undefined ? "GET" : "POST", credentials: "same-origin", cache: "no-store",
@@ -3086,13 +3420,16 @@ function current(answer) {
 }
 
 function save() {
+  if (restoring) return;  // a half-restored state is never written back
   try { sessionStorage.setItem(STATE, JSON.stringify({...state, generation, scroll: $("results").scrollTop})); } catch (e) {}
 }
 
 function clearEverything(reason) {
   for (const k of Object.keys(turn)) turn[k]++;
   generation = null;
+  atlasRevision = undefined;
   hits = [];
+  restoring = false;
   state = {...blank(), view: state.view};
   try { sessionStorage.removeItem(STATE); } catch (e) {}
   $("q").value = ""; $("s-from").value = ""; $("s-to").value = "";
@@ -3123,6 +3460,8 @@ function view(name) {
   save();
 }
 
+// The helper has stopped. A tab that's already open says so; a reload gets the browser's own connection error,
+// because nothing is left to serve a page (Codex plan review, limits).
 function closed() {
   for (const k of Object.keys(turn)) turn[k]++;
   clearTimeout(pollTimer); clearInterval(pingTimer);
@@ -3149,11 +3488,16 @@ async function loadAtlas() {
   notice(null);
   showFreshness(a.freshness);
   showChips(a.sources || {});
+  atlasRevision = a.atlas_revision || null;
   $("atlas-empty").hidden = a.status === "ok";
   $("atlas-empty").textContent = a.status === "ok" ? "" : TEXT.noDays;
+  Atlas.clear();
   if (a.status === "ok") Atlas.show(a.data);
+  if (!restored) {
+    restored = true;
+    if (SAVED && SAVED.generation === generation && SAVED.query) return restore(SAVED);
+  }
   view(state.view);
-  restore();
 }
 
 function showFreshness(f) {
@@ -3179,6 +3523,7 @@ async function runSearch(offset) {
   const q = offset ? state.query : $("q").value.trim();
   if (!q) return;
   if (!offset) {
+    next("reader");  // a record still loading belongs to the old results: its answer must not appear (review #2)
     state.query = q; state.selected = null; hits = [];
     $("results").replaceChildren(); $("reader").replaceChildren(); $("more").hidden = true;
   }
@@ -3233,29 +3578,32 @@ function excerpt(box, h) {
   box.append(h.excerpt.slice(at));
 }
 
-async function openHit(index) {
+function openHit(index) {
   const h = hits[index];
   if (!h) return;
   document.querySelectorAll(".hit").forEach(b => b.setAttribute("aria-current", String(b.dataset.index === String(index))));
-  state.selected = {kind: h.kind, id: h.id};
-  save();
-  await openRecord(h.kind, h.id);
+  return openRecord(h.kind, h.id);
 }
 
+// Opening a record replaces whatever the reader was loading; the answer must come from the vault state the page
+// shows, which the helper checks (it answers "changed" otherwise) and the page checks again (review #2).
 async function openRecord(kind, id) {
+  state.selected = {kind, id};
+  save();
   const my = next("reader");
   $("reader").replaceChildren(el("p", "Opening…", "meta"));
-  const r = await api("/api/record", {kind, id});
+  const r = await api("/api/record", {kind, id, generation});
   if (my !== turn.reader) return;
   if (!readerAnswer(r)) return;
   renderRecord(r);
 }
 
-// Shared by every reader request: true when r is a record to show.
+// Shared by every reader request: true when r is a record (or chunk) to show.
 function readerAnswer(r) {
   if (r.status === "closed") { closed(); return false; }
   if (r.status === "changed") { clearEverything("changed"); return false; }
   if (r.status === "rebuilding") { clearEverything("rebuilding"); return false; }
+  if (!current(r)) return false;
   if (r.status === "missing") { $("reader").replaceChildren(el("p", "This memory was removed.", "note")); return false; }
   if (r.status !== "ok") { $("reader").replaceChildren(el("p", TEXT.unavailable, "note")); return false; }
   return true;
@@ -3274,9 +3622,9 @@ function renderRecord(r) {
     box.append(ul);
   }
   const list = el("div");
-  if (r.earlier) list.append(pager("Earlier messages", r.earlier, "earlier", list));
+  if (r.earlier) list.append(pager("Earlier messages", r.earlier, "earlier"));
   for (const it of r.items) list.append(itemNode(it, r.code));
-  if (r.later) list.append(pager("Later messages", r.later, "later", list));
+  if (r.later) list.append(pager("Later messages", r.later, "later"));
   box.append(list);
   const m = list.querySelector(".matched");
   if (m) m.scrollIntoView({block: "center"});
@@ -3302,6 +3650,8 @@ function itemNode(it, code) {
   return div;
 }
 
+// Paging and expansion belong to the record on screen: a click remembers the reader's turn, and an answer that
+// arrives after another record (or a new search) took the reader is dropped.
 function expander(body, cursor) {
   const b = el("button", "Show more of this", "expand");
   b.type = "button";
@@ -3316,7 +3666,7 @@ function expander(body, cursor) {
   return b;
 }
 
-function pager(label, cursor, dir, list) {
+function pager(label, cursor, dir) {
   const b = el("button", label, "pager");
   b.type = "button";
   b.addEventListener("click", async () => {
@@ -3326,27 +3676,32 @@ function pager(label, cursor, dir, list) {
     if (my !== turn.reader || !readerAnswer(a)) return;
     const nodes = a.items.map(it => itemNode(it, a.code));
     const more = dir === "earlier" ? a.earlier : a.later;
-    if (more) nodes[dir === "earlier" ? "unshift" : "push"](pager(label, more, dir, list));
+    if (more) nodes[dir === "earlier" ? "unshift" : "push"](pager(label, more, dir));
     b.replaceWith(...nodes);
   });
   return b;
 }
 
-async function restore() {
-  let saved = null;
-  try { saved = JSON.parse(sessionStorage.getItem(STATE)); } catch (e) {}
-  if (!saved || saved.generation !== generation || !saved.query) return;
-  Object.assign(state, {query: saved.query, source: saved.source, from: saved.from, to: saved.to, view: saved.view});
-  $("q").value = saved.query; $("s-from").value = saved.from || ""; $("s-to").value = saved.to || "";
-  setChip(saved.source || "all", false);
-  const a = await runSearch(0);
-  if (!a) return;
-  $("results").scrollTop = saved.scroll || 0;
-  if (saved.selected) {
-    const i = hits.findIndex(h => h.kind === saved.selected.kind && h.id === saved.selected.id);
-    if (i >= 0) openHit(i); else openRecord(saved.selected.kind, saved.selected.id);
+// After a reload: the saved query, filters, view, scroll and selected record come back. A selected record that
+// isn't on the first page of results is opened directly, so the selection survives (review #4).
+async function restore(saved) {
+  restoring = true;
+  try {
+    Object.assign(state, {source: saved.source || "all", from: saved.from || "", to: saved.to || ""});
+    $("q").value = saved.query; $("s-from").value = state.from; $("s-to").value = state.to;
+    setChip(state.source, false);
+    const a = await runSearch(0);
+    if (!a || !restoring) return;
+    $("results").scrollTop = saved.scroll || 0;
+    if (saved.selected) {
+      const i = hits.findIndex(h => h.kind === saved.selected.kind && h.id === saved.selected.id);
+      if (i >= 0) openHit(i); else openRecord(saved.selected.kind, saved.selected.id);
+    }
+    view(saved.view || "search");
+  } finally {
+    restoring = false;
+    save();
   }
-  view(saved.view || "search");
 }
 
 async function ping() {
@@ -3354,7 +3709,13 @@ async function ping() {
   const a = await api("/api/ping", {});
   if (a.status === "closed") return closed();
   if (a.rebuilding && generation) return clearEverything("rebuilding");
-  if (a.generation && generation && a.generation !== generation) clearEverything("updated");
+  if (a.generation && generation && a.generation !== generation) return clearEverything("updated");
+  // The charts' data changed on its own (rebuilt, replaced or removed): redraw them, keep the search (review #7).
+  if (atlasRevision !== undefined && "atlas_revision" in a && (a.atlas_revision || null) !== atlasRevision) {
+    atlasRevision = undefined;
+    Atlas.clear();
+    loadAtlas();
+  }
 }
 
 $("search-form").addEventListener("submit", e => { e.preventDefault(); runSearch(0); });
@@ -3383,8 +3744,8 @@ loadAtlas();
 
 - [ ] **Step 3: Run the tests**
 
-Run: `uv run pytest tests/test_atlas_page.py -q`
-Expected: all pass.
+Run: `uv run pytest tests/test_atlas_page.py tests/test_atlas_page_js.py -q`
+Expected: all pass (the Node tests show as skipped only if Node isn't installed; on the build machine it is, so they must run and pass).
 
 Run: `uv run pytest -q`
 Expected: all pass.
@@ -3392,7 +3753,7 @@ Expected: all pass.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/inkvault/atlas/search.js tests/test_atlas_page.py
+git add src/inkvault/atlas/search.js tests/test_atlas_page.py tests/test_atlas_page_js.py tests/js
 git commit -m "Atlas search: search view, reader with paging and expansion, full clear on any vault change"
 ```
 
@@ -3763,8 +4124,10 @@ Run `uv run python tests/manual/atlas_demo.py` and check each line in a real bro
 8. At 375 px wide: the reader sits below results; no horizontal scroll.
 9. Dark and light (system setting): both palettes readable.
 10. Atlas → Search → Atlas → Search keeps query, chip, selection and scroll; the address bar only ever shows `/`.
-11. Delete `atlas.json` and touch `vectors.npz` (or write the `rebuild-needed` marker) in the demo home while the page is open: within a minute (or on focus) the page clears charts, tooltip, results, reader and query, and shows the updating message; `sessionStorage` is empty (DevTools → Application).
-12. Close the tab; after 30 minutes (or start the demo with a short idle in a Python shell: `atlasserve.serve(idle=60)`) the helper exits and a reloaded tab shows "The Atlas has closed".
+11. Write the `rebuild-needed` marker in the demo home while the page is open with a tooltip, results and a record showing: within a minute (or on focus) the page clears charts, tooltip, results, reader and query, and shows the rebuilding message; `sessionStorage` is empty (DevTools → Application). Remove the marker: the Atlas comes back.
+11b. Charts only (Codex plan review #7): with results showing, delete `atlas.json` alone (leave `search.db` and `vectors.npz` untouched): on the next ping or focus the charts redraw (the helper rebuilds the file) and the search, results and reader stay as they were.
+12. Leave the tab open and stop the helper (Ctrl+C in the demo's terminal): the open tab, on its next request or focus, shows "The Atlas has closed". Reloading the tab now shows the browser's own "can't connect" page; that is expected, since nothing is left to serve a page.
+14. Refresh (F5) with a query, a chip, dates, a selected record and a scrolled results list: all of them come back, including a selected record that came from **More results** (not on the first page).
 13. Run `uv run inkvault --home <demo home> dashboard` while the demo runs: a new tab opens on the same helper, no second process.
 
 - [ ] **Step 3: Write and run the speed script**
@@ -3772,7 +4135,11 @@ Run `uv run python tests/manual/atlas_demo.py` and check each line in a real bro
 Create `tests/manual/atlas_perf.py`:
 
 ```python
-"""Search and reader timings on a synthetic vault of about 100,000 records (spec §6). Fictional data only.
+"""Synthetic search and reader timings on a vault of about 100,000 records (spec §6). Fictional data only.
+
+What it measures, honestly: retrieval timings with synthetic vectors and a fake model (not the real model's cold
+start), and memory as traced Python allocations (not whole-process peak). It includes one very long conversation
+(20,000 messages, one of them 5 MB) so the reader's bounded loading is exercised, not just many small chats.
 
     uv run python tests/manual/atlas_perf.py
 """
@@ -3813,6 +4180,12 @@ for c in range(2000):
 for s in range(20000):
     rows.append(("summary", f"s{s}", json.dumps({"id": f"s{s}", "name": " ".join(rnd.choices(words, k=5)),
                  "created": {"value": f"2026-0{1 + s % 9}-{1 + s % 28:02d}T12:00:00Z"}})))
+rows.append(("conversation", "long", json.dumps({"id": "long", "name": "one very long conversation"})))
+for m in range(20000):
+    text = ("lighthouse " * 500_000) if m == 10000 else " ".join(rnd.choices(words, k=60))  # one 5 MB message
+    rows.append(("message", f"long_{m:05d}", json.dumps({"id": f"long_{m:05d}", "created": {"value": f"2026-09-01T{m // 3600:02d}:{m // 60 % 60:02d}:{m % 60:02d}Z"},
+                 "role": "USER" if m % 2 == 0 else "ASSISTANT", "conversation": {"id": "long"},
+                 "fragment": {"string": {"raw": text}}})))
 db.executemany("INSERT INTO raw_records VALUES (?,?,?)", [(k, i, r) for k, i, r in rows])
 db.commit(); db.close()
 index.build()
@@ -3830,16 +4203,22 @@ tracemalloc.start()
 cold, r = timed(lambda: retrieval.search("lighthouse harbor", markers=retrieval.ATLAS_MARKERS, require_model=True, limit=25))
 warm = statistics.median(timed(lambda: retrieval.search("lighthouse harbor", markers=retrieval.ATLAS_MARKERS, require_model=True, limit=25))[0] for _ in range(5))
 reader, rec = timed(lambda: retrieval.record("chats", "m1000_20"))
+tracemalloc.reset_peak()
+long_reader, long_rec = timed(lambda: retrieval.record("chats", "long_10000"))  # the 5 MB message, mid-conversation
+long_peak = tracemalloc.get_traced_memory()[1]
 peak = tracemalloc.get_traced_memory()[1]
 print(json.dumps({"records": len(ids), "hardware": platform.processor() or platform.machine(), "python": platform.python_version(),
-                  "cold_search_s": round(cold, 3), "warm_search_s": round(warm, 3), "reader_s": round(reader, 3),
-                  "reader_chars": sum(len(i["text"]) for i in rec["items"]), "peak_mb": round(peak / 1e6, 1),
-                  "hits": len(r.hits)}, indent=1))
+                  "synthetic_cold_search_s": round(cold, 3), "synthetic_warm_search_s": round(warm, 3),
+                  "reader_s": round(reader, 3), "reader_chars": sum(len(i["text"]) for i in rec["items"]),
+                  "long_conversation_reader_s": round(long_reader, 3),
+                  "long_conversation_reader_chars": sum(len(i["text"]) for i in long_rec["items"]),
+                  "long_conversation_traced_peak_mb": round(long_peak / 1e6, 1),
+                  "traced_python_peak_mb": round(peak / 1e6, 1), "hits": len(r.hits)}, indent=1))
 print(f"(temporary folder {home}; delete it when done)")
 ```
 
 Run: `uv run python tests/manual/atlas_perf.py`
-Record the JSON in the verification doc with the machine description. Targets: warm search < 2 s, reader < 1 s. If a target is missed, note it and investigate before Task 13 (likely suspects: fetching every scored hit row; `chat()` loading a whole conversation).
+Record the JSON in the verification doc with the machine description, labelled as synthetic timings and traced Python allocations. Targets: synthetic warm search < 2 s, reader < 1 s (including the long conversation), and the long-conversation traced peak well under the 5 MB message size times a small factor (the reader reads only lengths plus the shown window, each cut at 20,000 characters). If a target is missed, note it and investigate before Task 13 (likely suspect: fetching every scored hit row).
 
 - [ ] **Step 4: Commit**
 
@@ -3850,63 +4229,165 @@ git commit -m "Atlas search: browser check and speed results"
 
 ---
 
-### Task 13: Real-history check on a disposable copy (maintainer-run)
+### Task 13: Real-history check on a disposable snapshot (maintainer-run)
 
 **Files:**
 - Create: `tests/manual/atlas_real_copy.py`
+- Create: `tests/test_atlas_real_copy.py` (the script's safety, on fictional data, in CI)
 - Modify: `docs/superpowers/plans/2026-10-13-atlas-search-verification.md` (append counts and timings only)
 
-**Interfaces:** reads a real InkVault home **read-only**, under its nightly lock, and works on a copy.
+**Interfaces:** `atlas_real_copy.run(backup, model=None, queries=(), make_root=None) -> dict`, `atlas_real_copy.BACKUP_NAME`.
 
-- [ ] **Step 1: Write the script**
+**What it touches (Codex plan review #3).** Exactly two things, both named by the maintainer on the command line: one finished nightly backup file (`backups/vault-YYYY-MM-DD.db`, a closed copy no process writes to) and, optionally, the model folder. Both are copied as plain files: neither is opened by SQLite, and no live lock, database or sidecar file is touched. Search, vectors and Atlas data are built inside the snapshot from that backup, so the snapshot is coherent by construction. It never reads any other source: no browser profiles, no other tools' data, nothing outside those two paths. The snapshot is created, used and deleted inside one `try`/`finally`, so a failure at any step, including while copying, leaves nothing behind.
+
+- [ ] **Step 1: Write the failing safety tests**
+
+Create `tests/test_atlas_real_copy.py`:
 
 ```python
-"""Run the Atlas against a coherent, disposable copy of a real vault (spec §6). Prints counts and timings only —
-never titles, text, queries' results or paths inside the vault. The live vault is never opened by the helper.
+"""The real-history check's own safety, on fictional data (Codex plan review #3): it only reads the backup it's
+given, never changes it, and deletes its snapshot whatever fails."""
+import importlib.util
+import shutil
+from pathlib import Path
 
-    uv run python tests/manual/atlas_real_copy.py "<real InkVault home>" "query one" "query two" ...
-The queries are typed on the command line and are not printed.
+import pytest
+
+import atlasdata
+
+SCRIPT = Path(__file__).parent / "manual" / "atlas_real_copy.py"
+
+
+@pytest.fixture
+def script():
+    spec = importlib.util.spec_from_file_location("atlas_real_copy", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture
+def backup(tmp_path, monkeypatch):
+    """A fictional vault, saved the way the nightly run names its backups."""
+    atlasdata.make_vault(tmp_path / "home", monkeypatch, vectors=False)
+    from inkvault import paths
+    out = tmp_path / "backups" / "vault-2026-02-28.db"
+    out.parent.mkdir()
+    shutil.copyfile(paths.vault_db(), out)
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path / "unused"))  # run() sets its own home; restored after the test
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    return out
+
+
+def roots(tmp_path):
+    made = []
+
+    def make():
+        r = tmp_path / f"snapshot-{len(made)}"
+        r.mkdir()
+        made.append(r)
+        return r
+    return made, make
+
+
+def test_a_run_reports_counts_and_deletes_its_snapshot(script, backup, tmp_path):
+    before = backup.read_bytes()
+    made, make = roots(tmp_path)
+    report = script.run(backup, queries=["backoff"], make_root=make)
+    assert report["snapshot_deleted"] is True and not made[0].exists()
+    assert report["query_1"]["hits"] >= 1 and report["atlas_status"] in ("ok", "no-days")
+    assert backup.read_bytes() == before  # the backup itself is never changed
+    assert "backoff" not in str(report)    # queries are never echoed back
+
+
+def test_a_failure_while_copying_the_model_leaves_nothing(script, backup, tmp_path, monkeypatch):
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "weights").write_text("fictional")
+    made, make = roots(tmp_path)
+
+    def broken(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(script.shutil, "copytree", broken)
+    with pytest.raises(OSError):
+        script.run(backup, model=model, make_root=make)
+    assert not made[0].exists()
+
+
+def test_a_failure_while_building_leaves_nothing(script, backup, tmp_path, monkeypatch):
+    from inkvault import index
+    made, make = roots(tmp_path)
+    monkeypatch.setattr(index, "build", lambda: (_ for _ in ()).throw(RuntimeError("index failed")))
+    with pytest.raises(RuntimeError):
+        script.run(backup, make_root=make)
+    assert not made[0].exists()
+
+
+def test_only_a_nightly_backup_is_accepted(script, tmp_path):
+    for name in ("vault.db", "search.db", "local.db", "vault-2026-02-28.db.1234.partial"):
+        f = tmp_path / name
+        f.write_bytes(b"x")
+        with pytest.raises(ValueError):
+            script.run(f)
+
+
+def test_the_snapshot_process_never_downloads(script, backup, tmp_path):
+    made, make = roots(tmp_path)
+    report = script.run(backup, make_root=make)  # no model given: keyword-only, nothing fetched
+    import os
+    assert os.environ["HF_HUB_OFFLINE"] == "1" and report["keyword_only_reason"] == "no model folder given"
+```
+
+Run: `uv run pytest tests/test_atlas_real_copy.py -q`
+Expected: FAIL (the script doesn't exist).
+
+- [ ] **Step 2: Write the script**
+
+Create `tests/manual/atlas_real_copy.py`:
+
+```python
+"""Run the Atlas against a disposable snapshot made from one nightly backup (spec §6). Prints counts and timings only.
+
+It reads exactly what it's given: one finished nightly backup (backups/vault-YYYY-MM-DD.db) and, optionally, the model
+folder. Both are copied as plain files; no live vault, search file, lock or SQLite sidecar is opened, and no other
+source (browser profiles, other tools' data) is read. Search, vectors and the Atlas data are built inside the snapshot.
+The snapshot is deleted whatever happens.
+
+    uv run python tests/manual/atlas_real_copy.py <backups/vault-YYYY-MM-DD.db> [<model folder>]
+Queries are asked for one at a time without echo (an empty line finishes); they're never printed, stored or put on
+the command line, so they don't reach shell history or process listings.
 """
+import getpass
 import json
 import os
+import re
 import shutil
-import sqlite3
 import sys
 import tempfile
-import threading
 import time
 from pathlib import Path
 
-real = Path(sys.argv[1]).resolve()
-queries = sys.argv[2:]
-copy = Path(tempfile.mkdtemp(prefix="inkvault-realcopy-"))
-os.environ["INKVAULT_HOME"] = str(real)
-from inkvault import nightly  # noqa: E402
+BACKUP_NAME = re.compile(r"vault-\d{4}-\d{2}-\d{2}\.db")
 
-with nightly.lock("dashboard"):  # nothing changes the real files while they're copied together
-    for name in ("vault.db", "search.db"):
-        src = sqlite3.connect(f"file:{real / name}?mode=ro", uri=True)
-        dst = sqlite3.connect(copy / name)
-        src.backup(dst)
-        src.close(); dst.close()
-    for name in ("vectors.npz", "atlas.json"):
-        if (real / name).exists():
-            shutil.copy2(real / name, copy / name)
-    if (real / "model").exists():
-        shutil.copytree(real / "model", copy / "model")
 
-os.environ["INKVAULT_HOME"] = str(copy)
-import importlib  # noqa: E402
-from inkvault import paths  # noqa: E402
-importlib.reload(paths)
-from inkvault import atlasserve, retrieval  # noqa: E402
+def snapshot_root():
+    return Path(tempfile.mkdtemp(prefix="inkvault-snapshot-"))
 
-report = {"copy_made": True}
-try:
+
+def check(root, queries, have_model):
+    """Build search and the Atlas inside the snapshot, then measure. Returns counts and timings only."""
+    from inkvault import atlasserve, dashboard, embed, index, retrieval
+    if not have_model:
+        embed.build = lambda: None  # keyword-only: never fetch a model
+    report = {}
+    t = time.perf_counter(); index.build(); report["index_s"] = round(time.perf_counter() - t, 1)
+    dashboard.build()
     t = time.perf_counter(); payload = atlasserve.atlas_payload(); report["atlas_s"] = round(time.perf_counter() - t, 3)
     report["atlas_status"] = payload["status"]
-    report["atlas_days"] = len(payload.get("data", {}).get("days", {}))
+    report["atlas_days"] = len((payload.get("data") or {}).get("days", {}))
     report["chips"] = payload.get("sources")
+    if not have_model:
+        report["keyword_only_reason"] = "no model folder given"
     for n, q in enumerate(queries, 1):
         t = time.perf_counter()
         r = retrieval.search(q, markers=retrieval.ATLAS_MARKERS, require_model=True, limit=25)
@@ -3916,24 +4397,67 @@ try:
             kinds[h.kind] = kinds.get(h.kind, 0) + 1
         opened = None
         if r.hits:
-            t = time.perf_counter(); rec = retrieval.record(r.hits[0].kind, r.hits[0].id); opened = round(time.perf_counter() - t, 3)
+            t = time.perf_counter()
+            retrieval.record(r.hits[0].kind, r.hits[0].id)
+            opened = round(time.perf_counter() - t, 3)
         report[f"query_{n}"] = {"search_s": round(took, 3), "hits": len(r.hits), "by_kind": kinds,
                                 "keyword_only": r.keyword_only, "first_open_s": opened}
-finally:
-    shutil.rmtree(copy, ignore_errors=True)
-    report["copy_deleted"] = not copy.exists()
-print(json.dumps(report, indent=1))
+    return report
+
+
+def run(backup, model=None, queries=(), make_root=snapshot_root):
+    backup = Path(backup)
+    if not BACKUP_NAME.fullmatch(backup.name) or not backup.is_file():
+        raise ValueError("Give one nightly backup file named vault-YYYY-MM-DD.db.")
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    root = make_root()
+    report = {}
+    try:  # one try for creating, using and deleting the snapshot: a failure anywhere leaves nothing behind
+        os.environ["INKVAULT_HOME"] = str(root)
+        shutil.copyfile(backup, root / "vault.db")
+        if model:
+            shutil.copytree(model, root / "model")
+        report = check(root, list(queries), have_model=bool(model))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        report["snapshot_deleted"] = not root.exists()
+    return report
+
+
+def ask_queries():
+    out = []
+    while q := getpass.getpass(f"Query {len(out) + 1} (empty to finish): ").strip():
+        out.append(q)
+    return out
+
+
+if __name__ == "__main__":
+    if not 2 <= len(sys.argv) <= 3:
+        sys.exit(__doc__)
+    result = run(sys.argv[1], sys.argv[2] if len(sys.argv) == 3 else None, ask_queries())
+    print(json.dumps(result, indent=1))
+    if not result["snapshot_deleted"]:
+        sys.exit("The snapshot folder couldn't be deleted; remove it by hand (it holds a copy of your vault).")
 ```
 
-- [ ] **Step 2: Run it with the maintainer**
+- [ ] **Step 3: Run the safety tests**
 
-The maintainer (not a subagent) runs it against their own home with three queries for things they know are there. Paste only the printed JSON (counts and timings) into the verification doc under "Real history (disposable copy)". Confirm `copy_deleted: true`.
+Run: `uv run pytest tests/test_atlas_real_copy.py -q`
+Expected: all pass.
 
-- [ ] **Step 3: Commit**
+Run: `uv run pytest -q`
+Expected: all pass.
+
+- [ ] **Step 4: The maintainer runs it**
+
+The maintainer (not a subagent) picks yesterday's nightly backup from their own InkVault `backups` folder and, optionally, their model folder, runs the script, and types three queries for things they know are there when asked. Paste only the printed JSON (counts and timings) into the verification doc under "Real history (disposable snapshot)". Confirm `snapshot_deleted: true`. Which backup and model folder to use is the maintainer's choice; this plan names no private paths.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add tests/manual/atlas_real_copy.py docs/superpowers/plans/2026-10-13-atlas-search-verification.md
-git commit -m "Atlas search: real-history check on a disposable copy (counts and timings)"
+git add tests/manual/atlas_real_copy.py tests/test_atlas_real_copy.py docs/superpowers/plans/2026-10-13-atlas-search-verification.md
+git commit -m "Atlas search: real-history check on a disposable snapshot from one backup (counts and timings)"
 ```
 
 ---
