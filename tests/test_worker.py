@@ -51,7 +51,7 @@ def test_hang_is_killed_at_the_deadline_and_cools_the_app():
     s = sup("hang", timeout=0.5)
     try:
         s.submit(req("Notion.exe"))
-        assert ticks_while(s, 1.2) > 40
+        ticks_while(s, 1.2)  # OS sleep coalescing is not a minimum polling-rate guarantee
         assert s.timeouts == 1 and s.cooling("Notion.exe") and not s.busy()
         assert s.submit(req("Notion.exe")) is None and s.submit(req("Code.exe")) is not None
     finally:
@@ -171,5 +171,21 @@ def test_requests_carry_exactly_their_keys():
         no_exe = req(); del no_exe["exe"]
         assert s.submit(no_exe) is None and s.dropped_requests == 2
         assert s.submit(req(exe=5)) is None and s.dropped_requests == 3
+    finally:
+        s.close()
+
+
+
+def test_hang_timeout_uses_the_deadline_without_a_host_polling_rate():
+    clock = {"t": 0.0}
+    s = sup("hang", timeout=5.0, clock=lambda: clock["t"])
+    try:
+        assert s.submit(req("Notion.exe")) is not None
+        clock["t"] = 4.999
+        assert s.poll() is None and s.busy() and s.timeouts == 0
+        clock["t"] = 5.0
+        assert s.poll() is None and not s.busy() and s.timeouts == 1
+        assert s.cooling("Notion.exe") and s.submit(req("Notion.exe")) is None
+        assert s.submit(req("Code.exe")) is not None
     finally:
         s.close()

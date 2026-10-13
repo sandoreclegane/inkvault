@@ -107,3 +107,7 @@ Post-cleanup verification: 24 redaction tests passed; production source matches 
 ## Public-main integration and CI fix
 
 Preserved the current public logo, browser-history metadata and connected-AI privacy wording. The first Linux/macOS CI run exposed Windows command emulation selecting msvcrt on POSIX hosts. Kernel-lock API selection now uses the actual host OS; a real cross-process contention regression failed before the change and passed after it. Focused lock/command suite: 106 passed. Full resolved-merge suite: 604 passed, 1 skipped. The lockfile consistency check passed offline.
+
+## Shared-runner timing coverage
+
+The remaining macOS failures were a minimum poll-throughput assumption (30 polls versus an asserted 40 within 1.2 seconds) and a scheduling-delayed contention tick (0.695 seconds versus a 0.6-second threshold). Controlled coarse sleep scheduling and a 0.7-second pause reproduced both failures before correction and passed afterward. Deadline, cooldown and resubmission checks remain; a real fake-worker regression pins the exact five-second boundary. Integration ticks remain bounded below the two-second watcher interval, with a 1.5-second scheduling allowance. Ruling: shared-runner scheduling speed is not a functional poll-rate requirement; cost if wrong: the integration test tolerates extra sub-poll scheduling delay. Focused supervisor/contention suite: 27 passed. No production capture code changed in this adjustment.
