@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.3.0 — screen capture
+
+- **`inkvault watch`** (Windows): a timeline of the windows you use, and the text of windows in apps you choose.
+  Install with `uv tool install "inkvault[screen]"`, preview with `inkvault watch --apps` (records nothing), then
+  `inkvault watch --install`. No images are ever kept: the window image lives in memory long enough to read.
+- Text is read with Windows' own OCR in a separate, supervised worker process, after you settle on a window for 30
+  seconds, at most every 2 minutes per window, and only if it changed. It's dropped if the window changed around the
+  read. The `screen` extra adds the Windows OCR packages (including `winrt-Windows.Foundation.Collections`).
+- Default text apps: Comet, Edge, the AI tools, terminals and editors, notes apps and Microsoft 365. Messaging apps
+  and Chrome are off; `--install` asks about each and leaves them off without a terminal. Everyone using the Windows
+  account is captured.
+- Never captured: password managers, the lock screen and permission prompts, private windows, and anything you add
+  with `--never-app` or `--never-title`. Secrets in titles and text are masked before storing.
+- Controls: `--stop`, `--pause 30m|1h|until-tomorrow`, `--resume`, `--add-app`, `--remove-app`, `--never-app`,
+  `--never-title`, `--reset-settings`, `--uninstall`, and two desktop shortcuts for pause and resume. Settings that
+  are missing or invalid stop all recording until fixed.
+- Starts at sign-in through Task Scheduler. Install reads the task back and waits for a live heartbeat before saying
+  it works; uninstall disables, stops cooperatively, then deletes.
+- `timeline` shows screen activity live in a separate *Screen* section. Search (new `screen` source) covers it after
+  the nightly index and says how far it reaches. `get_memory` opens a stretch or a text read. `inkvault status` shows
+  the watcher, the sign-in task and counts.
+- The dashboard has *Screen time* and *Screen time by app*; digests add screen time by app and the longest windows
+  (never screen text). "Top apps" is labeled as Pieces captures.
+- `inkvault forget --screen --app EXE` or `--since/--until` (local time) removes whole windows, their text, and what
+  was derived from them. Backups made earlier and answers already given aren't erased.
+- Search builds read the vault in one snapshot, so they stay consistent while the watcher writes.
+- Limits: bank sites need `--never-title`; private-window markers are English; the last moment between the final
+  check and the capture can't be closed; Store apps are timeline-only; Windows only.
+
 ## 0.2.1
 
 - **Browser history** in the vault: Chrome, Edge, Comet, Brave, Arc, Vivaldi, Opera and Firefox, from the profiles

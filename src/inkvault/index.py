@@ -33,6 +33,7 @@ def build():
     with ExitStack() as stack:  # each connection is registered the moment it opens, so any later failure closes it
         raw = paths.connect_ro(paths.vault_db())
         stack.callback(raw.close)
+        raw.execute("BEGIN")  # one read snapshot for every vault query below (F7); closing raw ends it, before embed.build()
 
         def raws(kind):
             for (r,) in raw.execute("SELECT raw FROM raw_records WHERE kind=?", (kind,)):
@@ -43,7 +44,8 @@ def build():
         db = sqlite3.connect(tmp)
         stack.callback(db.close)
         db.executescript("""
-            CREATE TABLE events (id TEXT PRIMARY KEY, created TEXT, app TEXT, window_title TEXT, url TEXT, readable TEXT);
+            CREATE TABLE events (id TEXT PRIMARY KEY, created TEXT, app TEXT, window_title TEXT, url TEXT, readable TEXT, source TEXT, stretch_id TEXT);
+            CREATE TABLE screen_stretches (id TEXT PRIMARY KEY, started TEXT, ended TEXT, app TEXT, title TEXT);
             CREATE TABLE summaries (id TEXT PRIMARY KEY, created TEXT, name TEXT, text TEXT, event_ids TEXT);
             CREATE TABLE messages (id TEXT PRIMARY KEY, created TEXT, conversation_id TEXT, conversation_name TEXT, role TEXT, text TEXT, source TEXT);
             CREATE TABLE snippets (id TEXT PRIMARY KEY, created TEXT, name TEXT, language TEXT, text TEXT);
@@ -51,7 +53,7 @@ def build():
             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
         """)
 
-        db.executemany("INSERT INTO events VALUES (?,?,?,?,?,?)",
+        db.executemany("INSERT INTO events VALUES (?,?,?,?,?,?,'pieces',NULL)",
                        raw.execute("SELECT id, created, app, window_title, url, readable FROM events"))
 
         # A summary's text lives in its annotations; a chat message's conversation has the name.
@@ -79,6 +81,16 @@ def build():
 
         # Browser history: the visits that count, and one page per address per local day.
         history.index_into(raw, db)
+
+        # Screen capture (spec §6): OCR rows are events; stretches have their own table and FTS.
+        if raw.execute("SELECT 1 FROM sqlite_master WHERE name='screen_stretches'").fetchone():
+            db.executemany("INSERT INTO screen_stretches VALUES (?,?,?,?,?)",
+                           raw.execute("SELECT id, started, ended, app, title FROM screen_stretches"))
+            db.executemany("INSERT INTO events VALUES (?,?,?,?,NULL,?,'screen',?)", raw.execute(
+                "SELECT t.id, t.created, s.app, s.title, t.text, s.id FROM screen_text t "
+                "JOIN screen_stretches s ON s.id = t.stretch_id"))
+            if cutoff := raw.execute("SELECT MAX(ended) FROM screen_stretches").fetchone()[0]:
+                db.execute("INSERT INTO meta VALUES ('screen_cutoff', ?)", (cutoff,))
         db.execute("INSERT INTO meta VALUES ('timezone', ?)", (datetime.now().astimezone().strftime("%Z (UTC%z)"),))
 
         # External-content FTS tables: the index points back at rows, so text isn't stored twice.
@@ -93,6 +105,11 @@ def build():
             INSERT INTO snippets_fts(rowid, name, language, text) SELECT rowid, name, language, text FROM snippets;
             CREATE VIRTUAL TABLE pages_fts USING fts5(title, url, content='pages', content_rowid='rowid', tokenize='porter unicode61');
             INSERT INTO pages_fts(rowid, title, url) SELECT rowid, title, url FROM pages;
+            CREATE VIRTUAL TABLE stretches_fts USING fts5(title, app, content='screen_stretches', content_rowid='rowid', tokenize='porter unicode61');
+            INSERT INTO stretches_fts(rowid, title, app) SELECT rowid, title, app FROM screen_stretches;
+            CREATE INDEX screen_stretches_started ON screen_stretches(started);
+            CREATE INDEX screen_stretches_ended ON screen_stretches(ended);
+            CREATE INDEX events_source ON events(source);
             CREATE INDEX pages_created ON pages(created);
             CREATE INDEX visits_created ON visits(created);
             CREATE INDEX visits_page ON visits(page_id);

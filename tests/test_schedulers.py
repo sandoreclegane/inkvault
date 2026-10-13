@@ -479,3 +479,81 @@ def test_linux_failed_cleanup_of_the_other_scheduler_warns(lin, monkeypatch, cap
     monkeypatch.setattr(lin, "get_crontab", boom)
     lin.install(["/p", "nightly"], 3, 5, False)
     assert "Warning" in capsys.readouterr().out
+
+
+# --- Windows sign-in task (screen capture) -------------------------------------------------------------------------
+
+import pathlib
+
+FIX = pathlib.Path(__file__).with_name("fixtures") / "nightly-task.xml"
+NIGHTLY_ARGV = ["C:\\Program Files\\py\\python.exe", "-m", "inkvault", "--home", "C:\\v", "nightly"]
+
+
+def test_nightly_xml_is_byte_identical_to_the_v021_fixture():
+    from inkvault.schedulers import windows
+    assert windows.render(NIGHTLY_ARGV, 3, 0, False) == FIX.read_text(encoding="utf-8")
+
+
+def test_task_names_are_forwarded(monkeypatch):
+    from inkvault.schedulers import windows
+    seen = []
+    monkeypatch.setattr(windows, "schtasks", lambda *a: seen.append(a) or proc())
+    monkeypatch.setattr(windows.subprocess, "run", lambda cmd, **k: seen.append(tuple(cmd[1:])) or proc(1))
+    windows.install(NIGHTLY_ARGV, 3, 0, False, task="T1")
+    windows.query(task="T2")
+    windows.set_enabled(False, task="T3")
+    windows.run_task("T4")
+    assert [a[a.index("/TN") + 1] for a in seen] == ["T1", "T2", "T3", "T4"]
+
+
+def test_logon_task_xml_and_read_back(monkeypatch):
+    from inkvault.schedulers import windows
+    home = "C:\\Users\\Jos\u00e9 \u00d1\\AppData\\Local\\InkVault"  # spaces and non-ASCII survive the round trip
+    argv = ["C:\\Tools\\inkvault\\Scripts\\pythonw.exe", "-m", "inkvault", "--home", home, "watch"]
+    xml = windows.render_logon(argv, "PC\\me")
+    monkeypatch.setattr(windows.subprocess, "run",
+                        lambda cmd, **k: proc(0, xml.encode("utf-16")) if "/XML" in cmd else proc(1))
+    rb = windows.read_back("InkVault Watch")
+    assert rb == {"command": argv[0], "arguments": argv[1:], "user": "PC\\me", "logon_type": "InteractiveToken",
+                  "limit": "PT0S", "restart": ("PT1M", "3"), "instances": "IgnoreNew", "enabled": True,
+                  "trigger_enabled": True, "trigger_user": "PC\\me"}
+
+
+def test_read_back_survives_a_leading_bom(monkeypatch):
+    from inkvault.schedulers import windows
+    xml = "\ufeff" + windows.render_logon(["C:\\T\\pythonw.exe", "-m", "inkvault", "watch"], "PC\\me")
+    monkeypatch.setattr(windows.subprocess, "run",
+                        lambda cmd, **k: proc(0, xml) if "/XML" in cmd else proc(1))
+    assert windows.read_back("InkVault Watch")["user"] == "PC\\me"
+    with open(windows.__file__, encoding="utf-8") as f:
+        assert "\ufeff" not in f.read()   # written as the escape, not the character
+
+
+def test_split_args_round_trips_list2cmdline():
+    from inkvault.schedulers import windows
+    args = ["-m", "inkvault", "--home", "C:\\Users\\Jos\u00e9 \u00d1\\My Vault\\", "a\"b", "", "x y\\\\", "watch"]
+    assert windows.split_args(subprocess.list2cmdline(args)) == args
+
+
+def test_read_back_tells_absent_from_unknown(monkeypatch):
+    from inkvault.schedulers import windows
+    listing = '"\\InkVault Nightly","N/A","Ready"\n'
+    monkeypatch.setattr(windows.subprocess, "run",
+                        lambda cmd, **k: proc(0, listing.encode()) if "/FO" in cmd else proc(1))
+    assert windows.read_back("InkVault Watch") is None  # listed nowhere: absent
+    with pytest.raises(windows.TaskUnknown):
+        windows.read_back("InkVault Nightly")  # listed but unreadable
+    monkeypatch.setattr(windows.subprocess, "run", lambda cmd, **k: proc(1))
+    with pytest.raises(windows.TaskUnknown):
+        windows.read_back("InkVault Watch")  # can't even list
+    monkeypatch.setattr(windows.subprocess, "run", lambda cmd, **k: proc(0, "<Task".encode("utf-16")))
+    with pytest.raises(windows.TaskUnknown):
+        windows.read_back("InkVault Watch")  # unparseable
+
+
+def test_a_disabled_logon_trigger_shows_in_read_back(monkeypatch):
+    from inkvault.schedulers import windows
+    xml = windows.render_logon(["C:\\p\\pythonw.exe", "-m", "inkvault", "--home", "C:\\v", "watch"], "PC\\me")
+    xml = xml.replace("<Enabled>true</Enabled>\n      <UserId>", "<Enabled>false</Enabled>\n      <UserId>", 1)
+    monkeypatch.setattr(windows.subprocess, "run", lambda cmd, **k: proc(0, xml.encode("utf-16")))
+    assert windows.read_back("InkVault Watch")["trigger_enabled"] is False

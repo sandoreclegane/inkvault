@@ -1,0 +1,424 @@
+"""The watcher with a strict fake supervisor and a real vault (spec §1–§5)."""
+import json
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+T0 = datetime(2026, 10, 12, 14, 0, tzinfo=timezone.utc)
+
+
+class Clock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+class FakeSupervisor:
+    """The real Supervisor's contract: one request at a time, ids, abandon = unacceptable but still busy."""
+
+    def __init__(self):
+        self.requests, self.pending, self.answers = [], None, {}
+        self.timeouts, self.cooldowns = 0, {}
+
+    def busy(self):
+        return self.pending is not None
+
+    def cooling(self, exe):
+        return False
+
+    def submit(self, req):
+        if self.pending:
+            return None
+        self.requests.append(req)
+        self.pending = {"id": len(self.requests), "ok": True}
+        return self.pending["id"]
+
+    def answer(self, lines, status="ok"):
+        self.answers[self.pending["id"]] = {"id": self.pending["id"], "status": status, "lines": lines,
+                                            "colors": 30, "error": ""}
+
+    def poll(self):
+        if self.pending and self.pending["id"] in self.answers:
+            p, self.pending = self.pending, None
+            a = self.answers.pop(p["id"])
+            return a if p["ok"] else None
+        return None
+
+    def abandon(self):
+        if self.pending:
+            self.pending["ok"] = False
+
+    def close(self):
+        pass
+
+
+@pytest.fixture
+def rig(tmp_path, monkeypatch):
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    from inkvault import screen, screenstore, watch
+    from inkvault.stretches import Identity, Sample
+    screen.prepare()
+    screen.edit(lambda d: d["text_apps"].append("Discord.exe"))
+    conn = screenstore.connect()
+    clock, sup = Clock(), FakeSupervisor()
+    state = {"window": Identity(1, 10, 1, "Discord.exe", "Chat"), "idle": 0.0, "locked": False}
+
+    def sampler():
+        return Sample(clock.t, T0 + timedelta(seconds=clock.t), state["window"], state["idle"], state["locked"])
+
+    w = watch.Watcher(sampler, sup, conn, screen.SettingsSource(), clock=clock,
+                      utc=lambda: T0 + timedelta(seconds=clock.t))
+    yield w, clock, sup, state, conn
+    conn.close()
+
+
+def ticks(w, clock, n, step=2.0):
+    for _ in range(n):
+        assert w.tick()
+        clock.t += step
+
+
+def rows(conn, table):
+    return conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+
+
+def read_once(w, clock, sup, lines):
+    sup.answer(lines)
+    ticks(w, clock, 1)
+
+
+def test_text_is_accepted_and_stored(rig):
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 16)
+    assert sup.requests and "title" not in sup.requests[0] and len(sup.requests[0]["title_sha256"]) == 64
+    read_once(w, clock, sup, ["hello everyone in the channel"])
+    assert rows(conn, "screen_text")[0][3] == "hello everyone in the channel"
+
+
+def test_a_changed_window_at_acceptance_drops_the_result(rig):
+    from inkvault.stretches import Identity
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 16)
+    state["window"] = Identity(1, 10, 1, "Discord.exe", "Other chat")
+    read_once(w, clock, sup, ["secret from the other chat"])
+    assert rows(conn, "screen_text") == []
+
+
+def test_same_text_once_per_stretch_but_again_in_a_new_stretch(rig):           # P6
+    from inkvault.stretches import Identity
+    w, clock, sup, state, conn = rig
+    for _ in range(2):
+        ticks(w, clock, 61)
+        if sup.pending:
+            read_once(w, clock, sup, ["the same text on screen again"])
+    assert len(rows(conn, "screen_text")) == 1
+    state["window"] = Identity(2, 20, 2, "Notion.exe", "B"); ticks(w, clock, 3)            # A -> B -> A
+    state["window"] = Identity(1, 10, 1, "Discord.exe", "Chat"); ticks(w, clock, 61)
+    if sup.pending:
+        read_once(w, clock, sup, ["the same text on screen again"])
+    assert len(rows(conn, "screen_text")) == 2
+
+
+def test_hash_counts_only_after_the_insert_commits(rig, monkeypatch):         # P6
+    from inkvault import screenstore
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 16)
+    real, fails = screenstore.apply, {"n": 0}
+
+    def flaky(c, wr):
+        if wr.kind == "text" and fails["n"] == 0:
+            fails["n"] += 1
+            raise screenstore.StoreError("OperationalError: disk I/O error")
+        return real(c, wr)
+    monkeypatch.setattr(screenstore, "apply", flaky)
+    read_once(w, clock, sup, ["text that fails to write the first time"])
+    assert rows(conn, "screen_text") == [] and "disk I/O" in w.last_error
+    ticks(w, clock, 1)                                                              # retried from the queue
+    assert len(rows(conn, "screen_text")) == 1
+
+
+def test_pause_drops_queued_text(rig):                                          # P3: real busy DB
+    from inkvault import export, screen
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 16)
+    blocker = export.open_vault(); blocker.execute("BEGIN IMMEDIATE")
+    try:
+        read_once(w, clock, sup, ["queued while the vault is busy"])
+        assert w.queue.text_bytes > 0
+        screen.edit(lambda d: d.update(paused_until=screen.iso(T0 + timedelta(hours=2))))
+        ticks(w, clock, 1)
+        assert w.queue.text_bytes == 0
+    finally:
+        blocker.rollback(); blocker.close()
+    ticks(w, clock, 2)
+    assert rows(conn, "screen_text") == []
+
+
+def test_a_change_seen_at_acceptance_empties_the_backlog_before_the_flush(rig):  # R1: a real mid-tick barrier
+    from inkvault import export, screen
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 16)                                         # first read submitted at t = 30
+    blocker = export.open_vault(); blocker.execute("BEGIN IMMEDIATE")
+    try:
+        read_once(w, clock, sup, ["older text queued while the vault is busy"])
+        assert w.queue.text_bytes > 0
+        ticks(w, clock, 60)                                     # past the 120 s budget: a second read is pending
+        assert sup.busy()
+    finally:
+        blocker.rollback(); blocker.close()
+    real, calls = w.source.poll, {"n": 0}
+
+    def second_load_sees_a_pause():
+        calls["n"] += 1
+        if calls["n"] == 2:                                     # inside the same tick, at acceptance
+            screen.edit(lambda d: d.update(paused_until=screen.iso(T0 + timedelta(hours=5))))
+        return real()
+    w.source.poll = second_load_sees_a_pause
+    sup.answer(["newer text read just before the pause"])
+    ticks(w, clock, 1)
+    assert w.queue.text_bytes == 0 and rows(conn, "screen_text") == []
+
+
+def test_an_edit_between_the_tick_and_acceptance_drops_the_result(rig):        # P3
+    from inkvault import screen
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 16)
+    screen.edit(lambda d: d["never_titles"].append("chat"))
+    read_once(w, clock, sup, ["text that must not be kept anymore"])
+    assert rows(conn, "screen_text") == []
+
+
+@pytest.mark.parametrize("content", ["{nope", '{"text_apps": [], "never_apps": [], "never_titles": [], '
+                                              '"paused_until": 5}'])
+def test_invalid_settings_fail_closed_without_crashing(rig, content):          # P3
+    from inkvault import paths
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 5)
+    paths.screen_file().write_text(content, encoding="utf-8")
+    ticks(w, clock, 10)
+    assert w.core.open is None and any(s in (w.last_error or "") for s in ("screen.json", "paused_until"))
+
+
+def test_a_removal_resets_the_open_stretch_and_drops_inflight(rig):
+    from inkvault import export
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 16)
+    v = export.open_vault()
+    v.execute("DELETE FROM screen_stretches")
+    v.execute("INSERT OR REPLACE INTO meta VALUES ('screen_removal_gen', '1')"); v.commit(); v.close()
+    sup.answer(["text read before the removal finished"])
+    ticks(w, clock, 20)
+    assert rows(conn, "screen_text") == [] and w.stale_resets >= 1 and len(rows(conn, "screen_stretches")) == 1
+
+
+def test_stop_file(rig):
+    from inkvault import paths
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 5)
+    paths.watch_stop().write_text("stop")
+    assert w.tick() is False and not paths.watch_stop().exists() and w.core.open is None
+
+
+def test_heartbeat_has_no_titles_and_survives_write_failure(rig, monkeypatch):    # P11
+    from inkvault import screen
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 20)
+    assert "Chat" not in json.dumps(w.heartbeat()) and "Discord.exe" in json.dumps(w.heartbeat())
+    monkeypatch.setattr(screen, "write_atomic", lambda *a: (_ for _ in ()).throw(PermissionError("denied")))
+    ticks(w, clock, 20)
+    assert "heartbeat" in w.last_error
+
+
+def test_a_restart_never_extends_the_old_row(rig):
+    from inkvault import screen, watch
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 20)
+    before = rows(conn, "screen_stretches")
+    w2 = watch.Watcher(w.sampler, FakeSupervisor(), conn, screen.SettingsSource(), clock=clock, utc=w.utc)
+    ticks(w2, clock, 20)
+    after = rows(conn, "screen_stretches")
+    assert before[0] in after and len(after) == 2
+
+
+def remove_everything(gen):
+    from inkvault import export
+    v = export.open_vault()
+    v.execute("DELETE FROM screen_stretches")
+    v.execute("INSERT OR REPLACE INTO meta VALUES ('screen_removal_gen', ?)", (str(gen),)); v.commit(); v.close()
+
+
+def test_after_a_stale_reset_the_generation_is_the_vaults_new_one(rig):
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 16)
+    assert w.gen == 0
+    remove_everything(7)
+    ticks(w, clock, 20)
+    assert w.stale_resets >= 1 and w.gen == 7
+
+
+def test_fail_closed_closes_the_stretch_at_the_last_valid_poll(rig):
+    from inkvault import paths, screen
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 5)                                           # last valid poll sampled at t = 8
+    paths.screen_file().write_text("{nope", encoding="utf-8")
+    ticks(w, clock, 1)
+    assert w.core.open is None
+    assert rows(conn, "screen_stretches")[0][2] == screen.iso(T0 + timedelta(seconds=8))
+
+
+@pytest.mark.parametrize("change", ["locked", "idle", "excluded"])
+def test_acceptance_is_refused_for_each_changed_condition(rig, change):
+    from inkvault import screen, stretches
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 16)
+    assert sup.pending
+    if change == "locked":
+        state["locked"] = True
+    elif change == "idle":
+        state["idle"] = stretches.IDLE_LIMIT + 1
+    else:
+        screen.edit(lambda d: d["never_titles"].append("chat"))
+    read_once(w, clock, sup, ["text that must be refused at acceptance"])
+    assert rows(conn, "screen_text") == []
+
+
+def test_a_removal_gen_read_failure_during_reset_does_not_raise(rig, monkeypatch):
+    import sqlite3
+    from inkvault import screen
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 16)
+    remove_everything(3)
+    real, fails = screen.removal_gen, {"n": 0}
+
+    def flaky(c):
+        if fails["n"] == 0 and w.stale_resets > 0:      # only the read made by the reset
+            fails["n"] += 1
+            raise sqlite3.OperationalError("database is locked")
+        return real(c)
+    monkeypatch.setattr(screen, "removal_gen", flaky)
+    ticks(w, clock, 40)                                          # never raises; the reset is retried and adopts 3
+    assert fails["n"] == 1 and w.stale_resets >= 2 and w.gen == 3
+
+
+def test_a_heartbeat_failure_of_any_kind_never_raises(rig, monkeypatch):
+    from inkvault import screen
+    w, clock, sup, state, conn = rig
+    monkeypatch.setattr(screen, "write_atomic", lambda *a: (_ for _ in ()).throw(TypeError("odd")))
+    ticks(w, clock, 20)
+    assert w.last_error == "heartbeat: TypeError"
+
+
+def test_a_spinner_tick_between_submit_and_answer_keeps_the_read(rig):       # I3
+    from inkvault.stretches import Identity
+    w, clock, sup, state, conn = rig
+    ticks(w, clock, 16)
+    state["window"] = Identity(1, 10, 1, "Discord.exe", "⠙ Chat")
+    read_once(w, clock, sup, ["text read while the title spinner ticked"])
+    assert len(rows(conn, "screen_text")) == 1
+
+
+def test_a_persistent_database_error_is_logged_once(rig, monkeypatch):      # log only when it changes
+    from inkvault import paths, screenstore
+    w, clock, sup, state, conn = rig
+
+    def broken(c, wr):
+        raise screenstore.StoreError("OperationalError: disk I/O error")
+    monkeypatch.setattr(screenstore, "apply", broken)
+    ticks(w, clock, 12)
+    lines = [x for x in paths.watch_log().read_text(encoding="utf-8").splitlines() if "database:" in x]
+    assert len(lines) == 1 and "disk I/O" in w.last_error
+
+
+
+def test_acceptance_rechecks_never_rules_on_the_current_raw_title(rig, monkeypatch):
+    from inkvault import screen
+    from inkvault.stretches import Identity, Sample
+    w, clock, sup, state, conn = rig
+    screen.edit(lambda d: d["never_titles"].append("42"))
+    state["window"] = Identity(1, 10, 1, "Discord.exe", "Synthetic 41")
+    ticks(w, clock, 16)
+    assert sup.pending is not None
+    # The worker read the allowed title, but the acceptance sample now matches an exclusion.
+    fresh = Sample(clock.t, T0 + timedelta(seconds=clock.t),
+                   Identity(1, 10, 1, "Discord.exe", "Synthetic 42"), 0, False)
+    monkeypatch.setattr(w, "sampler", lambda: fresh)
+    sup.answer(["a synthetic response long enough for storage"])
+    w.collect()
+    w.flush()
+    assert conn.execute("SELECT COUNT(*) FROM screen_text").fetchone()[0] == 0
+
+
+
+def test_run_recovers_first_use_settings_after_initial_vault_failure(tmp_path, monkeypatch):
+    import sqlite3
+    import sys
+    from inkvault import export, paths, screen, watch, winapi, worker
+    from inkvault.stretches import Sample
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    monkeypatch.setattr(sys, "platform", "win32")
+    real_open = export.open_vault
+    attempts = []
+    def initially_busy(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real_open(*args, **kwargs)
+    monkeypatch.setattr(export, "open_vault", initially_busy)
+    monkeypatch.setattr(worker, "Supervisor", lambda argv: FakeSupervisor())
+    monkeypatch.setattr(winapi, "sample", lambda mono, utc: Sample(mono, utc, None, 0, False))
+    monkeypatch.setattr(watch.time, "sleep", lambda seconds: None)
+    original_tick = watch.Watcher.tick
+    valid = []
+    def bounded_tick(w):
+        if len(valid) == 2:
+            return False
+        result = original_tick(w)
+        valid.append(w.settings is not None)
+        return result
+    monkeypatch.setattr(watch.Watcher, "tick", bounded_tick)
+    assert watch.run() == 0
+    assert len(attempts) >= 2 and valid == [True, True]
+    assert paths.screen_file().exists()
+    db = real_open()
+    try:
+        assert screen.initialized(db)
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("error", ["busy", "permission", "database"])
+def test_open_store_retries_first_use_settings_failures(tmp_path, monkeypatch, error):
+    import sqlite3
+    from inkvault import paths, screen, watch
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    real = screen.ensure_initialized
+    attempts = []
+    def flaky(conn):
+        attempts.append(1)
+        if len(attempts) <= 2:
+            raise {"busy": screen.SettingsBusy, "permission": PermissionError,
+                   "database": sqlite3.OperationalError}[error]("synthetic failure")
+        return real(conn)
+    monkeypatch.setattr(screen, "ensure_initialized", flaky)
+    conn = watch.open_store(lambda: len(attempts) > 4, every=0)
+    try:
+        assert len(attempts) == 3 and conn is not None
+        assert paths.screen_file().exists() and screen.initialized(conn)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def test_open_store_never_recreates_lost_initialized_settings(tmp_path, monkeypatch):
+    from inkvault import paths, screen, watch
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    screen.prepare()
+    paths.screen_file().unlink()
+    conn = watch.open_store(lambda: False, every=0)
+    try:
+        assert screen.initialized(conn) and not paths.screen_file().exists()
+        assert screen.SettingsSource().poll()[0] is None
+    finally:
+        conn.close()

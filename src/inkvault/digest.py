@@ -15,13 +15,15 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from urllib.parse import urlsplit
 
-from . import paths
+from . import paths, screentime
 from .times import local
 
 OLLAMA = os.environ.get("INKVAULT_OLLAMA", "http://127.0.0.1:11434")
 DEFAULT_MODEL = os.environ.get("INKVAULT_DIGEST_MODEL", "qwen3.5:4b")
 MAX_INPUT = 6000  # characters of material per day
 WEB_SHARE = 1500  # characters of a day's material kept for browsing, after sessions and chats
+SCREEN_SHARE = 700  # characters kept for screen time (by duration, never screen text); reserved with the web share
+assert SCREEN_SHARE + WEB_SHARE < MAX_INPUT
 
 PROMPT = """You write a private daily log entry for one person (call them "you").
 Below is raw material from one day: titles of work sessions, their AI chats, and the apps, windows and
@@ -56,7 +58,7 @@ def gather(db):
             asks.append(clip(text, 200))
 
     apps, windows, sites = defaultdict(Counter), defaultdict(Counter), defaultdict(Counter)
-    for ts, app, title, url in db.execute("SELECT created, app, window_title, url FROM events WHERE created IS NOT NULL"):
+    for ts, app, title, url in db.execute("SELECT created, app, window_title, url FROM events WHERE created IS NOT NULL" + screentime.pieces_events_sql(db)):
         day = local_day(ts)
         if app:
             apps[day][app] += 1
@@ -77,8 +79,15 @@ def gather(db):
         if host:
             hosts[day][host] += 1
 
+    screen_apps, screen_windows = defaultdict(Counter), defaultdict(Counter)
+    for started, ended, app, title in screentime.stretches(db):
+        for day, _, secs in screentime.split(started, ended):
+            screen_apps[day][screentime.app_name(app)] += secs
+            if title:
+                screen_windows[day][clip(title, 90)] += secs
+
     material = {}
-    for day in sorted(set(sessions) | set(chats) | set(apps) | set(hosts)):
+    for day in sorted(set(sessions) | set(chats) | set(apps) | set(hosts) | set(screen_apps)):
         parts = []
         if sessions[day]:
             parts.append("Work sessions: " + "; ".join(dict.fromkeys(sessions[day])))
@@ -97,8 +106,15 @@ def gather(db):
         if hosts[day]:
             web.append("Top sites in the browser: " + ", ".join(h for h, _ in hosts[day].most_common(8)))
         web = "\n".join(web)[:WEB_SHARE]
-        if web:  # a day without browsing keeps exactly the material it had, so its digest isn't rewritten
-            text = text[:MAX_INPUT - len(web) - 1] + "\n" + web if text else web
+        screen_part = ""
+        if screen_apps[day]:
+            by_app = ", ".join(a + " " + screentime.fmt(s) for a, s in screen_apps[day].most_common(6))
+            windows_ = "; ".join(w + " (" + screentime.fmt(s) + ")" for w, s in screen_windows[day].most_common(8))
+            longest = ("\nLongest windows: " + windows_) if windows_ else ""
+            screen_part = ("Screen time by app: " + by_app + longest)[:SCREEN_SHARE]
+        tail = "\n".join(p for p in (screen_part, web) if p)
+        if tail:  # a day with neither keeps exactly the material it had; with only web, the same as before
+            text = (text[:MAX_INPUT - len(tail) - 1] + "\n" + tail) if text else tail
         material[day] = text[:MAX_INPUT]
     return material
 

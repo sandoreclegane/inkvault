@@ -109,8 +109,8 @@ class PiecesOS:
         return None, None
 
 
-def open_vault():
-    db = sqlite3.connect(paths.vault_db())
+def open_vault(timeout=5.0):
+    db = sqlite3.connect(paths.vault_db(), timeout=timeout)
     db.executescript("""
         PRAGMA journal_mode=WAL;
         CREATE TABLE IF NOT EXISTS events (
@@ -138,11 +138,28 @@ def open_vault():
         CREATE TABLE IF NOT EXISTS browser_profiles (
             profile TEXT PRIMARY KEY, last_attempt TEXT, last_success TEXT, last_error TEXT, visits_in_file INTEGER
         );
-        -- Removals recorded but not yet applied (forget.py): what ("profile" or "site"), the key or host, the
-        -- affected days as a JSON list.
+        -- Removals recorded but not yet applied (forget.py): what ("profile", "site", "screen-app" or
+        -- "screen-range"), the key, host, app name or JSON range, the affected days as a JSON list.
         CREATE TABLE IF NOT EXISTS browser_removals (
             id INTEGER PRIMARY KEY, what TEXT NOT NULL, value TEXT NOT NULL, days TEXT NOT NULL, created TEXT NOT NULL
         );
+
+        -- Screen capture (screen spec §5): stretches of a foreground window, OCR text read from them, and the
+        -- exact stretches each recorded screen removal deletes. Times are UTC ISO with microseconds and "Z".
+        CREATE TABLE IF NOT EXISTS screen_stretches (
+            id TEXT PRIMARY KEY, started TEXT NOT NULL, ended TEXT NOT NULL, app TEXT NOT NULL, title TEXT
+        );
+        CREATE TABLE IF NOT EXISTS screen_text (
+            id TEXT PRIMARY KEY, stretch_id TEXT NOT NULL, created TEXT NOT NULL, text TEXT NOT NULL,
+            text_hash TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS screen_removal_targets (
+            removal_id INTEGER NOT NULL, stretch_id TEXT NOT NULL, PRIMARY KEY (removal_id, stretch_id)
+        );
+        CREATE INDEX IF NOT EXISTS screen_stretches_started ON screen_stretches(started);
+        CREATE INDEX IF NOT EXISTS screen_stretches_ended ON screen_stretches(ended);
+        CREATE INDEX IF NOT EXISTS screen_stretches_app ON screen_stretches(app);
+        CREATE INDEX IF NOT EXISTS screen_text_stretch ON screen_text(stretch_id);
     """)
     return db
 

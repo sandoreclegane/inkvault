@@ -36,6 +36,16 @@ def only_python_subprocesses(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_watch_task(request, monkeypatch):
+    """`inkvault status` reads the sign-in task; on Windows no test may reach the real Task Scheduler. A test that
+    wants a task state fakes windows.read_back itself (that wins); test_schedulers tests the real one."""
+    if request.node.path.name == "test_schedulers.py":
+        return
+    from inkvault.schedulers import windows
+    monkeypatch.setattr(windows, "read_back", lambda task: None)
+
+
+@pytest.fixture(autouse=True)
 def no_real_sessions(tmp_path_factory, monkeypatch):
     """Sync must never read this machine's own Claude Code, Claude desktop or Codex sessions: point them all at
     empty folders. A test that wants sessions writes them under these same variables (for the desktop app, under
@@ -85,3 +95,34 @@ def holder(home):
             p.wait()
         err = p.stderr.read()
         assert not err, f"lock holder crashed: {err}"
+
+
+REAL_POPEN = subprocess.Popen
+
+
+@pytest.fixture(autouse=True)
+def only_python_popen(monkeypatch):
+    """Popen too: a test may start this Python (fake workers, lock holders), never schtasks, powershell or uv."""
+    class Guarded(REAL_POPEN):
+        def __init__(self, args, *a, **k):
+            program = args[0] if isinstance(args, (list, tuple)) and args else args
+            if not (isinstance(program, (str, os.PathLike))
+                    and os.path.normcase(os.fspath(program)) == os.path.normcase(sys.executable)):
+                raise AssertionError(f"a test started a real program: {args}")
+            super().__init__(args, *a, **k)
+    monkeypatch.setattr(subprocess, "Popen", Guarded)
+
+
+@pytest.fixture(scope="session")
+def tk_root():
+    """The one Tk root for the whole run: a second tkinter.Tk() in a process can fail with TclError on some Python
+    installs. Tests make Toplevels on it. Windows only."""
+    if sys.platform != "win32":
+        pytest.skip("Windows only")
+    import tkinter
+    root = tkinter.Tk()
+    root.withdraw()
+    try:
+        yield root
+    finally:
+        root.destroy()

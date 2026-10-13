@@ -12,7 +12,7 @@ from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import paths, sources, topics
+from . import paths, screentime, sources, topics
 from .times import local
 
 MAX_THEMES = 14
@@ -132,7 +132,8 @@ def collect(db):
         d["hours"] |= 1 << t.hour
         return t.date().isoformat()
 
-    for ts, app, url in db.execute("SELECT created, app, url FROM events WHERE created IS NOT NULL"):
+    for ts, app, url in db.execute(
+            "SELECT created, app, url FROM events WHERE created IS NOT NULL" + screentime.pieces_events_sql(db)):
         day = touch(ts, "captures")
         if app:
             apps[day][re.sub(r"\.exe$", "", app, flags=re.I)] += 1
@@ -149,6 +150,14 @@ def collect(db):
         day = touch(ts, "pages")
         if host:
             web_sites[day][host] += 1
+
+    screen_apps = defaultdict(Counter)
+    for started, ended, app, _ in screentime.stretches(db):
+        for day, hour, secs in screentime.split(started, ended):
+            d = days[day]
+            d["screen_minutes"] = d.get("screen_minutes", 0) + secs / 60
+            d["hours"] |= 1 << hour
+            screen_apps[day][screentime.app_name(app)] += secs / 60
 
     titled = []  # (day, title, extra text) for project detection
     highlights = defaultdict(list)
@@ -191,12 +200,16 @@ def collect(db):
         finally:
             ddb.close()
 
+    for d in days.values():
+        d["screen_minutes"] = round(d.get("screen_minutes", 0))
+
     return {
         "themes": list(themes),
         "days": dict(sorted(days.items())),
         "apps": {d: dict(c) for d, c in apps.items()},
         "sites": {d: dict(c) for d, c in sites.items()},
         "web_sites": {d: dict(c) for d, c in web_sites.items()},
+        "screen_apps": {d: {a: round(m) for a, m in c.items()} for d, c in screen_apps.items()},
         "docs": docs,
         "topics": topic_groups,
         "topic_docs": topic_docs,

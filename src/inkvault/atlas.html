@@ -86,7 +86,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
 
   <section class="card" data-table="calendar">
     <div class="head"><div><h2>Active hours per day</h2>
-      <p class="desc">How many different hours of each day you were on the computer (screen captures, session summaries, chats, pages opened in a browser). Hover a day for what it was about.</p></div>
+      <p class="desc">How many different hours of each day you were on the computer (Pieces captures, screen capture, session summaries, chats, pages opened in a browser). Hover a day for what it was about.</p></div>
       <button class="tbl">Show table</button></div>
     <div class="chart" id="calendar" style="height:200px"></div>
   </section>
@@ -131,7 +131,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
 
   <div class="grid2">
     <section class="card" data-table="apps">
-      <div class="head"><div><h2>Top apps</h2><p class="desc">Screen captures per app.</p></div>
+      <div class="head"><div><h2>Top apps</h2><p class="desc">Pieces captures per app.</p></div>
         <button class="tbl">Show table</button></div>
       <div class="chart" id="apps" style="height:380px"></div>
     </section>
@@ -141,6 +141,11 @@ footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
       <div class="chart" id="sites" style="height:380px"></div>
     </section>
   </div>
+  <section class="card" data-table="screen_apps">
+    <div class="head"><div><h2>Screen time by app</h2><p class="desc">Minutes each app was in front, from screen capture.</p></div>
+      <button class="tbl">Show table</button></div>
+    <div class="chart" id="screen_apps" style="height:380px"></div>
+  </section>
   <section class="card" data-table="web_sites">
     <div class="head"><div><h2>Top sites opened in a browser</h2><p class="desc">Page visits per website, from the browser profiles you chose. Visits synced from your other devices aren't counted here.</p></div>
       <button class="tbl">Show table</button></div>
@@ -197,15 +202,17 @@ function inRange(day) { return day >= range.from && day <= range.to; }
 function dayStory(day) { return DATA.digests[day] || (DATA.highlights[day] || []).join("; "); }
 
 function renderTiles() {
-  let active = 0, captures = 0, sessions = 0, chats = 0, pages = 0;
+  let screenMinutes = 0, active = 0, captures = 0, sessions = 0, chats = 0, pages = 0;
   for (const [day, d] of Object.entries(DATA.days)) {
     if (!inRange(day)) continue;
     if (d.hours) active++;
-    captures += d.captures; sessions += d.sessions; chats += d.chats; pages += d.pages || 0;
+    captures += d.captures; sessions += d.sessions; chats += d.chats; pages += d.pages || 0; screenMinutes += d.screen_minutes || 0;
   }
+  const hoursMinutes = m => m >= 60 ? `${Math.floor(m / 60)}h ${Math.round(m % 60)}m` : `${Math.round(m)}m`;
   const tiles = [
     ["Days remembered", fmt(active), `${range.from} → ${range.to}`, true],
     ["Screen captures", compact(captures), "what Pieces saw"],
+    ["Screen time", hoursMinutes(screenMinutes), "windows you had open, from screen capture"],
     ["Session summaries", fmt(sessions), "written by Pieces"],
     ["Chat messages", compact(chats), (DATA.chat_sources || ["Pieces"]).join(", ")],
     ["Pages opened", compact(pages), "in your browsers, on this computer"],
@@ -467,6 +474,7 @@ function render() {
   renderTiles();
   renderCalendar(t); renderRhythm(t); renderGraph(t); renderThemes(t); renderTopics(t); renderSources(t);
   renderBars("apps", DATA.apps, t, "App"); renderBars("sites", DATA.sites, t, "Site"); renderBars("web_sites", DATA.web_sites || {}, t, "Site");
+  renderBars("screen_apps", DATA.screen_apps || {}, t, "App");
   document.querySelectorAll(".card[data-table]").forEach(renderTableFor);
   document.getElementById("foot").textContent =
     `Built ${DATA.built} by InkVault from your local vault. Nothing on this page was sent anywhere.`;

@@ -14,6 +14,7 @@
 """
 import argparse
 import contextlib
+import json
 import os
 import sqlite3
 import sys
@@ -206,6 +207,68 @@ def confirm(question):
         return False
 
 
+def fmt_span(lo, hi):
+    from .times import local
+    a, b = local(lo), local(hi)
+    return f"{a:%Y-%m-%d %H:%M}–{b:%H:%M}" if a.date() == b.date() else f"{a:%Y-%m-%d %H:%M} – {b:%Y-%m-%d %H:%M}"
+
+
+def cmd_forget(args):
+    from . import browsers, forget, screen
+    if args.until and not args.since:
+        print("--until only goes with --since (a time range); --app removes everything of that app. "
+              "Nothing was removed.")
+        return 1
+    if args.app:
+        what, value, asked = "screen-app", args.app, None
+    else:
+        if not args.until:
+            print("--since needs --until.")
+            return 1
+        try:
+            s, u = screen.local_bounds(args.since, args.until)
+        except ValueError as e:
+            print(f"Bad range: {e}")
+            return 1
+        what, value, asked = "screen-range", json.dumps({"since": s, "until": u}), (s, u)
+    n, lo, hi = forget.screen_preview(what, value)
+    if not n:
+        print("Nothing recorded matches; nothing was removed.")
+        return 0
+    plural = "es" if n != 1 else ""
+    if asked:
+        print(f"Range: {fmt_span(*asked)} (local time).")
+    if not args.yes and not (browsers.interactive() and confirm(
+            f"Remove {n:,} stretch{plural} of screen capture ({fmt_span(lo, hi)}) and their text? [y/N] ")):
+        print("Nothing was removed.")
+        return 1
+    try:
+        with locked("forget", "nothing was removed.", required=True) as ok:
+            if not ok:
+                return 1
+            n, lo, hi = forget.screen_request(what, value)
+            if not n:
+                print("Nothing recorded matches any more; nothing was removed.")
+                return 0
+            wider = asked and (lo < asked[0] or hi > asked[1])
+            print(f"Removing {n:,} stretch{'es' if n != 1 else ''}, {fmt_span(lo, hi)}"
+                  + (" (wider than the range you asked for: whole windows are removed)" if wider else "") + ".")
+            try:
+                forget.finish()
+            except Exception as e:  # noqa: BLE001
+                print(f"Removing didn't finish ({type(e).__name__}). The next `inkvault index` or nightly run "
+                      "finishes it, and search stays off until then.")
+                return 1
+    except Exception as e:  # noqa: BLE001
+        print(f"Couldn't remove screen capture ({type(e).__name__}); nothing more was done. "
+              "Run the same command again.")
+        return 1
+    print("Backups made before now, and answers already given to an AI client, still have it.")
+    if what == "screen-app":
+        print(f"Screen capture still records {args.app}: to stop, `inkvault watch --never-app {args.app}`.")
+    return 0
+
+
 def stored_profiles():
     """Profile keys with visits in the vault, and how many each."""
     from . import paths
@@ -356,7 +419,7 @@ def cmd_status(_args):
             print(f"vault: {paths.vault_db().stat().st_size / 1e6:,.0f} MB, last export {meta.get('last_export', '?')}"
                   f"{' (partial; continues next run)' if meta.get('last_export_partial') == '1' else ''} "
                   f"from PiecesOS {meta.get('pieces_version', '?')}")
-            print(f"  {events[0]:,} captures ({(events[1] or '')[:10]} → {(events[2] or '')[:10]}), "
+            print(f"  {events[0]:,} Pieces captures ({(events[1] or '')[:10]} → {(events[2] or '')[:10]}), "
                   f"{kinds.get('summary', 0):,} summaries, {kinds.get('message', 0):,} chat messages, "
                   f"{kinds.get('asset', 0):,} snippets")
             for line in sessions + web:
@@ -370,6 +433,9 @@ def cmd_status(_args):
     print(f"search index: {'ready' if paths.search_db().exists() else 'not built'}; "
           f"digests: {'yes' if paths.digests_db().exists() else 'none'}; "
           f"dashboard: {paths.dashboard() if paths.dashboard().exists() else 'not built'}")
+    from . import watch
+    for line in watch.status_lines():
+        print(line)
     pos, version = PiecesOS.find()
     print(f"PiecesOS: {'running ' + version + ' at ' + pos.base if pos else 'not reachable'}")
     from . import nightly, schedule
@@ -435,6 +501,26 @@ def main(argv=None):
                    help="don't wake it; run the next time it's awake")
     s.add_argument("--off", action="store_true", help="stop the nightly run (keeps the vault and backups)")
     sub.add_parser("nightly", help="one refresh + backup now (what the schedule runs)")
+    wp = sub.add_parser("watch", help="screen capture: which window you're in, and text from the apps you allow")
+    wg = wp.add_mutually_exclusive_group()
+    wg.add_argument("--apps", action="store_true", help="show which apps get text capture and which are never captured")
+    wg.add_argument("--add-app", metavar="EXE", help="read text in this app (for example Discord.exe)")
+    wg.add_argument("--remove-app", metavar="EXE", help="back to timeline-only for this app")
+    wg.add_argument("--never-app", metavar="EXE", help="never record this app, not even in the timeline")
+    wg.add_argument("--never-title", metavar="TEXT", help="skip windows whose title contains this text")
+    wg.add_argument("--pause", metavar="FOR", help="pause capture, for example 1h or 30m")
+    wg.add_argument("--resume", action="store_true", help="end a pause")
+    wg.add_argument("--stop", action="store_true", help="stop the running watcher")
+    wg.add_argument("--install", action="store_true", help="start screen capture at every sign-in")
+    wg.add_argument("--uninstall", action="store_true", help="stop screen capture and remove the sign-in task")
+    wg.add_argument("--reset-settings", action="store_true", help="restore the default capture settings")
+    f = sub.add_parser("forget", help="remove screen capture by app or time range")
+    f.add_argument("--screen", action="store_true", required=True)
+    fg = f.add_mutually_exclusive_group(required=True)
+    fg.add_argument("--app", metavar="EXE")
+    fg.add_argument("--since", metavar="TIME", help="local time or date (or with an offset, e.g. Z)")
+    f.add_argument("--until", metavar="TIME")
+    f.add_argument("--yes", action="store_true", help="don't ask")
     args = p.parse_args(argv)
 
     if args.home:
@@ -488,6 +574,11 @@ def dispatch(args):
         from . import server
         server.run()
         return 0
+    if args.cmd == "watch":
+        from . import watch
+        return watch.cmd(args)
+    if args.cmd == "forget":
+        return cmd_forget(args)
     if args.cmd == "status":
         return cmd_status(args)
     if args.cmd == "schedule":
