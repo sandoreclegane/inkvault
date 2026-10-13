@@ -120,3 +120,9 @@ def test_guarded_call_reports_status_and_generation(vault):
     with pytest.raises(retrieval.Refused) as e:
         retrieval.guarded_call(lambda: 42)
     assert e.value.status == "rebuilding"
+
+
+def test_mcp_limit_zero_keeps_one_hit_like_v030(vault):
+    from inkvault import server
+    out = server.search_memories("backoff", mode="keyword", limit=0)
+    assert sum(1 for line in out.splitlines() if line.startswith("[")) == 1

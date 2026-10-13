@@ -4,8 +4,10 @@ Answers are structures, not text (spec §3.1): server.py formats them exactly as
 them to the page as JSON. Everything here is read-only. Importing it starts nothing and changes no process setting;
 each process that answers questions sets HF_HUB_OFFLINE itself.
 """
+import base64
 import functools
 import hashlib
+import json
 import re
 import sqlite3
 from contextlib import contextmanager
@@ -39,8 +41,8 @@ FACTS = {
     "web": (("pages", "host"), None),
 }
 MCP_MARKERS = ("[", "]")
-ATLAS_MARKERS = ("\ue000", "\ue001")  # the Atlas's markers (private-use characters)\u2026
-SECOND_MARKERS = ("\ue002", "\ue003")  # \u2026and a second pair: each snippet is made with both, so a character that
+ATLAS_MARKERS = ("\ue000", "\ue001")  # the Atlas's markers (private-use characters)...
+SECOND_MARKERS = ("\ue002", "\ue003")  # ...and a second pair: each snippet is made with both, so a character that
 # differs between the two copies is a marker FTS inserted, and one that's the same is the record's own text, even when
 # the record itself contains marker characters (Codex plan review #5)
 # The Atlas's source chips (spec §4.2): the kinds each searches, and which events.source it keeps.
@@ -454,3 +456,256 @@ def source_label(hit):
     if hit.kind == "screen":
         return f"Screen · {hit.fact1 or ''}".rstrip(" ·")
     return f"Web history · {hit.fact1 or ''}".rstrip(" ·")
+
+
+STRETCH_TEXTS = 20
+
+
+def screen_memory(id_, max_chars):
+    if not paths.vault_db().exists():
+        return f"No memory with id {id_}"
+    v = paths.connect_ro(paths.vault_db())
+    try:
+        v.execute("BEGIN")
+        if not has_table(v, "screen_stretches"):
+            return f"No memory with id {id_}"
+        if id_.startswith("screentext:"):
+            t = v.execute("SELECT stretch_id, created, text FROM screen_text WHERE id=?", (id_,)).fetchone()
+            if not t:
+                return f"No memory with id {id_}"
+            sid, texts, more = t[0], [(t[1], t[2])], 0
+        else:
+            sid = id_
+            texts = v.execute("SELECT created, text FROM screen_text WHERE stretch_id=? ORDER BY created DESC LIMIT ?",
+                              (sid, STRETCH_TEXTS)).fetchall()
+            more = v.execute("SELECT COUNT(*) FROM screen_text WHERE stretch_id=?", (sid,)).fetchone()[0] - len(texts)
+        st = v.execute("SELECT started, ended, app, title FROM screen_stretches WHERE id=?", (sid,)).fetchone()
+        if not st:
+            return f"No memory with id {id_}"
+    finally:
+        v.close()
+    body = (f"SCREEN  {local(st[0]):%Y-%m-%d %H:%M}–{local(st[1]):%H:%M}\napp: {st[2]}\nwindow: {st[3] or ''}\n\n"
+            + ("\n\n".join(f"{local(c):%H:%M}\n{t}" for c, t in texts) if texts else "(timeline only: no text read)"))
+    if more > 0:
+        body += f"\n\n… {more} more text reads in this window; search finds them by their own ids."
+    return body if len(body) <= max_chars else body[:max_chars] + f"\n\n… [truncated, {len(body)} chars total]"
+
+
+def memory_text(id_, max_chars=20000):
+    """Exactly what MCP's get_memory returns (spec §3.1): the whole conversation for a chat, cut at max_chars with
+    the usual note. The Atlas reader uses record() instead."""
+    if id_.startswith(("screen:", "screentext:")):
+        return screen_memory(id_, max_chars)
+    with db() as conn:
+        if id_.startswith("web:") and has_table(conn, "pages") and (
+                r := conn.execute("SELECT day, url, title, profiles FROM pages WHERE id=?", (id_,)).fetchone()):
+            seen = conn.execute("SELECT created, profile, synced FROM visits WHERE page_id=? ORDER BY created",
+                                (id_,)).fetchall()
+            body = (f"WEB PAGE  {r['day']}\n{r['title'] or '(no title)'}  (title as observed at sync)\n{r['url']}\n"
+                    f"profiles: {r['profiles']}\n\nvisits:\n" + "\n".join(
+                        f"{local(v['created']).strftime('%H:%M')}  {v['profile']}"
+                        + ("  (synced from another device)" if v["synced"] else "") for v in seen))
+        elif r := conn.execute("SELECT created, name, text FROM summaries WHERE id=?", (id_,)).fetchone():
+            body = f"SUMMARY  {r['created']}\n{r['name']}\n\n{r['text']}"
+        elif r := conn.execute("SELECT created, window_title, app, url, readable FROM events WHERE id=?", (id_,)).fetchone():
+            body = (f"EVENT  {r['created']}\napp: {r['app']}\nwindow: {r['window_title']}\n"
+                    f"url: {r['url']}\n\n{r['readable'] or '(no text captured)'}")
+        elif r := conn.execute("SELECT conversation_id, conversation_name FROM messages WHERE id=?", (id_,)).fetchone():
+            msgs = conn.execute("SELECT created, role, text FROM messages WHERE conversation_id=? ORDER BY created",
+                                (r["conversation_id"],)).fetchall()
+            body = f"CHAT CONVERSATION\n{r['conversation_name'] or ''}\n\n" + "\n\n".join(f"{(m['created'] or '')[:16]} {m['role']}:\n{m['text']}" for m in msgs)
+        elif r := conn.execute("SELECT created, name, language, text FROM snippets WHERE id=?", (id_,)).fetchone():
+            body = f"SNIPPET  {r['created']}\n{r['name']} ({r['language']})\n\n```{r['language']}\n{r['text']}\n```"
+        else:
+            return f"No memory with id {id_}"
+    return body if len(body) <= max_chars else body[:max_chars] + f"\n\n… [truncated, {len(body)} chars total]"
+
+
+CHAT_WINDOW = 20      # messages each side of the match, and per Earlier/Later page (spec §3.1)
+TEXT_CAP = 100_000    # characters of record text in one answer
+ITEM_SHARE = 20_000   # one chat message's share of a window before it is cut and offered for expansion
+CURSOR_MAX = 2000
+
+
+class BadCursor(ValueError):
+    """A cursor the page couldn't have made."""
+
+
+def encode_cursor(d):
+    return base64.urlsafe_b64encode(json.dumps(d, separators=(",", ":")).encode()).decode().rstrip("=")
+
+
+def decode_cursor(s):
+    """Opaque to the page; checked here because it comes back over HTTP."""
+    if not isinstance(s, str) or not s or len(s) > CURSOR_MAX:
+        raise BadCursor("bad cursor")
+    try:
+        d = json.loads(base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)))
+    except ValueError:
+        raise BadCursor("bad cursor") from None
+    ok = (isinstance(d, dict) and d.get("op") in ("earlier", "later", "expand") and d.get("k") in SOURCES
+          and isinstance(d.get("i"), str) and isinstance(d.get("g"), str)
+          and isinstance(d.get("at" if d.get("op") != "expand" else "off"), int)
+          and d.get("at" if d.get("op") != "expand" else "off") >= 0)
+    if not ok:
+        raise BadCursor("bad cursor")
+    return d
+
+
+def item(kind, id_, created, text, gen, role=None, matched=False, share=ITEM_SHARE, full=None):
+    """full: the whole text's length, when text was already cut by the query."""
+    text = text or ""
+    cut = (len(text) if full is None else (full or 0)) > share
+    return {"id": id_, "time": when(created), "role": role, "text": text[:share], "truncated": cut,
+            "expand": encode_cursor({"op": "expand", "k": kind, "i": id_, "g": gen, "off": share}) if cut else None,
+            "matched": matched}
+
+
+def window(sizes, start, stop, anchor):
+    """The contiguous messages [lo, hi) within [start, stop), grown outward from anchor (later side first), until
+    adding one more would pass TEXT_CAP. At least one message is always included."""
+    start, stop = max(0, start), min(len(sizes), stop)
+    lo = hi = anchor
+    total = 0
+    while True:
+        grew = False
+        if hi < stop and not (total and total + sizes[hi] > TEXT_CAP):
+            total += sizes[hi]; hi += 1; grew = True
+        if lo > start and not (total and total + sizes[lo - 1] > TEXT_CAP):
+            total += sizes[lo - 1]; lo -= 1; grew = True
+        if not grew:
+            return lo, hi
+
+
+def chat(mid, cursor, gen):
+    with db() as conn:
+        src = "source" if has_column(conn, "messages", "source") else "NULL AS source"
+        head = conn.execute(f"SELECT conversation_id, conversation_name, {src} FROM messages WHERE id=?",
+                            (mid,)).fetchone()
+        if not head:
+            return {"status": "missing"}
+        # Lengths only: a long conversation never loads every message's text (Codex plan review, limits).
+        msgs = conn.execute("SELECT id, created, role, length(text) AS n FROM messages WHERE conversation_id=? "
+                            "ORDER BY created, rowid", (head["conversation_id"],)).fetchall()
+        sizes = [min(m["n"] or 0, ITEM_SHARE) for m in msgs]
+        n = len(msgs)
+        if cursor is None:
+            center = next(i for i, m in enumerate(msgs) if m["id"] == mid)
+            lo, hi = window(sizes, center - CHAT_WINDOW, center + CHAT_WINDOW + 1, center)
+        elif cursor["op"] == "earlier":
+            at = min(cursor["at"], n)
+            lo, hi = window(sizes, at - CHAT_WINDOW, at, at)
+        else:
+            at = min(cursor["at"], n)
+            lo, hi = window(sizes, at, at + CHAT_WINDOW, at)
+        shown = [m["id"] for m in msgs[lo:hi]]  # at most 2 * CHAT_WINDOW + 1 ids
+        texts = dict(conn.execute(f"SELECT id, substr(text, 1, {ITEM_SHARE}) FROM messages WHERE id IN "
+                                  f"({','.join('?' * len(shown))})", shown).fetchall()) if shown else {}
+    items = [item("chats", m["id"], m["created"], texts.get(m["id"]), gen, role=m["role"], full=m["n"],
+                  matched=cursor is None and m["id"] == mid) for m in msgs[lo:hi]]
+    cur = lambda op, at: encode_cursor({"op": op, "k": "chats", "i": mid, "g": gen, "at": at})
+    return {"status": "ok", "kind": "chats", "id": mid, "title": head["conversation_name"] or "Conversation",
+            "source_label": f"Conversation · {NAMES.get(head['source'] or 'pieces', head['source'])}",
+            "meta": f"{n} messages", "note": None, "url": None, "code": False, "visits": None, "items": items,
+            "earlier": cur("earlier", lo) if lo > 0 else None, "later": cur("later", hi) if hi < n else None}
+
+
+def full_text(kind, id_):
+    """The whole text that an expand cursor walks through, or None when the record is gone."""
+    column = {"chats": ("messages", "text"), "summaries": ("summaries", "text"), "events": ("events", "readable"),
+              "snippets": ("snippets", "text")}.get(kind)
+    if not column:
+        return None
+    with db() as conn:
+        r = conn.execute(f"SELECT {column[1]} FROM {column[0]} WHERE id=?", (id_,)).fetchone()
+    return None if r is None else (r[0] or "")
+
+
+def expand(kind, id_, off, gen):
+    text = full_text(kind, id_)
+    if text is None:
+        return {"status": "missing"}
+    nxt = off + TEXT_CAP
+    return {"status": "ok", "text": text[off:nxt],
+            "next": encode_cursor({"op": "expand", "k": kind, "i": id_, "g": gen, "off": nxt}) if nxt < len(text) else None}
+
+
+def base(kind, id_, title, label, meta, items, **extra):
+    out = {"status": "ok", "kind": kind, "id": id_, "title": title, "source_label": label, "meta": meta,
+           "note": None, "url": None, "code": False, "visits": None, "items": items, "earlier": None, "later": None}
+    out.update(extra)
+    return out
+
+
+def single(kind, id_, gen):
+    """Every kind but chats and screen stretches."""
+    with db() as conn:
+        if kind == "summaries":
+            r = conn.execute("SELECT created, name, text FROM summaries WHERE id=?", (id_,)).fetchone()
+            return r and base(kind, id_, r["name"], "Pieces summary", when(r["created"]),
+                              [item(kind, id_, r["created"], r["text"], gen, share=TEXT_CAP)])
+        if kind == "snippets":
+            r = conn.execute("SELECT created, name, language, text FROM snippets WHERE id=?", (id_,)).fetchone()
+            return r and base(kind, id_, r["name"], "Snippet" + (f" · {r['language']}" if r["language"] else ""),
+                              when(r["created"]), [item(kind, id_, r["created"], r["text"], gen, share=TEXT_CAP)],
+                              code=True)
+        if kind == "events":
+            src = "source" if has_column(conn, "events", "source") else "'pieces' AS source"
+            r = conn.execute(f"SELECT created, app, window_title, url, readable, {src} FROM events WHERE id=?",
+                             (id_,)).fetchone()
+            if not r:
+                return None
+            label = ("Screen text" if r["source"] == "screen" else "Pieces capture") + (f" · {r['app']}" if r["app"] else "")
+            return base(kind, id_, r["window_title"] or "(no window title)", label, when(r["created"]),
+                        [item(kind, id_, r["created"], r["readable"] or "(no text captured)", gen, share=TEXT_CAP)],
+                        url=r["url"])
+        if kind == "web" and has_table(conn, "pages"):
+            r = conn.execute("SELECT day, url, host, title FROM pages WHERE id=?", (id_,)).fetchone()
+            if not r:
+                return None
+            seen = conn.execute("SELECT created, profile, synced FROM visits WHERE page_id=? ORDER BY created",
+                                (id_,)).fetchall()
+            return base(kind, id_, r["title"] or r["url"], f"Web history · {r['host']}", r["day"], [],
+                        url=r["url"], note="Browser history: the page itself isn't saved.",
+                        visits=[{"time": when(v["created"]), "profile": v["profile"], "synced": bool(v["synced"])}
+                                for v in seen])
+    return None
+
+
+def stretch(id_, gen):
+    """A screen stretch, read live from vault.db like MCP's get_memory: app, window, times, newest text reads."""
+    if not paths.vault_db().exists():
+        return None
+    v = paths.connect_ro(paths.vault_db())
+    try:
+        v.execute("BEGIN")
+        if not has_table(v, "screen_stretches"):
+            return None
+        st = v.execute("SELECT started, ended, app, title FROM screen_stretches WHERE id=?", (id_,)).fetchone()
+        if not st:
+            return None
+        texts = v.execute("SELECT id, created, text FROM screen_text WHERE stretch_id=? ORDER BY created DESC LIMIT ?",
+                          (id_, STRETCH_TEXTS)).fetchall()
+        more = v.execute("SELECT COUNT(*) FROM screen_text WHERE stretch_id=?", (id_,)).fetchone()[0] - len(texts)
+    finally:
+        v.close()
+    note = ("Timeline only: no text was read in this app." if not texts else
+            f"{more} more text reads in this window; search finds them." if more > 0 else None)
+    return base("screen", id_, st[3] or st[2], f"Screen · {st[2]}", f"{when(st[0])}–{when(st[1])[-5:]}",
+                [item("events", t[0], t[1], t[2], gen, share=TEXT_CAP) for t in texts], note=note)
+
+
+def record(kind, id_=None, cursor=None):
+    """One record for the Atlas reader (spec §3.1). cursor is a decoded cursor; a cursor made under another
+    published state answers {"status": "changed"} and nothing else."""
+    gen = generation(published())
+    if cursor is not None:
+        if cursor["g"] != gen:
+            return {"status": "changed"}
+        kind, id_ = cursor["k"], cursor["i"]
+        if cursor["op"] == "expand":
+            return expand(kind, id_, cursor["off"], gen)
+    if kind == "chats":
+        return chat(id_, cursor, gen)
+    found = stretch(id_, gen) if kind == "screen" else single(kind, id_, gen)
+    return found or {"status": "missing"}

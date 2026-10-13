@@ -28,7 +28,6 @@ mcp = MCPServer(
 )
 
 TIMELINE_MAX = 500
-STRETCH_TEXTS = 20
 
 
 @mcp.tool()
@@ -52,42 +51,13 @@ def search_memories(query: str, source: str = "all", mode: str = "hybrid",
     since/until: optional ISO dates ("2026-10-01") or UTC times ("2026-10-01T14:30").
     Returns ranked hits with ids; use get_memory(id) for the full text.
     """
-    r = retrieval.search(query, source, mode, since, until, limit)
+    # v0.3.0 always kept at least one hit for limit <= 0; keep that for MCP.
+    r = retrieval.search(query, source, mode, since, until, max(limit, 1))
     if r.error:
         return r.error
     out = [f"[{h.kind}] {h.id}  {(h.created or '')[:16]}  {h.title or ''}\n"
            f"    {h.snippet or ' '.join((h.preview or '').split())}" for h in r.hits]
     return "\n".join([*out, *r.notes] if out else [f"No matches for {query!r} in {source}.", *r.notes])
-
-
-def screen_memory(id_, max_chars):
-    if not paths.vault_db().exists():
-        return f"No memory with id {id_}"
-    v = paths.connect_ro(paths.vault_db())
-    try:
-        v.execute("BEGIN")
-        if not has_table(v, "screen_stretches"):
-            return f"No memory with id {id_}"
-        if id_.startswith("screentext:"):
-            t = v.execute("SELECT stretch_id, created, text FROM screen_text WHERE id=?", (id_,)).fetchone()
-            if not t:
-                return f"No memory with id {id_}"
-            sid, texts, more = t[0], [(t[1], t[2])], 0
-        else:
-            sid = id_
-            texts = v.execute("SELECT created, text FROM screen_text WHERE stretch_id=? ORDER BY created DESC LIMIT ?",
-                              (sid, STRETCH_TEXTS)).fetchall()
-            more = v.execute("SELECT COUNT(*) FROM screen_text WHERE stretch_id=?", (sid,)).fetchone()[0] - len(texts)
-        st = v.execute("SELECT started, ended, app, title FROM screen_stretches WHERE id=?", (sid,)).fetchone()
-        if not st:
-            return f"No memory with id {id_}"
-    finally:
-        v.close()
-    body = (f"SCREEN  {local(st[0]):%Y-%m-%d %H:%M}–{local(st[1]):%H:%M}\napp: {st[2]}\nwindow: {st[3] or ''}\n\n"
-            + ("\n\n".join(f"{local(c):%H:%M}\n{t}" for c, t in texts) if texts else "(timeline only: no text read)"))
-    if more > 0:
-        body += f"\n\n… {more} more text reads in this window; search finds them by their own ids."
-    return body if len(body) <= max_chars else body[:max_chars] + f"\n\n… [truncated, {len(body)} chars total]"
 
 
 def screen_lines(since, until, limit):
@@ -116,31 +86,7 @@ def screen_lines(since, until, limit):
 @guarded
 def get_memory(id: str, max_chars: int = 20000) -> str:
     """Full text of one memory (summary, event, chat, snippet, web page, or screen window) by id from search_memories or timeline."""
-    if id.startswith(("screen:", "screentext:")):
-        return screen_memory(id, max_chars)
-    with db() as conn:
-        if id.startswith("web:") and has_table(conn, "pages") and (
-                r := conn.execute("SELECT day, url, title, profiles FROM pages WHERE id=?", (id,)).fetchone()):
-            seen = conn.execute("SELECT created, profile, synced FROM visits WHERE page_id=? ORDER BY created",
-                                (id,)).fetchall()
-            body = (f"WEB PAGE  {r['day']}\n{r['title'] or '(no title)'}  (title as observed at sync)\n{r['url']}\n"
-                    f"profiles: {r['profiles']}\n\nvisits:\n" + "\n".join(
-                        f"{local(v['created']).strftime('%H:%M')}  {v['profile']}"
-                        + ("  (synced from another device)" if v["synced"] else "") for v in seen))
-        elif r := conn.execute("SELECT created, name, text FROM summaries WHERE id=?", (id,)).fetchone():
-            body = f"SUMMARY  {r['created']}\n{r['name']}\n\n{r['text']}"
-        elif r := conn.execute("SELECT created, window_title, app, url, readable FROM events WHERE id=?", (id,)).fetchone():
-            body = (f"EVENT  {r['created']}\napp: {r['app']}\nwindow: {r['window_title']}\n"
-                    f"url: {r['url']}\n\n{r['readable'] or '(no text captured)'}")
-        elif r := conn.execute("SELECT conversation_id, conversation_name FROM messages WHERE id=?", (id,)).fetchone():
-            msgs = conn.execute("SELECT created, role, text FROM messages WHERE conversation_id=? ORDER BY created",
-                                (r["conversation_id"],)).fetchall()
-            body = f"CHAT CONVERSATION\n{r['conversation_name'] or ''}\n\n" + "\n\n".join(f"{(m['created'] or '')[:16]} {m['role']}:\n{m['text']}" for m in msgs)
-        elif r := conn.execute("SELECT created, name, language, text FROM snippets WHERE id=?", (id,)).fetchone():
-            body = f"SNIPPET  {r['created']}\n{r['name']} ({r['language']})\n\n```{r['language']}\n{r['text']}\n```"
-        else:
-            return f"No memory with id {id}"
-    return body if len(body) <= max_chars else body[:max_chars] + f"\n\n… [truncated, {len(body)} chars total]"
+    return retrieval.memory_text(id, max_chars)
 
 
 @mcp.tool()
