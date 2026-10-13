@@ -103,3 +103,7 @@ retaining a realistic token shape and the same redaction assertions. No secret-s
 Review commit references were updated to the rewritten history. Production code is unchanged by this cleanup.
 
 Post-cleanup verification: 24 redaction tests passed; production source matches the pre-cleanup branch exactly.
+
+## Public-main integration and CI fix
+
+Preserved the current public logo, browser-history metadata and connected-AI privacy wording. The first Linux/macOS CI run exposed Windows command emulation selecting msvcrt on POSIX hosts. Kernel-lock API selection now uses the actual host OS; a real cross-process contention regression failed before the change and passed after it. Focused lock/command suite: 106 passed. Full resolved-merge suite: 604 passed, 1 skipped. The lockfile consistency check passed offline.

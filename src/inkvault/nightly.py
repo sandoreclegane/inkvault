@@ -177,7 +177,7 @@ def try_lock(fd):
 
     Raises OSError for anything that isn't contention (see BUSY_ERRNOS)."""
     try:
-        if sys.platform == "win32":
+        if os.name == "nt":
             import msvcrt
             os.lseek(fd, LOCK_BYTE, os.SEEK_SET)
             msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
@@ -193,7 +193,7 @@ def try_lock(fd):
 
 def unlock(fd):
     try:
-        if sys.platform == "win32":
+        if os.name == "nt":
             import msvcrt
             os.lseek(fd, LOCK_BYTE, os.SEEK_SET)
             msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)

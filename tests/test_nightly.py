@@ -704,3 +704,13 @@ def test_the_new_lock_purposes_are_recognized(home):
     for purpose in ("index", "digest", "dashboard", "browsers"):
         with nightly.lock(purpose):
             assert nightly.lock_purpose() == purpose
+
+
+
+def test_kernel_lock_uses_the_host_os_when_command_platform_is_emulated(home, monkeypatch):
+    from inkvault import nightly
+    # Windows-command tests run on every CI host; kernel locks must still use that host's real API.
+    monkeypatch.setattr(sys, "platform", "linux" if os.name == "nt" else "win32")
+    with nightly.lock():
+        assert try_in_subprocess(home) == "BUSY"
+    assert try_in_subprocess(home) == "TOOK"

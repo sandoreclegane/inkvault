@@ -1,14 +1,21 @@
 # InkVault
 
-**A long-term memory you own: rescue what Pieces knew about you, keep every Claude Code and Codex session from here
-on, and search all of it from your AI tools.**
+<p align="center">
+  <img src="docs/assets/inkvault-logo-horizontal.png" alt="InkVault logo" width="560">
+</p>
+
+**A long-term memory you own: rescue what Pieces knew about you, keep every Claude Code and Codex session and the
+pages you open in your browser from here on, and search all of it from your AI tools.**
 
 Your working memory is scattered across tools that don't keep it. Pieces for Developers shut down on September 27,
-2026. Claude Code deletes your sessions after 30 days. Codex keeps them in files nobody reads twice.
+2026. Claude Code deletes your sessions after 30 days. Codex keeps them in files nobody reads twice. Your browser
+forgets what you read after about 90 days.
 
 InkVault gathers all of it into one file on your machine: your Pieces memory, rescued once, and your conversations
-with Claude Code, Codex and the Claude desktop app, added every night. It makes the whole thing searchable by your AI
-tools and draws it as a private dashboard. Nothing is uploaded anywhere.
+with Claude Code, Codex and the Claude desktop app and the history of the browser profiles you choose, added every
+night. It makes the whole thing searchable by your AI
+tools and draws it as a private dashboard. InkVault itself does not upload your archive. If you connect an AI client,
+memories returned to that client may be sent to its model provider under that client's settings.
 
 **Coming from Pieces?** Rescue your memory while PiecesOS still runs (read-only now, and gone once you uninstall it):
 
@@ -16,7 +23,8 @@ tools and draws it as a private dashboard. Nothing is uploaded anywhere.
 uvx --from git+https://github.com/sandoreclegane/inkvault inkvault rescue
 ```
 
-**Never used Pieces?** Start a vault from your Claude Code and Codex sessions alone:
+**Never used Pieces?** Start a vault from your Claude Code and Codex sessions and your browser history alone (in a
+terminal, it first asks which browser profiles are yours):
 
 ```bash
 uvx --from git+https://github.com/sandoreclegane/inkvault inkvault sync
@@ -27,16 +35,19 @@ Either way, add [`inkvault schedule`](#keep-it-up-to-date) and the vault keeps g
 
 ### The vault keeps learning
 
-Every night, InkVault reads the session files Claude Code and Codex already keep on disk and copies in what's new:
-what you asked, what the assistant answered, what each session was called. Your AI tools can then search what they
-helped you with last month, or last year, long after the original files are gone.
+Every night, InkVault reads the session files Claude Code and Codex already keep on disk, and the history of the
+browser profiles you chose, and copies in what's new: what you asked, what the assistant answered, what each session
+was called, and which pages you opened. Your AI tools can then search what they helped you with, and what you were
+reading, last month or last year, long after the original files are gone.
 
 - **Claude Code**: every project, from `~/.claude/projects`. Kept past its 30-day cleanup.
 - **Codex**: every session it saved, from `~/.codex/sessions`.
 - **Claude desktop app** (agent mode, Windows): including prompts only its audit log kept.
+- **Your browsers**: Chrome, Edge, Comet, Brave, Arc, Vivaldi, Opera and Firefox, only the profiles you say are yours
+  ([how](#your-browser-history)). Kept past the browser's own cleanup.
 
-Only what's new since the last sync is read. Tool output and attachments are left out (see
-[Privacy](#privacy)).
+Only what's new since the last sync is added. Tool output and attachments are left out, and sign-in codes and
+tokens are cleaned out of web addresses (see [Privacy](#privacy)).
 
 ### Rescuing from Pieces
 
@@ -235,8 +246,9 @@ This installs InkVault as a permanent `inkvault` command (with `uv tool install`
 up a nightly run at 03:00 with your system's own scheduler: Task Scheduler on Windows, launchd on macOS, a systemd
 user timer (or cron) on Linux. If uv's tool folder isn't on your PATH, it tells you to run `uv tool update-shell`.
 
-Each run exports new captures (if PiecesOS is running), copies new Claude Code and Codex sessions, copies new browser history from the profiles you chose, and saves a dated
-copy of `vault.db` in `backups/` right after (the last 7 are kept). Then it rebuilds search, writes new digests (if
+Each run exports new captures (if PiecesOS is running), copies new Claude Code and Codex sessions and new browser
+history from the profiles you chose, and saves a dated copy of `vault.db` in `backups/` right after (the last 7 are
+kept). Then it rebuilds search, writes new digests (if
 Ollama is running) and rebuilds the dashboard. One step failing never stops the others. The computer is kept awake
 while it runs (Windows and macOS). The export has a time budget: if a big backlog doesn't fit, the run stops
 cleanly, backs up what it has, and the next night continues where it stopped.
@@ -275,7 +287,8 @@ and `uv tool upgrade inkvault` updates InkVault.
 |---|---|
 | `inkvault rescue` | Export, index, digest (if Ollama is running), build and open the dashboard |
 | `inkvault export` | Copy everything out of PiecesOS. Safe to stop and re-run: it only adds what's new |
-| `inkvault sync` | Copy new Claude Code and Codex sessions into the vault, then rebuild search |
+| `inkvault sync` | Copy new Claude Code and Codex sessions and browser history into the vault, then rebuild search |
+| `inkvault browsers [--yes\|--no KEY] [--forget] [--skip-site HOST]` | Choose which browser profiles are yours, and sites never to keep |
 | `inkvault index` | Rebuild search |
 | `inkvault digest [--model M] [--redo]` | Daily digests with a local model (default `qwen3.5:4b`) |
 | `inkvault dashboard` | Rebuild and open the Memory Atlas |
@@ -288,23 +301,30 @@ and `uv tool upgrade inkvault` updates InkVault.
 
 ## Privacy
 
-This is your screen history, your chats and your code. InkVault is built so that none of it leaves your machine:
+This is your screen history, your chats, your browsing and your code. InkVault stores and searches your archive locally:
 
 - Everything is stored in your app-data folder (`%LOCALAPPDATA%\InkVault`, `~/Library/Application Support/InkVault`,
   or `~/.local/share/inkvault`), or wherever `INKVAULT_HOME` points. Never inside the code folder.
 - No telemetry, no accounts, no cloud.
-- Two things are downloaded, and nothing of yours is uploaded: the search model (~130 MB from Hugging Face, once)
+- InkVault itself does not upload your archive. When you connect an AI client through MCP, memories returned to that
+  client may be sent to its model provider under that client's settings. Choose your client and settings accordingly.
+- Two things are downloaded: the search model (~130 MB from Hugging Face, once)
   and the dashboard's chart library (from cdnjs, when you open the page).
 - Digests use Ollama on your own machine. Skip them with `--no-digest`.
 - From Claude Code and Codex sessions, InkVault keeps what you typed, what the assistant replied and session titles.
   Claude Code's replies include its tool calls, so a file it wrote is kept as written. Tool output (files it read,
   command output), pasted images and attachments are left out: they are most of each file and where secrets tend
   to show up. That lowers the risk; it can't rule it out, since anything you typed or pasted as text is kept.
+- Browser history is read only from the profiles you choose (`inkvault browsers`), from a copy of the browser's
+  file. InkVault keeps each page's address and title and when you opened it, after removing parts of addresses
+  that carry sign-in codes, tokens, signed links, reset tokens, or your email or username. It can't promise to catch
+  every secret. `inkvault browsers --skip-site` and `--no … --forget` remove what you don't want kept.
 - Screen capture (Windows, off until you install it) keeps window titles and, for the apps you choose, their text.
-  Never images, and nothing leaves your machine. Secrets in titles and text are masked before they are stored. See
-  [Screen capture](#screen-capture-windows) for what it can't catch.
-- Captured text was written by other people and apps. The MCP server tells your AI tool to treat it as data, not
-  instructions.
+  Images are never saved. Secrets in titles and text are masked before they are stored. See
+  [Screen capture](#screen-capture-windows) for what it can't catch. The connected-client boundary above applies
+  to screen memories too.
+- Captured text and page titles were written by other people, apps and websites. The MCP server tells your AI tool
+  to treat them as data, not instructions.
 
 **Back up your vault.** It is one file: `vault.db` in your InkVault folder. Everything else can be rebuilt from it
 with `inkvault index`.
