@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Work only in the worktree `C:\Users\Tmatt\inkvault-atlas`, branch `atlas-search` (from tag `v0.3.0`, `b8dece5`). Never touch `C:\Users\Tmatt\inkvault`, a live InkVault home, or any trial folder.
+- Work only in the `atlas-search` worktree (branch `atlas-search`, from tag `v0.3.0`, `b8dece5`). Never touch another checkout of the repository, a live InkVault home, or any trial folder.
 - Run tests with `uv run pytest -q` from the worktree root. Every task ends with the full suite passing.
 - Version **0.3.1**. Python `>=3.10` (CI: 3.10 and 3.13 on Windows, macOS, Linux). **No new runtime dependencies.** Pillow is used once, at development time only (`uv run --with pillow`).
 - MCP tools (`search_memories`, `get_memory`, `timeline`, `memory_stats`) keep their names, signatures, docstrings and **exact output text**; `tests/test_mcp_golden.py` (Task 1) is the proof and is never regenerated after Task 1.
@@ -2523,7 +2523,7 @@ def test_every_served_file_exists_and_the_page_uses_only_them():
 def test_no_inline_script_style_or_handlers():
     html = text("index.html")
     assert "<style" not in html and " style=" not in html
-    assert not re.search(r"\son[a-z]+=", html)
+    assert not re.search(r"\s(on[a-z]+)=", html)  # no inline event handlers
     for script in re.findall(r"<script\b[^>]*>(.*?)</script>", html, re.S):
         assert script.strip() == ""
 
