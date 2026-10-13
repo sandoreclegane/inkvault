@@ -541,7 +541,7 @@ def decode_cursor(s):
         raise BadCursor("bad cursor")
     try:
         d = json.loads(base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)))
-    except ValueError:
+    except (ValueError, RecursionError):  # deeply nested JSON in a short cursor
         raise BadCursor("bad cursor") from None
     ok = (isinstance(d, dict) and d.get("op") in ("earlier", "later", "expand") and d.get("k") in SOURCES
           and isinstance(d.get("i"), str) and isinstance(d.get("g"), str)
@@ -587,6 +587,8 @@ def chat(mid, cursor, gen):
         # Lengths only: a long conversation never loads every message's text (Codex plan review, limits).
         msgs = conn.execute("SELECT id, created, role, length(text) AS n FROM messages WHERE conversation_id=? "
                             "ORDER BY created, rowid", (head["conversation_id"],)).fetchall()
+        if not msgs:  # e.g. a message with no conversation: nothing to window around
+            return {"status": "missing"}
         sizes = [min(m["n"] or 0, ITEM_SHARE) for m in msgs]
         n = len(msgs)
         if cursor is None:

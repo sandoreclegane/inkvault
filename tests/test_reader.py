@@ -1,4 +1,5 @@
 """The Atlas reader (spec §3.1): chat windows around the match, paging, advancing expansion, and every kind."""
+import base64
 import json
 import sqlite3
 
@@ -85,6 +86,23 @@ def test_bad_cursors_are_rejected():
     for bad in ("", "not base64!", retrieval.encode_cursor({"op": "fly"}), "A" * 3000, None, 5):
         with pytest.raises(retrieval.BadCursor):
             retrieval.decode_cursor(bad)
+
+
+def test_a_deeply_nested_cursor_is_refused_not_a_crash():
+    from inkvault import retrieval
+    s = base64.urlsafe_b64encode(("[" * 1400).encode()).decode()  # short enough to pass the length check
+    assert len(s) < retrieval.CURSOR_MAX
+    with pytest.raises(retrieval.BadCursor):
+        retrieval.decode_cursor(s)
+
+
+def test_a_message_with_no_conversation_is_missing(vault):
+    from inkvault import paths, retrieval
+    add_conversation(5)
+    db = sqlite3.connect(paths.search_db())
+    db.execute("UPDATE messages SET conversation_id=NULL WHERE id='m9_002'")
+    db.commit(); db.close()
+    assert retrieval.record("chats", "m9_002") == {"status": "missing"}
 
 
 def test_each_kind_reads(vault):
