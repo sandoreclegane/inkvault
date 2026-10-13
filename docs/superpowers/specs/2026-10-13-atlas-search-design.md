@@ -54,10 +54,18 @@ inkvault dashboard ─► atlasserve ──► GET  /                  │  page
 Everything MCP's `search_memories` and `get_memory` do today moves here and returns structures instead of text.
 `server.py` keeps its tool names, signatures and docstrings and becomes a thin formatter over this module.
 
-- `search(query, sources=None, since=None, until=None, limit=25, offset=0) -> SearchResult`
+- `search(query, sources=None, mode="hybrid", since=None, until=None, limit=25, offset=0, generation=None)
+  -> SearchResult`
   - `sources`: a subset of the existing kinds `summaries, events, chats, snippets, screen, web`; `None` is all.
+  - `mode`: `hybrid`, `keyword` or `meaning`, with exactly today's meaning, validation and messages. MCP passes
+    its `mode` through; the Atlas always uses `hybrid`.
+  - `since` / `until`: UTC instants (ISO). MCP's existing parsing (a date, or a UTC time) stays in `server.py`;
+    the Atlas converts local dates itself (§4.2).
   - Same ranking as today: keyword (FTS5/bm25) and meaning (vectors) lists fused with RRF, same candidate counts,
-    same screen de-duplication (a screen stretch with OCR text is not listed twice).
+    same screen de-duplication (a screen stretch with OCR text is not listed twice). Ranking is deterministic for
+    a given query, filters and generation, so paging re-runs it and slices.
+  - Paging: `offset` > 0 requires the `generation` of the first page. If the current generation differs, the
+    answer is `changed` and no hits are returned, so later pages never mix two states of the vault.
   - `SearchResult`: `hits`, `more` (bool), `keyword_only` (bool, true when vectors or the model are missing),
     `generation` (the `published()` stamp the answer was read under).
   - `Hit`: `kind`, `id`, `title`, `time` (UTC ISO), `source_label`, `excerpt`, `match`.
@@ -72,7 +80,13 @@ Everything MCP's `search_memories` and `get_memory` do today moves here and retu
   - Summaries, events, snippets, screen text: the whole record. Web: title, URL, profile and visit times, labelled
     as browser history.
   - Every response is capped at 100,000 characters of record text. A single message or record longer than its
-    share is cut with `truncated: true` and an `expand` cursor that returns that one item, still under the cap.
+    share is cut with `truncated: true` and an `expand` cursor. Expansion **advances**: each call returns the next
+    chunk of that one item (up to the cap) and a new `expand` cursor until the item is complete, so an item of any
+    length can be read in full. Cursors carry the item, the character offset and the generation; a cursor from an
+    older generation is refused with `changed`.
+- `memory_text(id, max_chars=20000) -> str`: what `get_memory` returns today, byte for byte, including the whole
+  conversation for a chat and today's truncation note. The chat windows and cursors above are for the Atlas reader
+  only and never change MCP output.
 - Errors are values, not exceptions: `rebuilding`, `changed`, `unavailable`, `missing`. These reuse the exact
   conditions and wording of today's `REBUILDING`, `CHANGED` and `UNAVAILABLE`.
 - The guard (`published()` before and after, `removal_gen`, the rebuild marker) moves here unchanged, so the
@@ -97,19 +111,28 @@ Everything MCP's `search_memories` and `get_memory` do today moves here and retu
 ### 3.3 `index.py` (small change): when search was built
 
 `index.build()` adds `built` (UTC ISO) to search.db's existing `meta` table. The page's freshness line reads it
-through `retrieval`. If it is absent (an index from 0.3.0), the line says "Search index: date unknown, rebuilt
-tonight". File modification times are never used as freshness.
+through `retrieval`. If it is absent (an index built by 0.3.0 or earlier), the line says "Search index: build time
+not recorded". It does not predict when the next build happens. File modification times are never used as
+freshness.
 
 ### 3.4 `atlasserve.py` (new): the helper
 
 - `ThreadingHTTPServer` bound to `127.0.0.1`, port 0 (the OS picks a free one).
-- **Single instance.** `atlas.lock` in the InkVault home (which only the user can read, like the vault itself)
-  holds `{pid, port, started, control}`, where `control` is a random 32-byte secret made at start. A second launch
-  reads the lock and calls `POST /control/code` with header `X-InkVault-Control: <control>`; a running helper
-  answers with a fresh one-time code, and the launcher opens `/open?code=…` and exits. If the call fails (no
-  process, wrong secret, no answer within 2 seconds) the lock is stale and is replaced by a new helper.
-  `/control/code` accepts only that header, is subject to the same Host check, and is never reachable with the
-  browser cookie alone.
+- **Single instance, decided by an operating-system lock.** The helper holds an exclusive lock on `atlas.lock` in
+  the InkVault home for its whole life, using the same mechanism as `nightly.lock()` (`msvcrt.locking` on Windows,
+  `fcntl.flock` elsewhere). The OS releases it when the process ends, however it ends, so a held lock means a live
+  helper and a free lock means none; no timeout or process check ever decides this.
+  - A launcher first tries to take the lock without waiting. If it succeeds, it *is* the helper: it binds its port,
+    then writes `{pid, port, started, control}` into a separate `atlas-helper.json` file (temp file, then replace),
+    where `control` is a random 32-byte secret. The home folder is readable only by the user, like the vault.
+  - If the lock is held, the launcher never starts a helper. It reads the info file (retrying for up to 10 seconds
+    while a just-started helper is still writing it) and calls `POST /control/code` with header
+    `X-InkVault-Control: <control>`. The running helper answers with a fresh one-time code; the launcher opens
+    `/open?code=…` and exits. If no answer arrives in time, the launcher says "The Atlas is starting or busy; try
+    again in a moment" and exits, without starting a second helper.
+  - Two simultaneous launches therefore produce exactly one helper: one wins the lock, the other becomes a client.
+  - `/control/code` accepts only that header, is subject to the same Host check, and is never reachable with the
+    browser cookie alone.
 - **Lifetime.** Each open Atlas tab sends `/api/ping` every 60 seconds while visible. With no ping for 30 minutes
   the helper stops and removes its lock. Ctrl+C stops it immediately when run from a terminal.
 - **Routes** (anything else is 404; wrong method is 405):
@@ -154,6 +177,11 @@ and custom range, the stat tiles, and every existing chart and its table view.
 - The header search box submits on **Enter** or the **Search** button only.
 - Source chips: All, Conversations, Summaries, Captures, Snippets, Screen, Web history. A chip appears only when
   that source has records. Optional From/To dates in local time with the time zone shown.
+- Date conversion happens in the helper, not the browser: From is the start of that local calendar day and To is
+  the start of the local day after it (an exclusive end), each converted to UTC with the computer's time-zone
+  rules for that date, so days that start or end a daylight-saving change are exactly 23 or 25 hours. The
+  converted instants go to `retrieval.search`. Times shown on results and in the reader are converted back to
+  local time the same way.
 - Results, 25 at a time with **More results**: source label, local date and time, title, excerpt. Keyword matches
   are highlighted from `spans`; meaning matches say "related by meaning".
 - Screen text is labelled "Screen text". Timeline-only apps show app, window title and times only.
@@ -163,7 +191,9 @@ and custom range, the stat tiles, and every existing chart and its table view.
   **Show all** on a cut message. Snippets keep code formatting. Web history shows "Browser history: the page
   itself isn't saved"; its address opens only on click, in a new tab, without a referrer.
 - Switching to Atlas and back keeps query, filters, selection and scroll position, held in `sessionStorage` only:
-  never in the address bar, so searches never reach browser history or browser sync.
+  never in the address bar, so searches never reach browser history or browser sync. `sessionStorage` holds only
+  the query, filters, the selected `(kind, id)` and the scroll offset, never record text, excerpts or chart data,
+  and every entry is tagged with the generation it was made under.
 - Keyboard: every control reachable by Tab with a visible focus ring; arrow keys move through results; Enter opens.
   Labels on every input.
 
@@ -175,13 +205,29 @@ and custom range, the stat tiles, and every existing chart and its table view.
 | Atlas data being built | "Building the Atlas…" |
 | Searching | "Searching…" |
 | No matches | "No matches", with a hint to try All sources or wider dates |
-| Removal under way | Results and reader cleared; today's rebuilding message |
-| Search changed during an answer, or a page notices a new generation on ping or focus | Results and reader cleared; "Search was just updated: search again" |
+| Removal under way, or the page notices a new generation (on any answer, on ping, or when the tab regains focus) | **Everything derived from the old state is cleared** (§4.4); today's rebuilding message, or "Your memory was just updated", then the Atlas reloads its data when it is ready |
+| Search changed during an answer | Same full clear; "Search was just updated: search again" |
 | Vault unreadable | "Can't read the vault right now" with Retry |
 | No meaning search | Results labelled "keyword search only" |
 | Record gone | "This memory was removed" |
 | Helper stopped | "The Atlas has closed. Open it again from the InkVault Atlas icon or `inkvault dashboard`." |
 | Chart library failed | The chart areas say so; search still works |
+
+### 4.4 Forgetting clears the whole page
+
+When something is removed, the Atlas data, digests and search all change, so a page showing the old state must not
+keep showing it. On a generation change the page:
+
+1. Disposes every chart instance and empties its container, closes any open tooltip, and empties the tile values,
+   day-detail and digest text, and every table view.
+2. Empties the results list, the reader and the freshness line.
+3. Deletes its `sessionStorage` entries (including the query itself, which may be what was forgotten).
+4. Drops every in-flight request: responses carry their generation and any answer from an older one is discarded.
+5. Shows the updating message, then fetches `/api/atlas` again. While a rebuild is pending the helper answers
+   `rebuilding` and the page polls every 10 seconds while visible.
+
+Responses are `no-store`, so nothing removed survives in the browser cache. What a user already saw, copied or
+screenshotted cannot be recalled, as today.
 
 ## 5. Privacy and security
 
@@ -200,8 +246,8 @@ tab the user opened.
 5. **Read-only.** No route writes the vault, search files or settings. The only file the helper writes is its own
    lock (and `atlas.json` via `dashboard.build()` when it is missing, under the same lock the nightly uses).
 6. **Forgetting wins.** The guard runs before and after every search, record and Atlas read; a changed generation
-   returns `changed` and the page clears what it shows. An answer already displayed, copied or screenshotted cannot
-   be recalled, as today.
+   returns `changed` and the page clears everything derived from the old state (§4.4). An answer already displayed,
+   copied or screenshotted cannot be recalled, as today.
 7. **Fixed files only.** Assets come from an allow-list; request paths are never joined onto directories.
 8. **Plain text only.** The page inserts memory text with `textContent` and builds highlights as separate text
    nodes. No `innerHTML` with record data anywhere.
@@ -219,7 +265,9 @@ tab the user opened.
 ## 6. Testing
 
 - **MCP compatibility:** golden text for each MCP tool on the fixture vault, captured before `retrieval.py`
-  exists; identical afterwards.
+  exists; identical afterwards. The calls cover every `mode` (`hybrid`, `keyword`, `meaning`) and bad mode, every
+  source, date and time bounds and bad dates, `get_memory` for each kind including a chat long enough to hit the
+  20,000-character truncation note, `timeline` and `memory_stats`.
 - **Retrieval:** structured hits for every kind; keyword spans line up with the excerpt; meaning-only hits carry no
   spans; chat windows around the match; earlier/later/expand cursors; the 100,000-character cap; dates across a
   DST change; keyword-only fallback without vectors; `rebuilding`, `changed`, `unavailable`, `missing`, including a
@@ -235,8 +283,20 @@ tab the user opened.
   markers): everything renders as text; keyboard-only search, open, page through context and return; narrow
   layout; light and dark; Atlas↔Search round trip keeps state; nothing in the address bar but the clean `/`.
   Results recorded in the build notes; no new CI dependency.
+- **Forgetting in the page:** with charts, a tooltip, results and a reader open, a removal makes the page show none
+  of the old values, text or tooltip, leaves no `sessionStorage` entry, and ignores a late response from before
+  the removal.
+- **Paging and expansion:** a second results page after a removal answers `changed`; repeated expansion of a
+  300,000-character message returns all of it in order with no gaps or repeats.
+- **Single instance:** two launches started at the same moment yield one helper; a helper that is slow to answer
+  is never replaced; a killed helper's lock is free immediately and the next launch starts a new one.
+- **Real history, on a disposable copy.** Near the end of the build, and again in the code review, the helper runs
+  against a coherent copy of a real vault: `vault.db`, `search.db` and `vectors.npz` taken together under the
+  nightly lock (SQLite backup API for the databases), placed in a temporary InkVault home, used, then deleted.
+  The live vault is never opened by the helper under test. Results are reported as counts and timings only, never
+  content.
 - **Speed:** cold and warm search time, reader time, response size and peak memory on a synthetic vault of about
-  100,000 records, on stated hardware. Targets: warm search under 2 s, first reader under 1 s. Misses are
+  100,000 records and on the disposable real copy, on stated hardware. Targets: warm search under 2 s, first reader under 1 s. Misses are
   investigated, not promised away.
 - The full suite on the existing CI matrix (Windows, macOS, Linux; Python 3.10 and 3.13).
 
