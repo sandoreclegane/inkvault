@@ -333,7 +333,7 @@ def test_pages_are_one_per_address_per_local_day(home, monkeypatch):
         ("https://x.example/reset/…", 1), ("https://x.example/reset/…", 1)]
     assert search_rows("SELECT COUNT(*), COUNT(DISTINCT page_id) FROM visits") == [(5, 4)]
     assert all(pid.startswith("web:") and len(pid) == 20 for (pid,) in search_rows("SELECT id FROM pages"))
-    assert search_rows("SELECT key FROM meta") == [("timezone",)]
+    assert search_rows("SELECT key FROM meta") == [("built",), ("timezone",)]
 
 
 def test_the_title_observed_last_wins_over_a_later_visit_from_another_profile(home, monkeypatch):

@@ -711,3 +711,39 @@ def record(kind, id_=None, cursor=None):
         return chat(id_, cursor, gen)
     found = stretch(id_, gen) if kind == "screen" else single(kind, id_, gen)
     return found or {"status": "missing"}
+
+
+def freshness():
+    """When search was built, and whether screen capture has recorded more since (spec §3.3, §4.2). Never guessed
+    from file times: an index without a recorded build time says so."""
+    with db() as conn:
+        meta = dict(conn.execute("SELECT key, value FROM meta").fetchall()) if has_table(conn, "meta") else {}
+    latest = None
+    if paths.vault_db().exists():
+        v = paths.connect_ro(paths.vault_db())
+        try:
+            if has_table(v, "screen_stretches"):
+                latest = v.execute("SELECT MAX(ended) FROM screen_stretches").fetchone()[0]
+        finally:
+            v.close()
+    built, cutoff = meta.get("built"), meta.get("screen_cutoff")
+    return {"built": local(built).strftime("%Y-%m-%dT%H:%M") if built else None,
+            "timezone_now": datetime.now().astimezone().strftime("%Z (UTC%z)"),
+            "newer_screen": bool(latest and (not cutoff or latest > cutoff))}
+
+
+def has_rows(conn, kind, event_source):
+    table = SOURCES[kind][0]
+    if not has_table(conn, table):
+        return False
+    if kind == "events" and event_source:
+        if has_column(conn, "events", "source"):
+            return conn.execute("SELECT EXISTS(SELECT 1 FROM events WHERE source=?)", (event_source,)).fetchone()[0] == 1
+        return event_source == "pieces" and conn.execute("SELECT EXISTS(SELECT 1 FROM events)").fetchone()[0] == 1
+    return conn.execute(f"SELECT EXISTS(SELECT 1 FROM {table})").fetchone()[0] == 1
+
+
+def sources_present():
+    """Which chips the Atlas shows: a source with no records gets no chip (spec §4.2)."""
+    with db() as conn:
+        return {chip: any(has_rows(conn, k, src) for k in kinds) for chip, (kinds, src) in CHIPS.items() if kinds}

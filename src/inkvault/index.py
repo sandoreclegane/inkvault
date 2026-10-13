@@ -7,7 +7,7 @@ import json
 import os
 import sqlite3
 from contextlib import ExitStack
-from datetime import datetime
+from datetime import datetime, timezone
 
 from . import embed, history, paths, sources, topics
 
@@ -92,6 +92,8 @@ def build():
             if cutoff := raw.execute("SELECT MAX(ended) FROM screen_stretches").fetchone()[0]:
                 db.execute("INSERT INTO meta VALUES ('screen_cutoff', ?)", (cutoff,))
         db.execute("INSERT INTO meta VALUES ('timezone', ?)", (datetime.now().astimezone().strftime("%Z (UTC%z)"),))
+        db.execute("INSERT INTO meta VALUES ('built', ?)",  # the Atlas says how fresh search is (spec §3.3)
+                   (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),))
 
         # External-content FTS tables: the index points back at rows, so text isn't stored twice.
         db.executescript("""

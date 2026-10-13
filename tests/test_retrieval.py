@@ -126,3 +126,39 @@ def test_mcp_limit_zero_keeps_one_hit_like_v030(vault):
     from inkvault import server
     out = server.search_memories("backoff", mode="keyword", limit=0)
     assert sum(1 for line in out.splitlines() if line.startswith("[")) == 1
+
+
+def test_index_records_when_it_was_built(vault):
+    from inkvault import paths
+    db = sqlite3.connect(paths.search_db())
+    built = db.execute("SELECT value FROM meta WHERE key='built'").fetchone()[0]
+    db.close()
+    assert built.endswith("Z") and len(built) == 27
+
+
+def test_freshness_says_when_and_whether_screen_is_newer(vault):
+    from inkvault import paths, retrieval
+    f = retrieval.freshness()
+    assert f["built"] and f["newer_screen"] is False and f["timezone_now"]
+    v = sqlite3.connect(paths.vault_db())
+    v.execute("INSERT INTO screen_stretches VALUES ('screen:z','2026-02-27T23:00:00.000000Z',"
+              "'2026-02-27T23:30:00.000000Z','Notes.exe','later')")
+    v.commit(); v.close()
+    assert retrieval.freshness()["newer_screen"] is True
+
+
+def test_chips_show_only_sources_with_records(vault):
+    from inkvault import retrieval
+    assert retrieval.sources_present() == {"conversations": True, "summaries": True, "captures": True,
+                                           "snippets": True, "screen": True, "web": True}
+
+
+def test_freshness_and_chips_on_an_old_index(vault):
+    from inkvault import paths, retrieval
+    db = sqlite3.connect(paths.search_db())
+    db.executescript("DELETE FROM meta WHERE key='built'; DROP TABLE pages; DROP TABLE pages_fts;"
+                     "DROP INDEX events_source; ALTER TABLE events DROP COLUMN source;")
+    db.commit(); db.close()
+    assert retrieval.freshness()["built"] is None
+    chips = retrieval.sources_present()
+    assert chips["web"] is False and chips["captures"] is True
