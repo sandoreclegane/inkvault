@@ -4323,6 +4323,16 @@ def test_a_failure_while_building_leaves_nothing(script, backup, tmp_path, monke
     assert not made[0].exists()
 
 
+def test_embedding_is_put_back_even_when_building_fails(script, backup, tmp_path, monkeypatch):  # Codex recheck
+    from inkvault import embed, index
+    before = embed.build
+    made, make = roots(tmp_path)
+    monkeypatch.setattr(index, "build", lambda: (_ for _ in ()).throw(RuntimeError("index failed")))
+    with pytest.raises(RuntimeError):
+        script.run(backup, make_root=make)  # no model: embedding is switched off for the run, then put back
+    assert embed.build is before
+
+
 def test_only_a_nightly_backup_is_accepted(script, tmp_path):
     for name in ("vault.db", "search.db", "local.db", "vault-2026-02-28.db.1234.partial"):
         f = tmp_path / name
@@ -4375,10 +4385,21 @@ def snapshot_root():
 
 
 def check(root, queries, have_model):
-    """Build search and the Atlas inside the snapshot, then measure. Returns counts and timings only."""
-    from inkvault import atlasserve, dashboard, embed, index, retrieval
+    """Build search and the Atlas inside the snapshot, then measure. Without a model, embedding is switched off for
+    this call only and always put back, even when building fails (Codex plan recheck): this runs inside pytest too."""
+    from inkvault import embed
+    real_build = embed.build
     if not have_model:
         embed.build = lambda: None  # keyword-only: never fetch a model
+    try:
+        return measure(queries, have_model)
+    finally:
+        embed.build = real_build
+
+
+def measure(queries, have_model):
+    """Counts and timings only."""
+    from inkvault import atlasserve, dashboard, index, retrieval
     report = {}
     t = time.perf_counter(); index.build(); report["index_s"] = round(time.perf_counter() - t, 1)
     dashboard.build()

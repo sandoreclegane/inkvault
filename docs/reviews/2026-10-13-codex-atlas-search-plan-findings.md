@@ -15,3 +15,7 @@ pushes or live-history reads.
 | — | limit | `chat()` loaded every full message. | Reads lengths, then only the shown window cut at 20,000 characters; speed script adds a 20,000-message conversation with a 5 MB message (Tasks 3, 12). |
 | — | limit | Speed numbers described as real. | Labelled as synthetic timings and traced Python allocations (Task 12). |
 | — | limit | A reloaded tab can't be told the helper closed. | Manual check corrected: an open tab says so; a reload shows the browser's connection error (Task 12). |
+
+## Recheck (1390055)
+
+Codex confirmed all seven fixed and ran the four Node scenarios independently (all passed). One P2: Task 13 replaced `embed.build` permanently during keyword-only runs, which inside pytest could switch embedding off for later tests. Fixed: `check()` restores it in `finally`, including on failure; test `test_embedding_is_put_back_even_when_building_fails`. Codex approved starting the early build tasks (plan approval, not implementation validation).
