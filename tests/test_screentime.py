@@ -40,6 +40,8 @@ def test_half_hour_offsets_label_by_local_hour():
 def test_a_full_mixed_day_keeps_its_screen_summary(tmp_path, monkeypatch):   # R5: budgets reserved together
     monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
     from inkvault import digest, screen
+    from inkvault.times import local
+    monkeypatch.setattr(digest, "local", lambda ts: local(ts).astimezone(CHI))
     monkeypatch.setattr(screen, "LOCAL_TZ", CHI)
     db = sqlite3.connect(":memory:")
     db.executescript(SCHEMA + """
@@ -68,6 +70,8 @@ def test_old_index_and_formatting():
 def test_dashboard_counts_pieces_only_and_screen_minutes(tmp_path, monkeypatch):
     monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
     from inkvault import dashboard, screen
+    from inkvault.times import local
+    monkeypatch.setattr(dashboard, "local", lambda ts: local(ts).astimezone(CHI))
     monkeypatch.setattr(screen, "LOCAL_TZ", CHI)            # same local day on any test machine
     db = sqlite3.connect(":memory:")
     db.executescript(SCHEMA + """
@@ -83,6 +87,8 @@ def test_dashboard_counts_pieces_only_and_screen_minutes(tmp_path, monkeypatch):
 def test_digest_screen_only_day_by_duration_without_text(tmp_path, monkeypatch):
     monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
     from inkvault import digest, screen
+    from inkvault.times import local
+    monkeypatch.setattr(digest, "local", lambda ts: local(ts).astimezone(CHI))
     monkeypatch.setattr(screen, "LOCAL_TZ", CHI)            # 12:00–13:10 local: one day on any test machine
     db = sqlite3.connect(":memory:")
     db.executescript(SCHEMA + """

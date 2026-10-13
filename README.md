@@ -200,7 +200,8 @@ inkvault forget --screen --app Discord.exe
 inkvault forget --screen --since "2026-10-12 09:00" --until "2026-10-12 11:30"
 ```
 
-Times are your **local** time (a date alone means local midnight; add `Z` or an offset for an exact instant).
+Times are your **local** time: a `--since` date means local midnight; an `--until` date includes that whole
+day. Add `Z` or an offset for an exact instant. `--until` only goes with `--since`; `--app` removes all of an app.
 Whole windows are removed: any stretch that overlaps the range goes, with all its text, and the command shows the
 span it actually removed before it asks. Search, the dashboard and the digests are rebuilt without it. Nightly
 backups made before then still hold it until they rotate out (7 nights), and an answer an AI tool already received

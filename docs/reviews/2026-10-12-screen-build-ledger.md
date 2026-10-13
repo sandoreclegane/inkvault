@@ -157,3 +157,26 @@ findings left for the final review to triage.
 
 368 tests at v0.2.1; 551 passed and 1 skipped at the end of Task 18. Windows-only tests run on Windows and are
 skipped elsewhere.
+
+
+## Final interrupted-fix completion
+
+- Part 1: `d50e8b4` (entry-point preparation, SID/case read-back, title normalization, destructive flag rejection,
+  non-decreasing extensions, database-error rate limiting, escaped BOM).
+- Final code fixes: `bb81a5b` (settings replacement/shape checks and control errors, pause/resume notifications,
+  stale-stop cleanup, token shapes, old-vault preview, shortcut escaping/error handling).
+- Fresh review: two Important findings fixed with failing regression tests first: current raw-title exclusion at
+  OCR acceptance, and retrying first-use initialization after transient startup failures. Lost initialized
+  settings remain fail-closed. Independent startup probe: valid settings on 3/3 ticks after the fix.
+- Verification: synthetic/native gate 82 passed; final-fix components 130 passed; post-review watcher/control/
+  integration 78 passed; focused review regressions 6 passed; final complete suite 603 passed, 1 skipped.
+  OCR available and exercised; Python 3.10 syntax 64 files passed; diff check and private privacy gate clean.
+- Ruling: keep the accepted numeric/edge-symbol title normalization tradeoff with an independent raw-title
+  privacy guard. Cost if wrong: distinct work can share a stretch.
+- Ruling: recover initialization only when the permanent initialization marker is absent. Cost if wrong:
+  genuinely lost settings still require explicit reset or restoration, as the design requires.
+- Minor deferred: non-string list members in hand-edited settings can cause an app-edit traceback; the watcher
+  rejects the malformed file and records nothing. Previously accepted oversized responses/stale-drop accounting
+  and remaining coverage/polish deferrals stand.
+- Full evidence and checklist: `2026-10-12-codex-screen-capture-code-findings.md`.
+- Task 20: publication awaits explicit maintainer approval. No operational installation or live trial performed.
