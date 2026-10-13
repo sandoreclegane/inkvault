@@ -97,6 +97,10 @@ Everything MCP's `search_memories` and `get_memory` do today moves here and retu
 
 **Compatibility contract:** before the move, a test captures the exact text of `search_memories`, `get_memory`,
 `timeline` and `memory_stats` for a set of calls on the fixture vault; after the move the text is identical.
+One deliberate difference: today, vectors present but the model folder missing makes `embed.load_model()` try a
+download, which fails offline and errors the tool. Meaning search now runs only when both `vectors.npz` and the
+model folder exist; otherwise the answer is keyword-only (MCP: same text as a keyword search; Atlas:
+`keyword_only: true`). No golden case depends on the old failure.
 
 ### 3.2 `dashboard.py` (changed): data, not a page
 
@@ -151,8 +155,12 @@ freshness.
 `index.html`, `atlas.css`, `atlas.js` (charts, ported from today's template with identical chart ids,
 calculations, presets, date ranges, tooltips and table views), `search.js` (search view and reader),
 `echarts.min.js` 5.5.0 with its Apache-2.0 `LICENSE` and `NOTICE`, and the mark as a small image (target under
-100 KB; the original artwork, not a reconstruction). No inline scripts or styles, so the content security policy
-can be strict (§5). The look follows the Ink & Light palette; light and dark follow the system setting.
+100 KB), cropped from the existing `docs/assets/inkvault-logo-horizontal.png`, not a reconstruction. No inline
+scripts, no `<style>` blocks and no `style="…"` attributes in markup or in tooltip HTML, so the content security
+policy can be strict (§5); fixed chart heights move into `atlas.css`, and heights computed at run time are set
+through `element.style`, which the policy allows. The look follows the Ink & Light palette; light and dark follow
+the system setting. The date-range preset is remembered in `localStorage` as today; because the helper's port
+changes per launch, it resets to "All time" on each launch, which is accepted.
 
 ### 3.6 CLI
 
@@ -176,7 +184,11 @@ and custom range, the stat tiles, and every existing chart and its table view.
 
 - The header search box submits on **Enter** or the **Search** button only.
 - Source chips: All, Conversations, Summaries, Captures, Snippets, Screen, Web history. A chip appears only when
-  that source has records. Optional From/To dates in local time with the time zone shown.
+  that source has records. Optional From/To dates in local time with the time zone shown. Chips map to existing
+  kinds: Conversations = `chats`; Summaries = `summaries`; Captures = `events` whose `source` is `pieces`;
+  Snippets = `snippets`; Screen = `screen` stretches plus `events` whose `source` is `screen` (text read from the
+  screen); Web history = `web`. `retrieval.search` takes an optional `event_source` filter for this; MCP never
+  passes it.
 - Date conversion happens in the helper, not the browser: From is the start of that local calendar day and To is
   the start of the local day after it (an exclusive end), each converted to UTC with the computer's time-zone
   rules for that date, so days that start or end a daylight-saving change are exactly 23 or 25 hours. The
@@ -249,8 +261,11 @@ tab the user opened.
    returns `changed` and the page clears everything derived from the old state (§4.4). An answer already displayed,
    copied or screenshotted cannot be recalled, as today.
 7. **Fixed files only.** Assets come from an allow-list; request paths are never joined onto directories.
-8. **Plain text only.** The page inserts memory text with `textContent` and builds highlights as separate text
-   nodes. No `innerHTML` with record data anywhere.
+8. **Plain text only.** The search view and reader insert memory text with `textContent` and build highlights as
+   separate text nodes; no `innerHTML` with record data there. The one place HTML is built from vault text is
+   the chart tooltips (digests, titles, project names), which ECharts renders as HTML: those keep v0.3.0's `esc()`
+   escaping of `& < > " '` for every interpolated value, carry no `style` attributes (classes only, §3.5), and
+   a test pins `esc()`.
 9. **Headers.** `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self';
    img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
    `Cache-Control: no-store`; `Referrer-Policy: no-referrer`; `X-Content-Type-Options: nosniff`.
