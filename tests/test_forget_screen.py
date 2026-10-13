@@ -85,3 +85,10 @@ def test_unknown_kinds_are_errors_and_sites_still_work():
         forget.matcher("screen-everything", "x")
     pick = forget.matcher("site", "bank.example")
     assert pick("Default", "https://login.bank.example/") and not pick("Default", "https://docs.example.com/")
+
+
+
+def test_preview_of_a_pre_screen_vault_is_empty(vault):
+    from inkvault import forget
+    vault.executescript("DROP TABLE screen_text; DROP TABLE screen_stretches;")
+    assert forget.screen_preview("screen-app", "Discord.exe") == (0, None, None)

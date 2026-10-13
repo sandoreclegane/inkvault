@@ -138,8 +138,8 @@ def open_vault(timeout=5.0):
         CREATE TABLE IF NOT EXISTS browser_profiles (
             profile TEXT PRIMARY KEY, last_attempt TEXT, last_success TEXT, last_error TEXT, visits_in_file INTEGER
         );
-        -- Removals recorded but not yet applied (forget.py): what ("profile" or "site"), the key or host, the
-        -- affected days as a JSON list.
+        -- Removals recorded but not yet applied (forget.py): what ("profile", "site", "screen-app" or
+        -- "screen-range"), the key, host, app name or JSON range, the affected days as a JSON list.
         CREATE TABLE IF NOT EXISTS browser_removals (
             id INTEGER PRIMARY KEY, what TEXT NOT NULL, value TEXT NOT NULL, days TEXT NOT NULL, created TEXT NOT NULL
         );

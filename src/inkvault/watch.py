@@ -106,6 +106,7 @@ class Watcher:
                 or fresh.window is None or not stretches.same_window(fresh.window, ident)
                 or fresh.locked or fresh.idle_s >= stretches.IDLE_LIMIT
                 or settings.paused(fresh.utc) or settings.never(ident.exe, ident.title)
+                or settings.never(fresh.window.exe, fresh.window.title)
                 or not settings.text_app(ident.exe) or self.core.open is None or self.core.open.id != sid):
             return
         text = redact.clean_text(r["lines"])
@@ -201,13 +202,25 @@ class Watcher:
 
 def open_store(stopping, sleep=time.sleep, clock=time.monotonic, every=None):
     """Open the watcher's connection, retrying every REOPEN_EVERY s while the vault can't be opened (spec §1). A
-    recovery heartbeat says so (R8), and a stop is honoured within half a second. None if a stop was requested."""
+    recovery heartbeat says so (R8), first-use settings are retried too, and a stop is honoured
+    during the retry wait within half a second. None if a stop was requested."""
     every = REOPEN_EVERY if every is None else every
     attempts = 0
     while not stopping():
+        conn = None
         try:
-            return screenstore.connect()
-        except (screenstore.Busy, screenstore.StoreError) as e:
+            conn = screenstore.connect()
+            # A failed prepare() on first use must not leave the recovered watcher waiting for a file that
+            # was never created. An initialized home with lost settings still fails closed in SettingsSource.
+            if not screen.initialized(conn):
+                screen.ensure_initialized(conn)
+            return conn
+        except (screenstore.Busy, screenstore.StoreError, screen.SettingsBusy, OSError, sqlite3.Error) as e:
+            if conn is not None:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
             attempts += 1
             try:
                 screen.write_atomic(paths.watch_heartbeat(), {
@@ -222,6 +235,11 @@ def open_store(stopping, sleep=time.sleep, clock=time.monotonic, every=None):
     return None
 
 
+def claim_stop_file():
+    """A watch.stop is addressed to whoever holds watch.lock; one left behind by a watcher that has gone is stale."""
+    paths.watch_stop().unlink(missing_ok=True)
+
+
 def run():
     if sys.platform != "win32":
         print("screen capture is Windows-only for now")
@@ -233,6 +251,7 @@ def run():
             pid = (paths.watch_lock().read_text(errors="replace").splitlines() or ["?"])[0]
             print(f"already running (pid {pid})")
             return 0
+        claim_stop_file()
         os.lseek(fd, 0, os.SEEK_SET); os.ftruncate(fd, 0); os.write(fd, f"{os.getpid()}\nwatch".encode())
         try:
             screen.prepare()
@@ -335,7 +354,27 @@ def stop_watcher(wait=None):
     return False
 
 
-def change(edit, done):
+def under_pythonw():
+    return sys.platform == "win32" and sys.executable.lower().endswith("pythonw.exe")
+
+
+def message_box(text):
+    a = winapi.api()
+    a.user32.MessageBoxW(None, text, "InkVault", winapi.MB_OK | winapi.MB_ICONINFORMATION | winapi.MB_SETFOREGROUND)
+
+
+def notify(text):
+    """Say something to whoever ran the command. Under pythonw (the desktop shortcuts) there's no console, so the
+    outcome is shown in a message box instead; a failure to show it never changes the result."""
+    print(text)
+    if under_pythonw():
+        try:
+            message_box(text)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def change(edit, done, say=print):
     """Settings edits touch only screen.json under screen.lock: no vault, no nightly lock (R1, R2). Only a home
     with no screen.json at all is prepared first (a true first use, or lost settings, which prepare refuses)."""
     try:
@@ -343,12 +382,15 @@ def change(edit, done):
             screen.prepare()
         screen.edit(edit)
     except screen.SettingsBusy:
-        print("Another command is changing screen capture settings right now; nothing changed. Try again.")
+        say("Another command is changing screen capture settings right now; nothing changed. Try again.")
         return 1
     except screen.SettingsError as e:
-        print(f"Nothing changed: {e}")
+        say(f"Nothing changed: {e}")
         return 1
-    print(f"{done} Saved; a running watcher applies it within 2 seconds.")
+    except OSError as e:
+        say(f"Nothing changed: {type(e).__name__}")
+        return 1
+    say(f"{done} Saved; a running watcher applies it within 2 seconds.")
     return 0
 
 
@@ -482,14 +524,19 @@ def install(ask=None, confirm_wait=None):
 def make_shortcuts(pythonw):
     """Two desktop shortcuts (spec §4). A failure is reported, not fatal."""
     import subprocess
-    home = str(paths.home())
+    home = str(paths.home()).replace("'", "''")
+    pythonw = str(pythonw).replace("'", "''")
     script = "; ".join(
         "$s=(New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop')+"
         f"'\\{name}.lnk'); $s.TargetPath='{pythonw}'; $s.Arguments='-m inkvault --home \"{home}\" watch {args}'; "
         "$s.Save()" for name, args in (("Pause screen capture (1 hour)", "--pause 1h"),
                                        ("Resume screen capture", "--resume")))
-    r = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True)
-    if r.returncode:
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True)
+        failed = bool(r.returncode)
+    except OSError:
+        failed = True
+    if failed:
         print("Couldn't add the desktop shortcuts; use `inkvault watch --pause 1h` and `--resume`.")
 
 
@@ -518,8 +565,9 @@ def uninstall():
                 print("The sign-in task couldn't be confirmed disabled; nothing else was changed.")
                 return 1
         if not stop_watcher():
-            print("Screen capture may still be running: the watcher didn't stop within 15 seconds. The sign-in "
-                  "task is disabled; run `inkvault watch --uninstall` again.")
+            task_state = "The sign-in task is disabled; " if rb is not None else ""
+            print("Screen capture may still be running: the watcher didn't stop within 15 seconds. "
+                  + task_state + "Run `inkvault watch --uninstall` again.")
             return 1
         if rb is not None:
             windows.remove(task=windows.WATCH_TASK)
@@ -566,15 +614,22 @@ def cmd(args):
         try:
             until = screen.parse_pause(args.pause)
         except ValueError as e:
-            print(e)
+            notify(str(e))
             return 1
         return change(lambda d: d.update(paused_until=screen.iso(until)),
-                      f"Paused until {until.astimezone():%Y-%m-%d %H:%M}.")
+                      f"Paused until {until.astimezone():%Y-%m-%d %H:%M}.", say=notify)
     if args.resume:
-        return change(lambda d: d.update(paused_until=None), "Resumed.")
+        return change(lambda d: d.update(paused_until=None), "Resumed.", say=notify)
     if args.reset_settings:
-        with screen.settings_lock():
-            screen.write_atomic(paths.screen_file(), screen.defaults())
+        try:
+            with screen.settings_lock():
+                screen.write_atomic(paths.screen_file(), screen.defaults())
+        except screen.SettingsBusy:
+            print("Nothing changed: another command is changing screen capture settings. Try again.")
+            return 1
+        except OSError as e:
+            print(f"Nothing changed: {type(e).__name__}")
+            return 1
         try:
             screen.prepare()
         except Exception as e:  # noqa: BLE001 — the file is written; the marker can wait for the next start

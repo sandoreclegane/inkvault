@@ -79,6 +79,10 @@ def screen_preview(what, value):
     db = paths.connect_ro(paths.vault_db())
     try:
         found = screen_select(db, what, value)
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e):     # a vault no 0.3.0 command has opened has no screen tables: nothing to remove
+            return 0, None, None
+        raise
     finally:
         db.close()
     return (len(found), *span(found))

@@ -329,3 +329,96 @@ def test_a_persistent_database_error_is_logged_once(rig, monkeypatch):      # lo
     ticks(w, clock, 12)
     lines = [x for x in paths.watch_log().read_text(encoding="utf-8").splitlines() if "database:" in x]
     assert len(lines) == 1 and "disk I/O" in w.last_error
+
+
+
+def test_acceptance_rechecks_never_rules_on_the_current_raw_title(rig, monkeypatch):
+    from inkvault import screen
+    from inkvault.stretches import Identity, Sample
+    w, clock, sup, state, conn = rig
+    screen.edit(lambda d: d["never_titles"].append("42"))
+    state["window"] = Identity(1, 10, 1, "Discord.exe", "Synthetic 41")
+    ticks(w, clock, 16)
+    assert sup.pending is not None
+    # The worker read the allowed title, but the acceptance sample now matches an exclusion.
+    fresh = Sample(clock.t, T0 + timedelta(seconds=clock.t),
+                   Identity(1, 10, 1, "Discord.exe", "Synthetic 42"), 0, False)
+    monkeypatch.setattr(w, "sampler", lambda: fresh)
+    sup.answer(["a synthetic response long enough for storage"])
+    w.collect()
+    w.flush()
+    assert conn.execute("SELECT COUNT(*) FROM screen_text").fetchone()[0] == 0
+
+
+
+def test_run_recovers_first_use_settings_after_initial_vault_failure(tmp_path, monkeypatch):
+    import sqlite3
+    import sys
+    from inkvault import export, paths, screen, watch, winapi, worker
+    from inkvault.stretches import Sample
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    monkeypatch.setattr(sys, "platform", "win32")
+    real_open = export.open_vault
+    attempts = []
+    def initially_busy(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real_open(*args, **kwargs)
+    monkeypatch.setattr(export, "open_vault", initially_busy)
+    monkeypatch.setattr(worker, "Supervisor", lambda argv: FakeSupervisor())
+    monkeypatch.setattr(winapi, "sample", lambda mono, utc: Sample(mono, utc, None, 0, False))
+    monkeypatch.setattr(watch.time, "sleep", lambda seconds: None)
+    original_tick = watch.Watcher.tick
+    valid = []
+    def bounded_tick(w):
+        if len(valid) == 2:
+            return False
+        result = original_tick(w)
+        valid.append(w.settings is not None)
+        return result
+    monkeypatch.setattr(watch.Watcher, "tick", bounded_tick)
+    assert watch.run() == 0
+    assert len(attempts) >= 2 and valid == [True, True]
+    assert paths.screen_file().exists()
+    db = real_open()
+    try:
+        assert screen.initialized(db)
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("error", ["busy", "permission", "database"])
+def test_open_store_retries_first_use_settings_failures(tmp_path, monkeypatch, error):
+    import sqlite3
+    from inkvault import paths, screen, watch
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    real = screen.ensure_initialized
+    attempts = []
+    def flaky(conn):
+        attempts.append(1)
+        if len(attempts) <= 2:
+            raise {"busy": screen.SettingsBusy, "permission": PermissionError,
+                   "database": sqlite3.OperationalError}[error]("synthetic failure")
+        return real(conn)
+    monkeypatch.setattr(screen, "ensure_initialized", flaky)
+    conn = watch.open_store(lambda: len(attempts) > 4, every=0)
+    try:
+        assert len(attempts) == 3 and conn is not None
+        assert paths.screen_file().exists() and screen.initialized(conn)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def test_open_store_never_recreates_lost_initialized_settings(tmp_path, monkeypatch):
+    from inkvault import paths, screen, watch
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    screen.prepare()
+    paths.screen_file().unlink()
+    conn = watch.open_store(lambda: False, every=0)
+    try:
+        assert screen.initialized(conn) and not paths.screen_file().exists()
+        assert screen.SettingsSource().poll()[0] is None
+    finally:
+        conn.close()

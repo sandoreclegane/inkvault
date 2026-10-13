@@ -108,6 +108,7 @@ DEFAULT_NEVER_APPS = ("1Password.exe", "Bitwarden.exe", "KeePassXC.exe", "KeePas
                       "LockApp.exe", "consent.exe")
 DEFAULT_NEVER_TITLES = ("InPrivate", "Incognito", "Private Browsing")
 LOCK_WAIT = 5.0
+REPLACE_TRIES, REPLACE_WAIT = 5, 0.06      # about 250 ms in all
 
 
 class SettingsError(Exception):
@@ -178,7 +179,14 @@ def write_atomic(path, data):
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
-        os.replace(tmp, path)
+        for attempt in range(REPLACE_TRIES):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:       # a reader (the watcher, an antivirus scan) has it open for a moment
+                if attempt == REPLACE_TRIES - 1:
+                    raise
+                time.sleep(REPLACE_WAIT)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -202,9 +210,14 @@ def settings_lock(wait=LOCK_WAIT):
         os.close(fd)
 
 
+LIST_KEYS = ("text_apps", "never_apps", "never_titles")
+
+
 def edit(change):
     with settings_lock():
         data = read_file()
+        if not isinstance(data, dict) or not all(isinstance(data.get(k), list) for k in LIST_KEYS):
+            raise SettingsError("screen.json doesn't have the expected shape: run `inkvault watch --reset-settings`")
         change(data)
         settings = validate(data)
         write_atomic(paths.screen_file(), data)

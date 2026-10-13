@@ -7,6 +7,12 @@ SECRET = [
     "xoxb-" + "0" * 12 + "-" + "0" * 13 + "-" + "a" * 24,
     "AKIAIOSFODNN7EXAMPLE",
     "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+    "sk_" + "live_" + "AbCdEf0123456789AbCd",
+    "rk_" + "test_" + "AbCdEf0123456789AbCdEf",
+    "AIza" + "SyA-0123456789abcdefghijklmnopqrstu",
+    "glpat-" + "AbCdEf0123456789_-xyZ",
+    "hf_" + "AbCdEf0123456789AbCdEf0123456789",
+    "npm_" + "AbCdEf0123456789AbCdEf0123456789",
     "token=9f8e7d6c5b4a39281706f5e4d3c2b1a0",
     "password: hunter2hunter2hunter2",
 ]
@@ -15,6 +21,7 @@ HARMLESS = [
     "git commit -m 'Merge the browser-history branch'",
     "The key to this design is a durable generation",
     "4dda9763fc17c14a0b2f93d8c32a86b02fc6a746",
+    "the hf_scores and npm_config helpers, glpat- prefix, AIza and sk_live_ docs",
     "@名前 🎮 - Discord",
 ]
 

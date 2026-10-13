@@ -15,6 +15,11 @@ SHAPES = [
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}"),
     re.compile(r"\bxox[abpr]-[A-Za-z0-9-]{10,}"),
     re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+    re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}"),
+    re.compile(r"\bAIza[0-9A-Za-z_-]{35}"),
+    re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"\bhf_[A-Za-z0-9]{30,}"),
+    re.compile(r"\bnpm_[A-Za-z0-9]{30,}"),
     urlclean.JWT,
 ]
 AFTER_WORD = re.compile(rf"(?i)(\b{SECRET_WORDS}\b\s*[:=]\s*[\"']?)([A-Za-z0-9+/_.-]{{12,}})")

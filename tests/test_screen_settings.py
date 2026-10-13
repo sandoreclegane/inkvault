@@ -130,3 +130,42 @@ def test_parse_pause():
     for bad in ("forever", "0m", "h"):
         with pytest.raises(ValueError):
             screen.parse_pause(bad, t0)
+
+
+@pytest.mark.parametrize("content", ["[]", "5", "{}", '{"text_apps": [], "never_apps": []}',
+                                     '{"text_apps": "x", "never_apps": [], "never_titles": []}'])
+def test_edit_checks_the_shape_before_changing_anything(home, content):
+    from inkvault import paths, screen
+    screen.prepare()
+    paths.screen_file().write_text(content, encoding="utf-8")
+    called = []
+    with pytest.raises(screen.SettingsError):
+        screen.edit(lambda d: called.append(1))
+    assert called == [] and paths.screen_file().read_text(encoding="utf-8") == content
+
+
+def test_write_atomic_retries_a_busy_replace(home, monkeypatch):
+    from inkvault import paths, screen
+    real, fails = os.replace, {"n": 0}
+
+    def flaky(src, dst):
+        if fails["n"] < 2:
+            fails["n"] += 1
+            raise PermissionError("in use")
+        return real(src, dst)
+    monkeypatch.setattr(os, "replace", flaky)
+    monkeypatch.setattr(screen, "REPLACE_WAIT", 0)
+    target = paths.home() / "x.json"
+    screen.write_atomic(target, {"a": 1})
+    assert fails["n"] == 2 and json.loads(target.read_text(encoding="utf-8")) == {"a": 1}
+    assert not list(paths.home().glob("*.tmp"))
+
+
+def test_write_atomic_gives_up_after_five_tries(home, monkeypatch):
+    from inkvault import paths, screen
+    calls = []
+    monkeypatch.setattr(os, "replace", lambda s, d: calls.append(1) or (_ for _ in ()).throw(PermissionError("x")))
+    monkeypatch.setattr(screen, "REPLACE_WAIT", 0)
+    with pytest.raises(PermissionError):
+        screen.write_atomic(paths.home() / "x.json", {})
+    assert len(calls) == 5 and not list(paths.home().glob("*.tmp"))

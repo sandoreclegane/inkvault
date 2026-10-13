@@ -340,3 +340,110 @@ def test_install_rejects_another_user_or_any_other_difference(win, monkeypatch, 
     read_back_with(win, monkeypatch, **changes)
     assert watch.install(ask=lambda q: False) == 1 and "delete" in win["calls"]
     assert "didn't read back as expected" in capsys.readouterr().out
+
+
+def test_a_settings_write_that_fails_with_an_os_error_is_reported(home, monkeypatch, capsys):   # M1
+    from inkvault import screen
+    screen.prepare()
+    monkeypatch.setattr(screen, "write_atomic", lambda p, d: (_ for _ in ()).throw(PermissionError("denied")))
+    assert run("watch", "--pause", "1h") == 1
+    assert "Nothing changed: PermissionError" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("argv", [("--pause", "1h"), ("--resume",)])
+def test_pause_and_resume_show_their_outcome_under_pythonw(home, monkeypatch, argv):             # M1
+    from inkvault import watch
+    shown = []
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "executable", TOOL)
+    monkeypatch.setattr(watch, "message_box", shown.append)
+    assert run("watch", *argv) == 0
+    assert len(shown) == 1 and ("Paused until" in shown[0] or "Resumed" in shown[0])
+
+
+def test_a_failed_pause_is_shown_too_and_python_exe_shows_nothing(home, monkeypatch):            # M1
+    from inkvault import screen, watch
+    shown = []
+    monkeypatch.setattr(watch, "message_box", shown.append)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "executable", TOOL.replace("pythonw", "python"))
+    assert run("watch", "--pause", "1h") == 0 and shown == []
+    monkeypatch.setattr(sys, "executable", TOOL)
+    monkeypatch.setattr(screen, "write_atomic", lambda p, d: (_ for _ in ()).throw(PermissionError("denied")))
+    assert run("watch", "--pause", "1h") == 1
+    assert len(shown) == 1 and "Nothing changed" in shown[0]
+
+
+def test_a_stale_stop_file_is_deleted_when_a_watcher_takes_the_lock(home, monkeypatch):   # M3
+    from inkvault import paths, watch
+    paths.watch_stop().write_text("stop\n", encoding="utf-8")
+    seen = []
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(watch, "open_store", lambda stopping: seen.append(paths.watch_stop().exists()) or None)
+    assert watch.run() == 0 and seen == [False]
+
+
+def test_claim_stop_file_is_harmless_without_one(home):
+    from inkvault import paths, watch
+    watch.claim_stop_file()
+    paths.watch_stop().write_text("stop\n", encoding="utf-8")
+    watch.claim_stop_file()
+    assert not paths.watch_stop().exists()
+
+
+
+@pytest.mark.parametrize("error", ["busy", "permission"])
+def test_reset_settings_reports_failure_and_preserves_settings(home, monkeypatch, capsys, error):
+    import contextlib
+    from inkvault import paths, screen
+    screen.prepare()
+    screen.edit(lambda d: d["never_titles"].append("Synthetic exclusion"))
+    before = paths.screen_file().read_bytes()
+    if error == "busy":
+        @contextlib.contextmanager
+        def busy():
+            raise screen.SettingsBusy()
+            yield
+        monkeypatch.setattr(screen, "settings_lock", busy)
+    else:
+        def denied(*args):
+            raise PermissionError("synthetic failure")
+        monkeypatch.setattr(screen, "write_atomic", denied)
+    assert run("watch", "--reset-settings") == 1
+    assert "Nothing changed" in capsys.readouterr().out
+    assert paths.screen_file().read_bytes() == before
+
+
+def test_shortcuts_escape_apostrophes_in_home_and_executable(home, monkeypatch):
+    import subprocess
+    from pathlib import Path
+    from types import SimpleNamespace
+    from inkvault import paths, watch
+    chosen = home / "someone's vault"
+    monkeypatch.setattr(paths, "home", lambda: chosen)
+    scripts = []
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kw: scripts.append(argv[-1]) or
+                        SimpleNamespace(returncode=0))
+    watch.make_shortcuts(Path("C:/Tools/someone's tool/pythonw.exe"))
+    assert len(scripts) == 1
+    assert "someone''s vault" in scripts[0] and "someone''s tool" in scripts[0]
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError, PermissionError])
+def test_shortcut_launch_failure_is_reported(home, monkeypatch, capsys, error):
+    import subprocess
+    from inkvault import watch
+    def fails(*args, **kwargs):
+        raise error("synthetic failure")
+    monkeypatch.setattr(subprocess, "run", fails)
+    watch.make_shortcuts(TOOL)
+    assert "Couldn't add the desktop shortcuts" in capsys.readouterr().out
+
+
+def test_uninstall_timeout_without_a_task_does_not_claim_it_was_disabled(win, monkeypatch, capsys):
+    from inkvault import watch
+    monkeypatch.setattr(watch, "stop_watcher", lambda: False)
+    assert watch.uninstall() == 1
+    out = capsys.readouterr().out
+    assert "may still be running" in out and "task is disabled" not in out
+    assert win["calls"] == []
