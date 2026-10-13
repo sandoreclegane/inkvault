@@ -70,10 +70,14 @@ def test_a_restart_reads_the_persisted_generation(store):
         fresh.close()
 
 
-def test_busy_within_budget_even_at_connect(store):                        # P11
+def test_busy_within_budget_even_at_connect(store, monkeypatch):           # P11
     import time
     from inkvault import export
     ss, conn = store
+    # Exercise real contention with a short fixture wait. OS sleep coalescing can inflate SQLite's requested
+    # sleeps on shared runners; the production 250 ms setting is checked independently below.
+    monkeypatch.setattr(ss, "BUSY_MS", 10)
+    conn.execute("PRAGMA busy_timeout=10")
     blocker = export.open_vault(); blocker.execute("BEGIN IMMEDIATE")
     try:
         t = time.monotonic()
@@ -151,3 +155,9 @@ def test_a_non_busy_error_keeps_the_write_and_reports(store, monkeypatch):
     monkeypatch.setattr(ss, "apply", lambda *_: (_ for _ in ()).throw(ss.StoreError("OperationalError: disk full")))
     r = q.flush(conn)
     assert r.error.endswith("disk full") and len(q) == 1
+
+
+
+def test_connection_configures_the_production_quarter_second_busy_timeout(store):
+    _, conn = store
+    assert conn.execute("PRAGMA busy_timeout").fetchone() == (250,)

@@ -76,6 +76,9 @@ def test_many_window_changes_under_contention(rig):
     from inkvault.stretches import Identity
     make, clock, state, conn = rig
     w, sup = make("ok")
+    # This test covers queue behavior under a real writer, not the host's timer precision. The production
+    # timeout is pinned in test_screenstore; shorter fixture waits retain the wall-time nonblocking guard.
+    conn.execute("PRAGMA busy_timeout=10")
     blocker = export.open_vault(); blocker.execute("BEGIN IMMEDIATE")
     try:
         for i in range(110):                                     # 55 stretches of 2 polls each
