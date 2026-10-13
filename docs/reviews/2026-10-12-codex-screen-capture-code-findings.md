@@ -2,8 +2,8 @@
 
 Review date: 2026-10-12. Public base: `v0.2.1`. Branch: `screen-capture`, version `0.3.0`.
 
-The interrupted final fix wave is complete. Part 1 was already committed as `d50e8b4`; its changes and the
-unfinished work were inspected before continuing. The final code fixes are committed as `bb81a5b`. A fresh independent reviewer examined the whole branch in
+The interrupted final fix wave is complete. Part 1 was already committed as `308a456`; its changes and the
+unfinished work were inspected before continuing. The final code fixes are committed as `0a94963`. A fresh independent reviewer examined the whole branch in
 passes over capture/privacy, persistence/removal, readers, and Windows controls. No unresolved Critical or
 Important finding remains. Publication and operational installation are separate steps.
 
@@ -93,3 +93,13 @@ installer and non-Python subprocess calls. No live vault or real browser profile
 The independent review verdict is ready from the code perspective once the final guarded suite passes. The
 suite and privacy result above are the completion evidence. Task 20 still requires explicit maintainer approval
 before pushing the branch and opening the public pull request.
+
+
+## Publication fixture cleanup
+
+GitHub push protection flagged the deliberately synthetic Slack token in the redaction fixture and the plan's
+test example. The unpublished branch history now generates a clearly synthetic token from repeated characters,
+retaining a realistic token shape and the same redaction assertions. No secret-scanning exception was requested.
+Review commit references were updated to the rewritten history. Production code is unchanged by this cleanup.
+
+Post-cleanup verification: 24 redaction tests passed; production source matches the pre-cleanup branch exactly.
