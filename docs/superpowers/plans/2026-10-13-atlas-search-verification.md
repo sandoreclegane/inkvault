@@ -81,3 +81,14 @@ Run by the maintainer on one finished nightly backup plus the model folder, with
 All targets met: search 0.13-0.6 s (first search includes loading the model), records open in under 0.02 s, meaning search used. Screen shows no records because that backup predates screen capture being switched on.
 
 Note: this vault was made by a build that imports visits from an older tool with no navigation type. The public code never writes such visits, so the check ran from a throwaway copy with that build's one-line guard for them; the guard reaches the Atlas when this release is merged into that build.
+
+
+## Independent handoff verification (2026-10-14)
+
+Reviewed and committed the final snapshot-warning fix as `3b4e283`. Invalid input before snapshot creation now reports the error without claiming a snapshot was retained. Focused regression suite: 13 passed, 1 skipped.
+
+Ran the actual helper in a browser with fictional demo records at exactly 375 x 850 CSS pixels. Keyboard-only search submission, conversation source filtering, arrow-key result navigation, opening the matched conversation, Earlier messages paging (38 to 58 visible messages), and switching between Atlas and Search passed. Focus outlines were visible, the reader appeared below results, the query and reader survived view switching, and there was no horizontal overflow. The selected conversation had no Later messages button; later paging is not claimed by this check.
+
+Built the v0.3.1 wheel and verified all nine required interface, chart, branding and license assets are included. No live-vault reads or writes were needed for this check. The existing real-history snapshot results above remain maintainer-provided evidence. Preserve the local NULL-navigation-type compatibility guard when integrating with the local main branch.
+
+No push, release tag, main merge or runtime installation was performed. A new cloud backup is pending explicit approval.
