@@ -3,7 +3,7 @@
 It reads exactly what it's given: one finished nightly backup (backups/vault-YYYY-MM-DD.db) and, optionally, the model
 folder. Both are copied as plain files; no live vault, search file, lock or SQLite sidecar is opened, and no other
 source (browser profiles, other tools' data) is read. Search, vectors and the Atlas data are built inside the snapshot.
-The snapshot is deleted whatever happens.
+The snapshot is deleted whatever happens, and the real outcome (deleted or not) is reported.
 
     uv run python tests/manual/atlas_real_copy.py <backups/vault-YYYY-MM-DD.db> [<model folder>]
 Queries are asked for one at a time without echo (an empty line finishes); they're never printed, stored or put on
@@ -80,17 +80,25 @@ def run(backup, model=None, queries=(), make_root=snapshot_root):
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
     root = make_root()
-    report = {}
-    try:  # one try for creating, using and deleting the snapshot: a failure anywhere leaves nothing behind
+    try:  # one try for creating and using the snapshot; it is deleted on both paths and the outcome is checked
         os.environ["INKVAULT_HOME"] = str(root)
         shutil.copyfile(backup, root / "vault.db")
         if model:
             shutil.copytree(model, root / "model")
         report = check(root, list(queries), have_model=bool(model))
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-        report["snapshot_deleted"] = not root.exists()
+    except BaseException as e:
+        e.snapshot_deleted = delete_snapshot(root)  # main() reports the real outcome, never an assumed one
+        e.snapshot_folder = root
+        raise
+    report["snapshot_deleted"] = delete_snapshot(root)
+    report["snapshot_folder"] = None if report["snapshot_deleted"] else str(root)
     return report
+
+
+def delete_snapshot(root):
+    """Delete the snapshot and say whether it is really gone (a failed delete is not an error here)."""
+    shutil.rmtree(root, ignore_errors=True)
+    return not root.exists()
 
 
 def ask_queries():
@@ -106,11 +114,18 @@ def main(argv):
     try:
         result = run(argv[1], argv[2] if len(argv) == 3 else None, ask_queries())
     except Exception as e:  # only the kind of failure is printed: a message could carry a path or a query
-        print(f"The check failed ({type(e).__name__}). The snapshot was deleted.")
+        print(f"The check failed ({type(e).__name__}).")
+        if getattr(e, "snapshot_deleted", False):
+            print("The snapshot was deleted.")
+        else:
+            folder = getattr(e, "snapshot_folder", None)
+            where = f" Remove this folder by hand: {folder}" if folder else ""
+            print(f"WARNING: The snapshot was NOT deleted; it holds a copy of your vault.{where}")
         return 1
+    folder = result.pop("snapshot_folder", None)
     print(json.dumps(result, indent=1))
     if not result["snapshot_deleted"]:
-        return "The snapshot folder couldn't be deleted; remove it by hand (it holds a copy of your vault)."
+        return f"The snapshot was NOT deleted; it holds a copy of your vault. Remove this folder by hand: {folder}"
     return 0
 
 

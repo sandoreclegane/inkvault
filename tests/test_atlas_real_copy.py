@@ -129,3 +129,49 @@ def test_a_failing_run_prints_only_the_kind_of_error(script, backup, monkeypatch
     assert script.main(["x", str(backup)]) == 1
     out = capsys.readouterr()
     assert "OSError" in out.out and "secret-path" not in out.out + out.err
+
+
+def _main_with_failing_check(script, backup, tmp_path, monkeypatch, keep_folder):
+    from inkvault import index
+    made, make = roots(tmp_path)
+    monkeypatch.setattr(script, "snapshot_root", make)
+    monkeypatch.setattr(script.run, "__defaults__", (None, (), make))  # make_root default is bound at definition
+    monkeypatch.setattr(index, "build", lambda: (_ for _ in ()).throw(RuntimeError("secret-query-text")))
+    monkeypatch.setattr(script, "ask_queries", lambda: ["q"])
+    if keep_folder:
+        monkeypatch.setattr(script.shutil, "rmtree", lambda *a, **k: None)  # cleanup fails: the folder stays
+    return made, script.main(["x", str(backup)])
+
+
+def test_a_failed_check_with_a_failed_cleanup_says_not_deleted_and_names_the_folder(script, backup, tmp_path,
+                                                                                     monkeypatch, capsys):
+    made, code = _main_with_failing_check(script, backup, tmp_path, monkeypatch, keep_folder=True)
+    out = capsys.readouterr().out
+    assert code == 1 and made[0].exists()
+    assert "NOT deleted" in out and str(made[0]) in out and "was deleted" not in out
+    assert "secret-query-text" not in out and "RuntimeError" in out
+
+
+def test_a_failed_check_with_a_working_cleanup_says_deleted(script, backup, tmp_path, monkeypatch, capsys):
+    made, code = _main_with_failing_check(script, backup, tmp_path, monkeypatch, keep_folder=False)
+    out = capsys.readouterr().out
+    assert code == 1 and not made[0].exists()
+    assert "The snapshot was deleted." in out and "NOT" not in out and str(made[0]) not in out
+
+
+def test_a_good_check_with_a_failed_cleanup_names_the_folder(script, backup, tmp_path, monkeypatch, capsys):
+    made, make = roots(tmp_path)
+    monkeypatch.setattr(script.run, "__defaults__", (None, (), make))
+    monkeypatch.setattr(script, "ask_queries", lambda: [])
+    monkeypatch.setattr(script.shutil, "rmtree", lambda *a, **k: None)
+    result = script.main(["x", str(backup)])
+    assert isinstance(result, str) and "NOT deleted" in result and str(made[0]) in result and made[0].exists()
+
+
+def test_bad_input_raises_before_anything_is_created(script, tmp_path):
+    made, make = roots(tmp_path)
+    f = tmp_path / "vault.db"
+    f.write_bytes(b"x")
+    with pytest.raises(ValueError):
+        script.run(f, make_root=make)
+    assert made == []
