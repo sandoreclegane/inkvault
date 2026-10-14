@@ -447,3 +447,20 @@ def test_the_first_build_removes_the_old_static_page_once(vault, capsys):
     assert not old.exists() and "The Memory Atlas is live now" in capsys.readouterr().out
     dashboard.build()
     assert "The Memory Atlas is live now" not in capsys.readouterr().out
+
+
+def test_a_leftover_dashboard_html_that_cannot_be_removed_does_not_fail_the_build(vault, monkeypatch):
+    from pathlib import Path
+    from inkvault import dashboard, index, paths
+    index.build()
+    old = paths.home() / "dashboard.html"
+    old.write_text("<html>old</html>", encoding="utf-8")
+    real = Path.unlink
+
+    def locked(self, *a, **k):
+        if self == old:
+            raise PermissionError("in use")
+        return real(self, *a, **k)
+    monkeypatch.setattr(Path, "unlink", locked)
+    assert dashboard.build() == paths.dashboard()
+    assert old.exists()

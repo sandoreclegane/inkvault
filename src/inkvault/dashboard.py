@@ -239,8 +239,11 @@ def build():
     os.replace(tmp, out)  # an open Atlas never reads half a file
     old = paths.home() / "dashboard.html"
     if old.exists():  # the static page of 0.3.0 and earlier: generated, never the user's data (spec §3.2)
-        old.unlink()
-        print("The Memory Atlas is live now: open it with `inkvault dashboard`.")
+        try:
+            old.unlink()
+            print("The Memory Atlas is live now: open it with `inkvault dashboard`.")
+        except OSError:  # best-effort: atlas.json is written, so a leftover that can't be removed mustn't fail the run
+            pass
     n_topics = len(data["topics"]["ongoing"]) + len(data["topics"]["bursts"])
     print(f"atlas: {len(data['days'])} days, {len(data['themes'])} projects, {n_topics} topics, "
           f"{len(data['digests'])} digests -> {out}")
