@@ -7,6 +7,8 @@ import json
 import os
 import re
 import secrets
+import subprocess
+import sys
 import threading
 import time
 import webbrowser
@@ -501,3 +503,67 @@ def serve(open_browser=True, idle=IDLE, wait=10.0):
             nightly.unlock(fd)
     finally:
         os.close(fd)
+
+
+SHORTCUT = "InkVault Atlas"
+ICON = ASSET_DIR / "inkvault.ico"
+
+
+def launch(open_browser=True):
+    """`inkvault dashboard` (spec §3.6): build the Atlas data if it's missing, then start or reuse the helper."""
+    if paths.search_db().exists() and not paths.dashboard().exists() and not paths.rebuild_marker().exists():
+        print("Building the Atlas…", flush=True)
+        if build_atlas() == "busy":
+            print("A nightly run is in progress; the Atlas fills in when it's done.")
+    return serve(open_browser=open_browser)
+
+
+def pythonw():
+    """This environment's windowless Python, so the icon opens no console window."""
+    exe = Path(sys.executable)
+    w = exe.with_name("pythonw.exe")
+    return w if w.exists() else exe
+
+
+def start_detached():
+    """Open the Atlas without holding the terminal (after `rescue`): a separate helper process."""
+    argv = [str(pythonw() if sys.platform == "win32" else Path(sys.executable)), "-m", "inkvault",
+            "--home", str(paths.home()), "dashboard"]
+    kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "close_fds": True}
+    if sys.platform == "win32":
+        kw["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kw["start_new_session"] = True
+    subprocess.Popen(argv, **kw)
+
+
+def make_shortcut():
+    """"InkVault Atlas" on the desktop and in the Start menu (spec §3.6), checked by reading each one back."""
+    if sys.platform != "win32":
+        print("The InkVault Atlas icon is Windows-only for now. Open the Atlas with `inkvault dashboard`.")
+        return 0
+    q = lambda s: str(s).replace("'", "''")
+    exe = pythonw()
+    args = f'-m inkvault --home "{paths.home()}" dashboard'
+    script = (
+        "$ErrorActionPreference='Stop'; $w=New-Object -ComObject WScript.Shell; $out=@(); "
+        "foreach ($dir in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) { "
+        f"$p=Join-Path $dir '{SHORTCUT}.lnk'; $s=$w.CreateShortcut($p); $s.TargetPath='{q(exe)}'; "
+        f"$s.Arguments='{q(args)}'; $s.IconLocation='{q(ICON)},0'; $s.WorkingDirectory='{q(paths.home())}'; "
+        "$s.Description='Open the InkVault Memory Atlas'; $s.Save(); $r=$w.CreateShortcut($p); "
+        "$out+=@{path=$p; target=$r.TargetPath; arguments=$r.Arguments} }; ConvertTo-Json -Compress @($out)")
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                           capture_output=True, text=True, encoding="utf-8")
+        made = json.loads(r.stdout) if r.returncode == 0 else []
+    except (OSError, ValueError):
+        made = []
+    made = made if isinstance(made, list) else [made]
+    good = [m for m in made if isinstance(m, dict) and str(m.get("target", "")).lower() == str(exe).lower()
+            and m.get("arguments") == args]
+    if len(good) != 2:
+        print("The InkVault Atlas icon couldn't be made, or didn't read back as expected. "
+              "Open the Atlas with `inkvault dashboard`.")
+        return 1
+    print(f'Added "{SHORTCUT}" to your desktop and Start menu.')
+    return 0

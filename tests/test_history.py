@@ -700,7 +700,7 @@ def test_commands_that_write_wait_while_another_process_holds_the_lock(home, mon
     from inkvault import browsers, cli, paths
     chrome(home, monkeypatch, "Default")
     with holder(paths.home()):
-        for argv in (["index"], ["digest"], ["dashboard", "--no-open"], ["sync"],
+        for argv in (["index"], ["digest"], ["sync"],
                      ["browsers", "--skip-site", "x.example"], ["browsers", "--yes", "chrome/Default"]):
             assert cli.main(argv) == 1, argv
     assert browsers.load_choices() == {"profiles": {}, "skip_sites": []}  # nothing was changed
