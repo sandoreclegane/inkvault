@@ -6,7 +6,6 @@ for inspection and can be deleted afterwards.
 """
 import json
 import os
-import sqlite3
 import sys
 import tempfile
 from pathlib import Path

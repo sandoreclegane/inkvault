@@ -21,7 +21,7 @@ class FakeModel:
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("INKVAULT_HOME", str(tmp_path / "vault"))
-    from inkvault import embed, retrieval, server
+    from inkvault import embed, retrieval
     monkeypatch.setattr(embed, "load_model", FakeModel)
     monkeypatch.setattr(retrieval, "_model", None)
     return tmp_path
@@ -385,7 +385,7 @@ def test_with_nothing_left_to_embed_the_old_vectors_go(home, monkeypatch):
 
 
 def test_an_old_vault_without_browser_tables_still_indexes(home):
-    from inkvault import export, index, paths
+    from inkvault import export, index
     db = export.open_vault()
     db.execute("DROP TABLE browser_visits")
     db.commit()

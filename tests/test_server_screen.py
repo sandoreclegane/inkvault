@@ -13,7 +13,7 @@ class FakeModel:
 @pytest.fixture
 def vault(tmp_path, monkeypatch):
     monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
-    from inkvault import embed, export, retrieval, server
+    from inkvault import embed, export, retrieval
     monkeypatch.setattr(embed, "load_model", FakeModel)
     monkeypatch.setattr(retrieval, "_model", None)
     v = export.open_vault()

@@ -173,7 +173,7 @@ def test_an_unopenable_lock_file_starts_nothing(tmp_path, monkeypatch, capsys):
 
 
 def test_reuse_survives_a_non_helper_on_the_port(home, monkeypatch, capsys):
-    from inkvault import atlasserve, paths
+    from inkvault import atlasserve
     monkeypatch.setenv("INKVAULT_HOME", str(home))
     (home / "atlas-helper.json").write_text(json.dumps({"port": 9, "control": "x"}), encoding="utf-8")
 

@@ -21,7 +21,7 @@ def setup(tmp_path, monkeypatch):
     """Chrome/Default with a docs visit (day 1) and a bank visit (day 2), synced and indexed with real (fake-model)
     vectors, a dashboard, and digests for both days plus a Pieces-only day."""
     monkeypatch.setenv("INKVAULT_HOME", str(tmp_path / "vault"))
-    from inkvault import browsers, dashboard, digest, embed, forget, history, index, paths, retrieval, server
+    from inkvault import browsers, dashboard, digest, embed, forget, history, index, paths, retrieval
     monkeypatch.setattr(embed, "load_model", FakeModel)
     monkeypatch.setattr(retrieval, "_model", None)
     monkeypatch.setattr(forget, "DIGEST_WAIT", 0)  # a locked digest database fails at once, not after 5 s
@@ -194,7 +194,7 @@ def test_a_failed_embedding_leaves_search_db_free_to_replace(setup, monkeypatch)
     import shutil
     from inkvault import embed, paths
     monkeypatch.setattr(embed, "load_model", no_model)
-    with pytest.raises(RuntimeError) as failed:  # the traceback keeps build()'s frame, and any handle in it, alive
+    with pytest.raises(RuntimeError):  # the traceback keeps build()'s frame, and any handle in it, alive
         embed.build()
     copy = paths.search_db().with_name("copy.db")
     shutil.copy(paths.search_db(), copy)
@@ -215,7 +215,7 @@ def test_an_index_build_that_cannot_clear_its_temp_file_still_closes_the_vault(s
     tmp = paths.search_db().with_suffix(".tmp")
     tmp.mkdir()
     (tmp / "x").write_text("x")  # a non-empty directory: unlink fails
-    with pytest.raises(OSError) as failed:  # the traceback keeps build()'s frame, and any handle in it, alive
+    with pytest.raises(OSError):  # the traceback keeps build()'s frame, and any handle in it, alive
         index.build()
     paths.vault_db().unlink()
 
@@ -231,6 +231,6 @@ def test_an_index_build_that_cannot_open_its_temp_file_still_closes_the_vault(se
 
     with monkeypatch.context() as patched:
         patched.setattr(sqlite3, "connect", connect)
-        with pytest.raises(sqlite3.OperationalError) as failed:
+        with pytest.raises(sqlite3.OperationalError):
             index.build()
     paths.vault_db().unlink()

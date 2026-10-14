@@ -101,7 +101,7 @@ def test_source_recovers_with_the_same_mtime(home):                         # R8
 
 
 def test_prepare_writes_defaults_once_and_never_after_loss(home):          # R8, P5
-    from inkvault import export, paths, screen
+    from inkvault import paths, screen
     screen.prepare()
     assert paths.screen_file().exists()
     paths.screen_file().unlink()
