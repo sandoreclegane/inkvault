@@ -1,7 +1,8 @@
 """Synthetic search and reader timings on a vault of about 100,000 records (spec §6). Fictional data only.
 
 What it measures, honestly: retrieval timings with synthetic vectors and a fake model (not the real model's cold
-start), and memory as traced Python allocations (not whole-process peak). It includes one very long conversation
+start), and memory as the traced Python allocations each call adds above what was allocated just before it (`*_traced_increase_mb`;
+not whole-process peak, and not the script's own data). It includes one very long conversation
 (20,000 messages, one of them 5 MB) so the reader's bounded loading is exercised, not just many small chats.
 
     uv run python tests/manual/atlas_perf.py
@@ -62,19 +63,29 @@ paths.model_dir().mkdir(exist_ok=True)
 def timed(fn):
     t = time.perf_counter(); out = fn(); return time.perf_counter() - t, out
 
+def traced(fn):
+    """(seconds, answer, increase in MB): the traced Python allocations the call itself added at its peak, above what
+    was already allocated just before it (the script's own in-memory rows are baseline, not the call's)."""
+    base = tracemalloc.get_traced_memory()[0]
+    tracemalloc.reset_peak()
+    seconds, out = timed(fn)
+    return seconds, out, (tracemalloc.get_traced_memory()[1] - base) / 1e6
+
 tracemalloc.start()
-cold, r = timed(lambda: retrieval.search("lighthouse harbor", markers=retrieval.ATLAS_MARKERS, require_model=True, limit=25))
-warm = statistics.median(timed(lambda: retrieval.search("lighthouse harbor", markers=retrieval.ATLAS_MARKERS, require_model=True, limit=25))[0] for _ in range(5))
-reader, rec = timed(lambda: retrieval.record("chats", "m1000_20"))
-tracemalloc.reset_peak()
-long_reader, long_rec = timed(lambda: retrieval.record("chats", "long_10000"))  # the 5 MB message, mid-conversation
-long_peak = tracemalloc.get_traced_memory()[1]
-peak = tracemalloc.get_traced_memory()[1]
+search = lambda: retrieval.search("lighthouse harbor", markers=retrieval.ATLAS_MARKERS, require_model=True, limit=25)
+cold, r, cold_mb = traced(search)
+warms = [traced(search) for _ in range(5)]
+warm, warm_mb = statistics.median(w[0] for w in warms), max(w[2] for w in warms)
+reader, rec, reader_mb = traced(lambda: retrieval.record("chats", "m1000_20"))
+long_reader, long_rec, long_mb = traced(lambda: retrieval.record("chats", "long_10000"))  # the 5 MB message, mid-conversation
 print(json.dumps({"records": len(ids), "hardware": platform.processor() or platform.machine(), "python": platform.python_version(),
                   "synthetic_cold_search_s": round(cold, 3), "synthetic_warm_search_s": round(warm, 3),
+                  "synthetic_cold_search_traced_increase_mb": round(cold_mb, 1),
+                  "synthetic_warm_search_traced_increase_mb": round(warm_mb, 1),
                   "reader_s": round(reader, 3), "reader_chars": sum(len(i["text"]) for i in rec["items"]),
+                  "reader_traced_increase_mb": round(reader_mb, 1),
                   "long_conversation_reader_s": round(long_reader, 3),
                   "long_conversation_reader_chars": sum(len(i["text"]) for i in long_rec["items"]),
-                  "long_conversation_traced_peak_mb": round(long_peak / 1e6, 1),
-                  "traced_python_peak_mb": round(peak / 1e6, 1), "hits": len(r.hits)}, indent=1))
+                  "long_conversation_reader_traced_increase_mb": round(long_mb, 1),
+                  "hits": len(r.hits)}, indent=1))
 print(f"(temporary folder {home}; delete it when done)")
