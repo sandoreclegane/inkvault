@@ -57,3 +57,22 @@ Run by the controller after this task with `uv run python tests/manual/atlas_dem
 
 - A search matching one 350,000-character message that repeats the word 70,000 times took about 35 s. SQLite's own snippet builder takes about 22 s on that message (the same in v0.3.0's MCP search); the Atlas builds two snippets. Fix: snippets only for the hits returned, and none for matched text over 100,000 characters in the Atlas.
 - Keyword hits whose body is empty (a summary matched on its title) were labelled "related by meaning". Fix: label by how the hit was found.
+
+## Real history (disposable snapshot)
+
+Run by the maintainer on one finished nightly backup plus the model folder, with three queries typed without echo. Counts and timings only; the snapshot was deleted afterwards (`snapshot_deleted: true`).
+
+```json
+{
+ "index_s": 26.6, "atlas_s": 0.033, "atlas_status": "ok", "atlas_days": 319,
+ "chips": {"conversations": true, "summaries": true, "captures": true, "snippets": true, "screen": false, "web": true},
+ "query_1": {"search_s": 0.6, "hits": 25, "by_kind": {"chats": 14, "events": 6, "summaries": 4, "web": 1}, "keyword_only": false, "first_open_s": 0.018},
+ "query_2": {"search_s": 0.142, "hits": 25, "by_kind": {"events": 24, "chats": 1}, "keyword_only": false, "first_open_s": 0.003},
+ "query_3": {"search_s": 0.126, "hits": 25, "by_kind": {"events": 23, "chats": 1, "summaries": 1}, "keyword_only": false, "first_open_s": 0.003},
+ "snapshot_deleted": true
+}
+```
+
+All targets met: search 0.13-0.6 s (first search includes loading the model), records open in under 0.02 s, meaning search used. Screen shows no records because that backup predates screen capture being switched on.
+
+Note: this vault was made by a build that imports visits from an older tool with no navigation type. The public code never writes such visits, so the check ran from a throwaway copy with that build's one-line guard for them; the guard reaches the Atlas when this release is merged into that build.
