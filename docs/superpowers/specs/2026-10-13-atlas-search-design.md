@@ -100,9 +100,7 @@ Everything MCP's `search_memories` and `get_memory` do today moves here and retu
 **Compatibility contract:** before the move, a test captures the exact text of `search_memories`, `get_memory`,
 `timeline` and `memory_stats` for a set of calls on the fixture vault; after the move the text is identical.
 One deliberate difference: today, vectors present but the model folder missing makes `embed.load_model()` try a
-download, which fails offline and errors the tool. Meaning search now runs only when both `vectors.npz` and the
-model folder exist; otherwise the answer is keyword-only (MCP: same text as a keyword search; Atlas:
-`keyword_only: true`). No golden case depends on the old failure.
+download, which fails offline and errors the tool. MCP keeps today's behaviour exactly. The Atlas runs meaning search only when both `vectors.npz` and the model folder exist (`require_model=True`); otherwise it answers keyword-only with `keyword_only: true`.
 
 ### 3.2 `dashboard.py` (changed): data, not a page
 

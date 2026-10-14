@@ -61,9 +61,11 @@ a dashboard of what you have. Run the same command again later and it picks up w
   websites, people), saved as the raw records Pieces returned, so nothing is lost to interpretation. One SQLite file.
 - **Search for your AI tools**: an MCP server with `search_memories` (keyword + meaning, merged), `timeline`
   ("what was I doing in March?"), `get_memory`, and `memory_stats`.
-- **Memory Atlas**: a dashboard of your year. Active hours per day (hover a day for what it was about), when you work,
-  how your projects connect, projects over time, topics over time (from Pieces' own topic tags: ongoing interests
-  and short bursts), top apps and sites. Every chart has a table view.
+- **Memory Atlas**: open it with `inkvault dashboard` (or the **InkVault Atlas** icon from `inkvault dashboard --shortcut`
+  on Windows). It shows your year: active hours per day (hover a day for what it was about), when you work, how your
+  projects connect, projects and topics over time, top apps and sites. Every chart has a table view. A **Search** view
+  finds things across your vault and opens the original in a reader. It runs on this computer only (127.0.0.1, a
+  private link, stops when idle) and needs no internet.
 - **Your Claude Code, Codex and Claude desktop sessions**: your prompts and the replies, side by side with your
   Pieces history, searchable as chats (named like `Claude Code · project: title`), and part of the timeline, the
   digests and the dashboard.
