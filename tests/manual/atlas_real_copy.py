@@ -115,12 +115,13 @@ def main(argv):
         result = run(argv[1], argv[2] if len(argv) == 3 else None, ask_queries())
     except Exception as e:  # only the kind of failure is printed: a message could carry a path or a query
         print(f"The check failed ({type(e).__name__}).")
-        if getattr(e, "snapshot_deleted", False):
-            print("The snapshot was deleted.")
-        else:
-            folder = getattr(e, "snapshot_folder", None)
-            where = f" Remove this folder by hand: {folder}" if folder else ""
-            print(f"WARNING: The snapshot was NOT deleted; it holds a copy of your vault.{where}")
+        folder = getattr(e, "snapshot_folder", None)  # absent when the error came before any snapshot was made
+        if folder is not None:
+            if getattr(e, "snapshot_deleted", False) and not Path(folder).exists():
+                print("The snapshot was deleted.")
+            else:
+                print(f"WARNING: The snapshot was NOT deleted; it holds a copy of your vault. "
+                      f"Remove this folder by hand: {folder}")
         return 1
     folder = result.pop("snapshot_folder", None)
     print(json.dumps(result, indent=1))

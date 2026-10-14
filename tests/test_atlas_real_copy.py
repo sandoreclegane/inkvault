@@ -175,3 +175,12 @@ def test_bad_input_raises_before_anything_is_created(script, tmp_path):
     with pytest.raises(ValueError):
         script.run(f, make_root=make)
     assert made == []
+
+
+def test_bad_input_through_main_prints_no_snapshot_warning(script, tmp_path, monkeypatch, capsys):
+    f = tmp_path / "vault.db"
+    f.write_bytes(b"x")
+    monkeypatch.setattr(script, "ask_queries", lambda: [])
+    assert script.main(["x", str(f)]) == 1
+    out = capsys.readouterr().out
+    assert "ValueError" in out and "NOT deleted" not in out and "was deleted" not in out
