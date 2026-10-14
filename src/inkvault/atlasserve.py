@@ -2,11 +2,14 @@
 (spec §3.4, §5). It listens on 127.0.0.1 only, answers only the browser tab it opened, and never writes the vault.
 """
 import hmac
+import http.client
 import json
+import os
 import re
 import secrets
 import threading
 import time
+import webbrowser
 from datetime import datetime, timedelta, timezone
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -381,3 +384,115 @@ class Handler(BaseHTTPRequestHandler):
         self.send(405)
 
     do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_HEAD = refuse
+
+
+def prepare_process():
+    """The helper never downloads a model or shows progress bars (spec §5 rule 11)."""
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+
+
+def write_info(helper):
+    """Port and control secret for a second launch, written whole (temp file, then replace), user-only on POSIX."""
+    info = {"pid": os.getpid(), "port": helper.port, "control": helper.control,
+            "started": datetime.now(timezone.utc).isoformat()}
+    tmp = paths.atlas_info().with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(info, f)
+    os.replace(tmp, paths.atlas_info())
+
+
+def request_code(info, timeout=2.0):
+    """Ask the running helper for a fresh one-time code (spec §3.4). None when it doesn't answer as expected."""
+    port, control = int(info["port"]), str(info["control"])
+    if not 0 < port < 65536:
+        raise ValueError("bad port")
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        c.request("POST", "/control/code", body=b"{}",
+                  headers={"X-InkVault-Control": control, "Content-Type": "application/json"})
+        r = c.getresponse()
+        body = r.read()
+        return json.loads(body)["code"] if r.status == 200 else None
+    finally:
+        c.close()
+
+
+def open_in_browser(url):
+    webbrowser.open(url)
+
+
+def reuse(open_browser, wait=10.0):
+    """Another process holds the lock, so a helper is alive: get a code from it. Never start a second helper."""
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            info = json.loads(paths.atlas_info().read_text(encoding="utf-8"))
+            code = request_code(info)
+            if code:
+                if open_browser:
+                    open_in_browser(f"http://127.0.0.1:{int(info['port'])}/open?code={code}")
+                    print("Opened the Memory Atlas in your browser.")
+                else:
+                    print("The Memory Atlas is already running.")
+                return 0
+        except (OSError, ValueError, KeyError, TypeError):
+            pass  # just started and still writing its info, or busy: try again until the deadline
+        if time.monotonic() >= deadline:
+            print("The Atlas is starting or busy; try again in a moment.")
+            return 1
+        time.sleep(0.25)
+
+
+def watchdog(helper, idle, stop_event):
+    """Stop the helper when no open Atlas tab has pinged for `idle` seconds (spec §3.4)."""
+    step = max(0.2, min(30.0, idle / 4))
+    while not stop_event.wait(step):
+        if helper.now() - helper.last_ping > idle:
+            helper.server.shutdown()
+            return
+
+
+def serve(open_browser=True, idle=IDLE, wait=10.0):
+    """Become the helper if the OS lock says nobody else is, or hand the request to the one that is."""
+    from . import nightly
+    prepare_process()
+    fd = os.open(paths.atlas_lock(), os.O_RDWR | os.O_CREAT)
+    try:
+        try:
+            mine = nightly.try_lock(fd)
+        except OSError as e:  # e.g. a drive without file locking: without the lock there's no safe owner (review #1)
+            print(f"The Atlas can't start: its lock couldn't be taken ({e}). Nothing was started. If your InkVault "
+                  "folder is on a network or synced drive, move it to a local drive (`--home`).")
+            return 1
+        if not mine:
+            return reuse(open_browser, wait)
+        helper = Helper()
+        stop_event = threading.Event()
+        try:
+            write_info(helper)
+            threading.Thread(target=watchdog, args=(helper, idle, stop_event), daemon=True).start()
+            if open_browser:
+                open_in_browser(helper.open_url(helper.new_code()))
+                print("The Memory Atlas is open in your browser. It stops by itself 30 minutes after you close it; "
+                      "Ctrl+C stops it now.")
+            else:
+                print(f"The Memory Atlas helper is running on 127.0.0.1:{helper.port}. "
+                      "Open it with `inkvault dashboard`.")
+            try:
+                helper.server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+            return 0
+        finally:
+            stop_event.set()
+            helper.server.server_close()
+            try:
+                if json.loads(paths.atlas_info().read_text(encoding="utf-8")).get("control") == helper.control:
+                    paths.atlas_info().unlink()
+            except (OSError, ValueError):
+                pass
+            nightly.unlock(fd)
+    finally:
+        os.close(fd)
