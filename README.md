@@ -310,8 +310,8 @@ This is your screen history, your chats, your browsing and your code. InkVault s
 - No telemetry, no accounts, no cloud.
 - InkVault itself does not upload your archive. When you connect an AI client through MCP, memories returned to that
   client may be sent to its model provider under that client's settings. Choose your client and settings accordingly.
-- Two things are downloaded: the search model (~130 MB from Hugging Face, once)
-  and the dashboard's chart library (from cdnjs, when you open the page).
+- One thing is downloaded: the search model (~130 MB from Hugging Face, once). The Atlas makes no network requests;
+  its chart library (ECharts) is bundled, so it works offline.
 - Digests use Ollama on your own machine. Skip them with `--no-digest`.
 - From Claude Code and Codex sessions, InkVault keeps what you typed, what the assistant replied and session titles.
   Claude Code's replies include its tool calls, so a file it wrote is kept as written. Tool output (files it read,
