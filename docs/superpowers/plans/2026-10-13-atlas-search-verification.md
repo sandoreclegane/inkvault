@@ -4,7 +4,7 @@ Fictional data only. Browser check and speed results for the Atlas search work (
 
 ## Speed (synthetic)
 
-Run with `uv run python tests/manual/atlas_perf.py`. These are synthetic timings: synthetic vectors and a fake model, so they do not measure the real model's cold start. Memory is traced Python allocations, not whole-process peak.
+Run with `uv run python tests/manual/atlas_perf.py`. These are synthetic timings: synthetic vectors and a fake model, so they do not measure the real model's cold start. Memory is reported per call as `*_traced_increase_mb`: the traced Python allocations that call added at its peak, above what was already allocated just before it (the script's own in-memory rows are baseline and no longer counted). It is not whole-process peak.
 
 Machine: `Windows-10-10.0.26300-SP0 AMD64 Family 25 Model 117 Stepping 2, AuthenticAMD`, Python 3.11.15.
 
@@ -13,25 +13,30 @@ Machine: `Windows-10-10.0.26300-SP0 AMD64 Family 25 Model 117 Stepping 2, Authen
  "records": 120000,
  "hardware": "AMD64 Family 25 Model 117 Stepping 2, AuthenticAMD",
  "python": "3.11.15",
- "synthetic_cold_search_s": 0.225,
- "synthetic_warm_search_s": 0.086,
- "reader_s": 0.092,
+ "synthetic_cold_search_s": 0.392,
+ "synthetic_warm_search_s": 0.114,
+ "synthetic_cold_search_traced_increase_mb": 254.9,
+ "synthetic_warm_search_traced_increase_mb": 1.9,
+ "reader_s": 0.124,
  "reader_chars": 9657,
- "long_conversation_reader_s": 0.201,
+ "reader_traced_increase_mb": 0.0,
+ "long_conversation_reader_s": 0.3,
  "long_conversation_reader_chars": 33802,
- "long_conversation_traced_peak_mb": 139.2,
- "traced_python_peak_mb": 139.2,
+ "long_conversation_reader_traced_increase_mb": 6.9,
  "hits": 25
 }
 ```
 
-Note on the memory figures: the script's `long_conversation_traced_peak_mb` is measured as an absolute peak, and the script still holds about 132 MB of baseline data (the in-memory row list) at that point, so 139.2 MB is mostly baseline. A second run of the same script with the baseline subtracted (a scratch copy, not committed) gave a long-conversation read peak of 6.9 MB above baseline, against a 5 MB message.
+Notes on the memory figures:
+
+- The reader figures are now valid measures: the long-conversation read adds 6.9 MB at its peak, about 1.4 times the 5 MB message it holds, and an ordinary read adds under 0.1 MB. (An earlier version reported an absolute peak of 139.2 MB, which was mostly the script's own roughly 132 MB of baseline data.)
+- The cold search adds about 255 MB at its peak: it loads the 120,000 synthetic 256-dimension vectors (about 123 MB as float32) and scores them. That is a real cost of the first search after the helper starts, not baseline; warm searches add about 2 MB. Timings are from one run and vary a little between runs.
 
 Targets:
 
-- Synthetic warm search under 2 s: met (0.086 s).
-- Reader under 1 s, including the long conversation: met (0.092 s; 0.201 s for the long conversation).
-- Long-conversation traced peak well under 5 MB times a small factor: met on the baseline-subtracted figure (6.9 MB, about 1.4 times the 5 MB message). The absolute figure in the JSON above (139.2 MB) is not a valid measure of the reader because of the baseline, so the script's memory metric should be fixed before it is relied on.
+- Synthetic warm search under 2 s: met (0.114 s).
+- Reader under 1 s, including the long conversation: met (0.124 s; 0.3 s for the long conversation).
+- Long-conversation reader memory well under 5 MB times a small factor: met (6.9 MB above its starting point, about 1.4 times the 5 MB message).
 
 ## Browser check
 
