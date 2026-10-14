@@ -1,1 +1,140 @@
-<!doctype html><title>Memory Atlas</title>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Memory Atlas</title>
+<link rel="icon" href="/assets/mark.png">
+<link rel="stylesheet" href="/assets/atlas.css">
+<script src="/assets/echarts.min.js" defer></script>
+<script src="/assets/atlas.js" defer></script>
+<script src="/assets/search.js" defer></script>
+</head>
+<body>
+<header class="masthead">
+  <img class="brand-mark" src="/assets/mark.png" alt="" width="40" height="44">
+  <div class="masthead-title">Memory Atlas</div>
+  <nav class="views" aria-label="Views">
+    <button type="button" id="tab-atlas" aria-pressed="true">Atlas</button>
+    <button type="button" id="tab-search" aria-pressed="false">Search</button>
+  </nav>
+  <form id="search-form" class="searchbox" role="search">
+    <label class="visually-hidden" for="q">Search your memory</label>
+    <input id="q" type="search" maxlength="500" autocomplete="off" spellcheck="false" placeholder="Search your memory">
+    <button type="submit">Search</button>
+  </form>
+</header>
+<div id="notice" class="notice" role="status" hidden><span id="notice-text"></span><button type="button" id="notice-retry" hidden>Retry</button></div>
+<main>
+  <section id="welcome" class="panel" hidden>
+    <h2>Your vault is empty so far</h2>
+    <p>Run <code>inkvault rescue</code> (with Pieces) or <code>inkvault sync</code> (Claude Code, Codex, Claude desktop and browser history), then open the Atlas again.</p>
+  </section>
+  <section id="closed" class="panel" hidden>
+    <h2>The Atlas has closed</h2>
+    <p>Open it again from the InkVault Atlas icon or <code>inkvault dashboard</code>.</p>
+  </section>
+
+  <section id="view-atlas" aria-label="Atlas">
+    <p class="sub" id="sub"></p>
+    <p id="atlas-empty" class="empty" hidden></p>
+    <div class="filters" role="group" aria-label="Date range">
+      <button type="button" data-range="all">All time</button>
+      <button type="button" data-range="30">Last 30 days</button>
+      <button type="button" data-range="90">Last 90 days</button>
+      <button type="button" data-range="365">Last year</button>
+      <span class="custom">from <input type="date" id="from" aria-label="From date"> to <input type="date" id="to" aria-label="To date"></span>
+    </div>
+    <div class="tiles" id="tiles"></div>
+    <section class="card" data-table="calendar">
+      <div class="head"><div><h2>Active hours per day</h2>
+        <p class="desc">How many different hours of each day you were on the computer (Pieces captures, screen capture, session summaries, chats, pages opened in a browser). Hover a day for what it was about.</p></div>
+        <button type="button" class="tbl">Show table</button></div>
+      <div class="chart" id="calendar"></div>
+    </section>
+    <div class="grid2">
+      <section class="card" data-table="rhythm">
+        <div class="head"><div><h2>When you work</h2>
+          <p class="desc">Share of days you were active in each hour, by weekday (local time).</p></div>
+          <button type="button" class="tbl">Show table</button></div>
+        <div class="chart" id="rhythm"></div>
+      </section>
+      <section class="card" data-table="graph">
+        <div class="head"><div><h2>How projects connect</h2>
+          <p class="desc">Projects that come up in the same session. Bigger dot = more sessions; thicker line = more shared sessions.</p></div>
+          <button type="button" class="tbl">Show table</button></div>
+        <div class="chart" id="graph"></div>
+      </section>
+    </div>
+    <section class="card" data-table="themes">
+      <div class="head"><div><h2>Projects over time</h2>
+        <p class="desc">Sessions per week that mention each project, found automatically in your session and chat titles. To choose your own, write <code>Name = pattern</code> lines in <code>themes.txt</code> in your InkVault folder.</p></div>
+        <button type="button" class="tbl">Show table</button></div>
+      <div class="chart" id="themes"></div>
+    </section>
+    <section class="card" data-table="topics" id="topics-card">
+      <div class="head"><div><h2>Topics over time</h2>
+        <p class="desc">Pieces' own topic tags on your sessions. Ongoing topics recur across months; bursts are concentrated in a few weeks. Each group has its own color scale.</p></div>
+        <button type="button" class="tbl">Show table</button></div>
+      <div id="topics-ongoing-box"><h3 class="group">Ongoing</h3><div class="chart" id="topics-ongoing"></div></div>
+      <div id="topics-bursts-box"><h3 class="group">Bursts</h3><div class="chart" id="topics-bursts"></div></div>
+      <p class="empty" id="topics-none" hidden>No tagged sessions in this range</p>
+    </section>
+    <section class="card" data-table="sources">
+      <div class="head"><div><h2>Activity by source</h2>
+        <p class="desc">Records per week from each source. Each panel has its own scale — compare shapes, not heights.</p></div>
+        <button type="button" class="tbl">Show table</button></div>
+      <div class="multiples" id="sources"></div>
+    </section>
+    <div class="grid2">
+      <section class="card" data-table="apps">
+        <div class="head"><div><h2>Top apps</h2><p class="desc">Pieces captures per app.</p></div>
+          <button type="button" class="tbl">Show table</button></div>
+        <div class="chart" id="apps"></div>
+      </section>
+      <section class="card" data-table="sites">
+        <div class="head"><div><h2>Top sites seen by Pieces</h2><p class="desc">Screen captures per website (from Pieces' browser captures).</p></div>
+          <button type="button" class="tbl">Show table</button></div>
+        <div class="chart" id="sites"></div>
+      </section>
+    </div>
+    <section class="card" data-table="screen_apps">
+      <div class="head"><div><h2>Screen time by app</h2><p class="desc">Minutes each app was in front, from screen capture.</p></div>
+        <button type="button" class="tbl">Show table</button></div>
+      <div class="chart" id="screen_apps"></div>
+    </section>
+    <section class="card" data-table="web_sites">
+      <div class="head"><div><h2>Top sites opened in a browser</h2><p class="desc">Page visits per website, from the browser profiles you chose. Visits synced from your other devices aren't counted here.</p></div>
+        <button type="button" class="tbl">Show table</button></div>
+      <div class="chart" id="web_sites"></div>
+    </section>
+  </section>
+
+  <section id="view-search" aria-label="Search" hidden>
+    <div class="search-filters">
+      <div class="chips" role="group" aria-label="Sources">
+        <button type="button" data-source="all" aria-pressed="true">All</button>
+        <button type="button" data-source="conversations" aria-pressed="false" hidden>Conversations</button>
+        <button type="button" data-source="summaries" aria-pressed="false" hidden>Summaries</button>
+        <button type="button" data-source="captures" aria-pressed="false" hidden>Captures</button>
+        <button type="button" data-source="snippets" aria-pressed="false" hidden>Snippets</button>
+        <button type="button" data-source="screen" aria-pressed="false" hidden>Screen</button>
+        <button type="button" data-source="web" aria-pressed="false" hidden>Web history</button>
+      </div>
+      <span class="dates">From <input type="date" id="s-from" aria-label="Search from date"> To <input type="date" id="s-to" aria-label="Search to date"> <span id="tz"></span></span>
+    </div>
+    <p id="freshness" class="freshness"></p>
+    <div class="search-layout">
+      <div>
+        <p id="search-status" class="search-status" role="status"></p>
+        <ol id="results" class="results" aria-label="Results"></ol>
+        <button type="button" id="more" hidden>More results</button>
+      </div>
+      <article id="reader" class="reader" aria-live="polite"></article>
+    </div>
+  </section>
+  <footer id="foot"></footer>
+</main>
+</body>
+</html>

@@ -1,0 +1,391 @@
+"use strict";
+// The Atlas view (spec §4.1): v0.3.0's charts, computing exactly what they did. The data now comes from the helper
+// (search.js calls Atlas.show) instead of being baked into the page, and Atlas.clear() empties everything when
+// something is forgotten (spec §4.4).
+let DATA = null;
+const SOURCES = [["captures", "Screen captures"], ["sessions", "Session summaries"], ["chats", "Chat messages"], ["pages", "Pages opened"]];
+const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+let FIRST = null, LAST = null;
+
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const fmt = n => n.toLocaleString();
+const compact = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? Math.round(n / 1e3) + "K" : n.toLocaleString();
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+// Day arithmetic on "YYYY-MM-DD" strings, done in UTC so it's pure calendar math in every time zone. (Local noon
+// read back with toISOString() was the previous UTC day from UTC+13 on, e.g. New Zealand in summer.)
+const addDays = (iso, n) => { const d = new Date(iso + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+const weekOf = iso => { const d = new Date(iso + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() - (d.getUTCDay() + 6) % 7); return d.toISOString().slice(0, 10); };
+const bits = m => { let n = 0; for (; m; m &= m - 1) n++; return n; };
+const weeksBetween = (a, b) => { const out = []; for (let w = weekOf(a); w <= b; w = addDays(w, 7)) out.push(w); return out; };
+
+let range = {from: null, to: null};
+const charts = {};
+const tables = {};  // chart id -> {head: [...], rows: [[...]]}
+
+function theme() {
+  return {ink: css("--ink"), ink2: css("--ink-2"), muted: css("--muted"), grid: css("--grid"), axis: css("--axis"),
+          surface: css("--surface-1"), s1: css("--series-1"), empty: css("--empty"), seq: css("--seq").split(",").map(s => s.trim())};
+}
+function tooltipBase(t) {
+  return {backgroundColor: t.surface, borderColor: t.grid, textStyle: {color: t.ink, fontSize: 12},
+          extraCssText: "border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);"};
+}
+// Charts follow their own container, not the window: panes and layout reflows resize without a window event.
+const resizer = new ResizeObserver(entries => {
+  for (const e of entries) {
+    if (e.target.id === "calendar") renderCalendar(theme());  // cell size depends on width
+    else charts[e.target.id]?.resize();
+  }
+});
+function chart(id) {
+  const el = document.getElementById(id);
+  if (!charts[id]) { charts[id] = echarts.init(el, null, {renderer: "canvas"}); resizer.observe(el); }
+  return charts[id];
+}
+function inRange(day) { return day >= range.from && day <= range.to; }
+// A day's digest from the local model, or its session titles when there is none yet.
+function dayStory(day) { return DATA.digests[day] || (DATA.highlights[day] || []).join("; "); }
+
+function renderTiles() {
+  let screenMinutes = 0, active = 0, captures = 0, sessions = 0, chats = 0, pages = 0;
+  for (const [day, d] of Object.entries(DATA.days)) {
+    if (!inRange(day)) continue;
+    if (d.hours) active++;
+    captures += d.captures; sessions += d.sessions; chats += d.chats; pages += d.pages || 0; screenMinutes += d.screen_minutes || 0;
+  }
+  const hoursMinutes = m => m >= 60 ? `${Math.floor(m / 60)}h ${Math.round(m % 60)}m` : `${Math.round(m)}m`;
+  const tiles = [
+    ["Days remembered", fmt(active), `${range.from} → ${range.to}`, true],
+    ["Screen captures", compact(captures), "what Pieces saw"],
+    ["Screen time", hoursMinutes(screenMinutes), "windows you had open, from screen capture"],
+    ["Session summaries", fmt(sessions), "written by Pieces"],
+    ["Chat messages", compact(chats), (DATA.chat_sources || ["Pieces"]).join(", ")],
+    ["Pages opened", compact(pages), "in your browsers, on this computer"],
+    ["Saved snippets", fmt(DATA.snippets), "all time"],
+  ];
+  const box = document.getElementById("tiles");
+  box.replaceChildren(...tiles.map(([label, value, note, hero]) => {
+    const el = document.createElement("div");
+    el.className = "tile" + (hero ? " hero" : "");
+    for (const [cls, txt] of [["label", label], ["value", value], ["note", note]]) {
+      const s = document.createElement("div"); s.className = cls; s.textContent = txt; el.append(s);
+    }
+    return el;
+  }));
+}
+
+function renderCalendar(t) {
+  const pts = [], rows = [];
+  let max = 1;
+  for (const [day, d] of Object.entries(DATA.days)) {
+    if (!inRange(day)) continue;
+    const h = bits(d.hours);
+    pts.push([day, h]); rows.push([day, h, dayStory(day)]); max = Math.max(max, h);
+  }
+  tables.calendar = {head: ["Day", "Active hours", "What the day was about"], rows};
+  const el = document.getElementById("calendar");
+  const weeks = weeksBetween(range.from, range.to).length;
+  const cell = Math.max(8, Math.min(18, Math.floor((el.clientWidth - 70) / Math.max(weeks, 1))));
+  el.style.height = (cell * 7 + 60) + "px";
+  chart("calendar").resize();
+  chart("calendar").setOption({
+    tooltip: {...tooltipBase(t), extraCssText: tooltipBase(t).extraCssText + "max-width:340px;white-space:normal;",
+              formatter: p => {
+                const day = p.value[0], digest = DATA.digests[day], hl = DATA.highlights[day] || [];
+                const when = new Date(day + "T12:00:00").toLocaleDateString(undefined, {weekday: "long", month: "long", day: "numeric", year: "numeric"});
+                const story = digest ? `<div class="tt-story">${esc(digest)}</div>`
+                  : hl.length ? `<div class="tt-story tt-muted">${hl.map(esc).join("<br>")}</div>` : "";
+                return `<b>${p.value[1]} active hours</b> <span class="tt-muted">· ${esc(when)}</span>${story}`;
+              }},
+    visualMap: {min: 0, max, calculable: false, orient: "horizontal", right: 0, bottom: 0, itemWidth: 10, itemHeight: 100,
+                inRange: {color: t.seq}, textStyle: {color: t.muted, fontSize: 11}, text: [String(max) + " h", "0"]},
+    calendar: {range: [range.from, range.to], top: 24, left: 36, right: 8, cellSize: [cell, cell],
+               splitLine: {show: false}, itemStyle: {color: t.empty, borderColor: t.surface, borderWidth: 2},
+               dayLabel: {firstDay: 1, nameMap: ["S", "M", "T", "W", "T", "F", "S"], color: t.muted, fontSize: 10},
+               monthLabel: {color: t.ink2, fontSize: 11}, yearLabel: {show: false}},
+    series: [{type: "heatmap", coordinateSystem: "calendar", data: pts,
+              emphasis: {itemStyle: {borderColor: t.ink, borderWidth: 1}}}],
+  }, true);
+}
+
+function renderRhythm(t) {
+  const hits = Array.from({length: 7}, () => new Array(24).fill(0));
+  const daysPer = new Array(7).fill(0);
+  for (const [day, d] of Object.entries(DATA.days)) {
+    if (!inRange(day) || !d.hours) continue;
+    const wd = (new Date(day + "T12:00:00").getDay() + 6) % 7;
+    daysPer[wd]++;
+    for (let h = 0; h < 24; h++) if (d.hours & (1 << h)) hits[wd][h]++;
+  }
+  const pts = [], rows = [];
+  for (let w = 0; w < 7; w++) for (let h = 0; h < 24; h++) {
+    const pct = daysPer[w] ? Math.round(100 * hits[w][h] / daysPer[w]) : 0;
+    pts.push([h, w, pct]); rows.push([WEEKDAYS[w], `${String(h).padStart(2, "0")}:00`, pct + "%"]);
+  }
+  tables.rhythm = {head: ["Weekday", "Hour", "Days active"], rows};
+  const hourName = h => h === 0 ? "12a" : h < 12 ? h + "a" : h === 12 ? "12p" : (h - 12) + "p";
+  chart("rhythm").setOption({
+    tooltip: {...tooltipBase(t), formatter: p => `<b>${p.value[2]}% of ${esc(WEEKDAYS[p.value[1]])}s</b><br>` +
+              `<span class="tt-muted">active at ${hourName(p.value[0])}</span>`},
+    grid: {top: 8, left: 40, right: 8, bottom: 56},
+    xAxis: {type: "category", data: [...Array(24).keys()].map(hourName), axisTick: {show: false},
+            axisLine: {lineStyle: {color: t.axis}}, axisLabel: {color: t.muted, fontSize: 10, interval: 2}},
+    yAxis: {type: "category", data: WEEKDAYS, inverse: true, axisTick: {show: false}, axisLine: {show: false},
+            axisLabel: {color: t.muted, fontSize: 11}},
+    visualMap: {min: 0, max: 100, orient: "horizontal", left: "center", bottom: 0, itemWidth: 10, itemHeight: 120,
+                inRange: {color: t.seq}, textStyle: {color: t.muted, fontSize: 11}, text: ["100%", "0%"]},
+    series: [{type: "heatmap", data: pts, itemStyle: {borderColor: t.surface, borderWidth: 2, borderRadius: 3},
+              emphasis: {itemStyle: {borderColor: t.ink, borderWidth: 1}}}],
+  }, true);
+}
+
+function themedDocs() { return DATA.docs.filter(([day]) => inRange(day)); }
+
+function renderGraph(t) {
+  const docs = themedDocs();
+  const count = new Array(DATA.themes.length).fill(0), pair = {};
+  for (const [, th] of docs) {
+    for (const i of th) count[i]++;
+    for (let a = 0; a < th.length; a++) for (let b = a + 1; b < th.length; b++) {
+      const k = th[a] + "-" + th[b]; pair[k] = (pair[k] || 0) + 1;
+    }
+  }
+  const maxC = Math.max(1, ...count);
+  const nodes = DATA.themes.map((name, i) => ({id: String(i), name, value: count[i],
+    symbolSize: count[i] ? 10 + 34 * Math.sqrt(count[i] / maxC) : 0,
+    itemStyle: {color: t.s1, borderColor: t.surface, borderWidth: 2},
+    label: {show: count[i] > 0, color: t.ink, fontSize: 11, position: "right"}})).filter(n => n.value > 0);
+  const edgesAll = Object.entries(pair).map(([k, v]) => { const [a, b] = k.split("-"); return {source: a, target: b, value: v}; });
+  const maxE = Math.max(1, ...edgesAll.map(e => e.value));
+  const floor = Math.max(1, Math.round(maxE * 0.03));  // hide one-off pairings so the structure shows
+  const edges = edgesAll.filter(e => e.value >= floor).map(e => ({...e,
+    lineStyle: {width: 1 + 5 * e.value / maxE, color: t.axis, opacity: 0.9, curveness: 0.1}}));
+  tables.graph = {head: ["Project", "Also in the same session", "Shared sessions"],
+    rows: edgesAll.sort((a, b) => b.value - a.value).map(e => [DATA.themes[e.source], DATA.themes[e.target], fmt(e.value)])};
+  chart("graph").setOption({
+    tooltip: {...tooltipBase(t), formatter: p => p.dataType === "edge"
+      ? `<b>${fmt(p.data.value)} shared sessions</b><br><span class="tt-muted">${esc(DATA.themes[p.data.source])} + ${esc(DATA.themes[p.data.target])}</span>`
+      : `<b>${fmt(p.data.value)} sessions</b><br><span class="tt-muted">${esc(p.data.name)}</span>`},
+    series: [{type: "graph", layout: "force", roam: true, draggable: true, data: nodes, links: edges,
+              force: {repulsion: 170, edgeLength: [50, 130], gravity: 0.3},
+              emphasis: {focus: "adjacency", lineStyle: {color: t.s1}}}],
+  }, true);
+}
+
+// Sessions per week for each name. docs: [[day, [name indices]]]; only: the indices into names (no duplicates) that may become rows.
+// Rows with no sessions in range are left out; the rest are ordered by total, most first.
+function weeklyGrid(names, docs, only) {
+  const weeks = weeksBetween(range.from, range.to);
+  const idx = Object.fromEntries(weeks.map((w, i) => [w, i]));
+  const grid = names.map(() => new Array(weeks.length).fill(0));
+  for (const [day, found] of docs) {
+    if (!inRange(day)) continue;
+    const w = idx[weekOf(day)];
+    if (w !== undefined) for (const i of found) grid[i][w]++;
+  }
+  const order = (only || names.map((_, i) => i)).filter(i => grid[i].some(v => v))
+    .sort((a, b) => grid[b].reduce((x, y) => x + y) - grid[a].reduce((x, y) => x + y));
+  return {weeks, grid, order};
+}
+
+// One weekly heatmap into #id, sized to its rows. Callers skip it when g.order is empty.
+function drawWeekly(id, names, {weeks, grid, order}, t) {
+  const pts = [];
+  let max = 1;
+  order.forEach((ti, row) => grid[ti].forEach((v, w) => { pts.push([w, row, v || null]); max = Math.max(max, v); }));
+  document.getElementById(id).style.height = (order.length * 26 + 80) + "px";
+  chart(id).resize();
+  chart(id).setOption({
+    tooltip: {...tooltipBase(t), formatter: p => `<b>${fmt(p.value[2] || 0)} sessions</b><br>` +
+              `<span class="tt-muted">${esc(names[order[p.value[1]]])} · week of ${esc(weeks[p.value[0]])}</span>`},
+    grid: {top: 8, left: 170, right: 12, bottom: 56},
+    xAxis: {type: "category", data: weeks.map(w => new Date(w + "T12:00:00").toLocaleDateString(undefined, {month: "short", day: "numeric"})),
+            axisTick: {show: false}, axisLine: {lineStyle: {color: t.axis}}, axisLabel: {color: t.muted, fontSize: 10}},
+    yAxis: {type: "category", data: order.map(i => names[i]), inverse: true, axisTick: {show: false},
+            axisLine: {show: false}, axisLabel: {color: t.ink2, fontSize: 12, width: 160, overflow: "truncate"}},
+    visualMap: {min: 1, max, orient: "horizontal", left: "center", bottom: 0, itemWidth: 10, itemHeight: 120,
+                inRange: {color: t.seq}, textStyle: {color: t.muted, fontSize: 11}, text: [String(max), "1"]},
+    series: [{type: "heatmap", data: pts, itemStyle: {borderColor: t.surface, borderWidth: 2, borderRadius: 2},
+              emphasis: {itemStyle: {borderColor: t.ink, borderWidth: 1}}}],
+  }, true);
+}
+
+function renderThemes(t) {
+  const g = weeklyGrid(DATA.themes, DATA.docs);
+  tables.themes = {head: ["Project", ...g.weeks.map(w => "wk " + w)], rows: g.order.map(i => [DATA.themes[i], ...g.grid[i]])};
+  drawWeekly("themes", DATA.themes, g, t);
+}
+
+// Pieces' topic tags in two groups. The card is hidden when the vault has none; an empty group is left out.
+function renderTopics(t) {
+  const {ongoing, bursts} = DATA.topics;
+  const names = [...ongoing, ...bursts];
+  document.getElementById("topics-card").hidden = !names.length;
+  let weeks = weeksBetween(range.from, range.to);
+  const rows = [];
+  for (const [key, label, only] of [["ongoing", "Ongoing", ongoing.map((_, i) => i)],
+                                    ["bursts", "Bursts", bursts.map((_, i) => ongoing.length + i)]]) {
+    const g = weeklyGrid(names, DATA.topic_docs, only);
+    weeks = g.weeks;
+    document.getElementById(`topics-${key}-box`).hidden = !g.order.length;
+    if (g.order.length) drawWeekly(`topics-${key}`, names, g, t);
+    rows.push(...g.order.map(i => [label, names[i], ...g.grid[i]]));
+  }
+  document.getElementById("topics-none").hidden = !names.length || rows.length > 0;
+  tables.topics = {head: ["Group", "Topic", ...weeks.map(w => "wk " + w)], rows};
+}
+
+function renderSources(t) {
+  const weeks = weeksBetween(range.from, range.to);
+  const idx = Object.fromEntries(weeks.map((w, i) => [w, i]));
+  const sums = Object.fromEntries(SOURCES.map(([k]) => [k, new Array(weeks.length).fill(0)]));
+  for (const [day, d] of Object.entries(DATA.days)) {
+    if (!inRange(day)) continue;
+    const w = idx[weekOf(day)];
+    for (const [k] of SOURCES) sums[k][w] += d[k];
+  }
+  tables.sources = {head: ["Week of", ...SOURCES.map(([, n]) => n)], rows: weeks.map((w, i) => [w, ...SOURCES.map(([k]) => sums[k][i])])};
+  const box = document.getElementById("sources");
+  if (!box.children.length) {
+    for (const [k, name] of SOURCES) {
+      const mini = document.createElement("div"); mini.className = "mini";
+      const h = document.createElement("h3"); h.textContent = name;
+      const tot = document.createElement("div"); tot.className = "total"; tot.id = "tot-" + k;
+      const c = document.createElement("div"); c.id = "src-" + k; c.style.height = "120px";
+      mini.append(h, tot, c); box.append(mini);
+    }
+  }
+  const labels = weeks.map(w => new Date(w + "T12:00:00").toLocaleDateString(undefined, {month: "short", day: "numeric"}));
+  for (const [k] of SOURCES) {
+    document.getElementById("tot-" + k).textContent = fmt(sums[k].reduce((a, b) => a + b, 0)) + " in range";
+    chart("src-" + k).setOption({
+      tooltip: {...tooltipBase(t), trigger: "axis", axisPointer: {type: "line", lineStyle: {color: t.axis}},
+                formatter: ps => `<b>${fmt(ps[0].value)}</b><br><span class="tt-muted">week of ${esc(ps[0].axisValue)}</span>`},
+      grid: {top: 8, left: 4, right: 8, bottom: 20, containLabel: true},
+      xAxis: {type: "category", data: labels, boundaryGap: false, axisTick: {show: false},
+              axisLine: {lineStyle: {color: t.axis}}, axisLabel: {color: t.muted, fontSize: 10, interval: "auto", hideOverlap: true}},
+      yAxis: {type: "value", splitNumber: 2, splitLine: {lineStyle: {color: t.grid}},
+              axisLabel: {color: t.muted, fontSize: 10, formatter: v => compact(v)}},
+      series: [{type: "line", data: sums[k], symbol: "none", lineStyle: {width: 2, color: t.s1, cap: "round", join: "round"},
+                areaStyle: {color: t.s1, opacity: 0.1}}],
+    }, true);
+  }
+}
+
+function renderBars(id, byDay, t, noun) {
+  const total = {};
+  for (const [day, counts] of Object.entries(byDay)) if (inRange(day))
+    for (const [k, v] of Object.entries(counts)) total[k] = (total[k] || 0) + v;
+  const all = Object.entries(total).sort((a, b) => b[1] - a[1]);
+  tables[id] = {head: [noun, "Count"], rows: all.map(([k, v]) => [k, fmt(v)])};
+  const top = all.slice(0, 12).reverse();
+  const el = document.getElementById(id);
+  if (!top.length) { chart(id).clear(); el.dataset.empty = "1"; return; }
+  chart(id).setOption({
+    tooltip: {...tooltipBase(t), formatter: p => `<b>${fmt(p.value)}</b><br><span class="tt-muted">${esc(p.name)}</span>`},
+    grid: {top: 4, left: 8, right: 56, bottom: 4, containLabel: true},
+    xAxis: {type: "value", show: false},
+    yAxis: {type: "category", data: top.map(([k]) => k), axisTick: {show: false}, axisLine: {lineStyle: {color: t.axis}},
+            axisLabel: {color: t.ink2, fontSize: 12, width: 150, overflow: "truncate"}},
+    series: [{type: "bar", data: top.map(([, v]) => v), barMaxWidth: 18, itemStyle: {color: t.s1, borderRadius: [0, 4, 4, 0]},
+              label: {show: true, position: "right", color: t.ink2, fontSize: 11, formatter: p => compact(p.value)}}],
+  }, true);
+}
+
+function renderTableFor(card) {
+  const id = card.dataset.table, spec = tables[id];
+  let wrap = card.querySelector(".tablewrap");
+  if (!wrap) return;
+  const table = document.createElement("table");
+  const tr = document.createElement("tr");
+  // Right-align columns that hold numbers (counts, "12%", "1,234"); text columns stay left.
+  const numeric = spec.head.map((_, i) => i > 0 && spec.rows.every(r => typeof r[i] === "number" || /^[\d,.%]*$/.test(r[i])));
+  spec.head.forEach((h, i) => { const th = document.createElement("th"); th.textContent = h; if (numeric[i]) th.className = "num"; tr.append(th); });
+  const thead = document.createElement("thead"); thead.append(tr);
+  const tbody = document.createElement("tbody");
+  for (const row of spec.rows) {
+    const r = document.createElement("tr");
+    row.forEach((v, i) => { const td = document.createElement("td"); td.textContent = v; if (numeric[i]) td.className = "num"; r.append(td); });
+    tbody.append(r);
+  }
+  table.append(thead, tbody);
+  wrap.replaceChildren(table);
+}
+
+function render() {
+  const t = theme();
+  document.getElementById("sub").textContent =
+    `Everything your vault holds, ${range.from} to ${range.to}. Private: built from files on this PC.`;
+  renderTiles();
+  if (!window.echarts) {  // the bundled library failed to load: say so where the charts would be; search still works
+    document.querySelectorAll(".chart").forEach(el => { el.textContent = "Charts couldn't load. Search still works."; });
+  } else {
+    renderCalendar(t); renderRhythm(t); renderGraph(t); renderThemes(t); renderTopics(t); renderSources(t);
+    renderBars("apps", DATA.apps, t, "App"); renderBars("sites", DATA.sites, t, "Site"); renderBars("web_sites", DATA.web_sites || {}, t, "Site");
+    renderBars("screen_apps", DATA.screen_apps || {}, t, "App");
+  }
+  document.querySelectorAll(".card[data-table]").forEach(renderTableFor);
+  document.getElementById("foot").textContent =
+    `Built ${DATA.built} by InkVault from your local vault. Nothing on this page was sent anywhere.`;
+}
+
+// Keep both ends inside the vault's days: clamping only from-up and to-down could leave a range picked wholly
+// before (or after) the data backwards, e.g. Nov 11 -> Nov 3.
+const clampDay = d => d < FIRST ? FIRST : d > LAST ? LAST : d;
+function setRange(from, to, preset) {
+  range = {from: clampDay(from), to: clampDay(to)};
+  document.getElementById("from").value = range.from;
+  document.getElementById("to").value = range.to;
+  document.querySelectorAll("[data-range]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.range === preset)));
+  try { localStorage.setItem("inkvault-range", JSON.stringify({...range, preset})); } catch (e) {}
+  render();
+}
+const presets = {
+  all: () => [FIRST, LAST], 30: () => [addDays(LAST, -29), LAST], 90: () => [addDays(LAST, -89), LAST],
+  365: () => [addDays(LAST, -364), LAST],
+};
+let bound = false;
+function bind() {
+  if (bound) return;
+  bound = true;
+  document.querySelectorAll("[data-range]").forEach(b => b.addEventListener("click", () => setRange(...presets[b.dataset.range](), b.dataset.range)));
+  for (const id of ["from", "to"]) document.getElementById(id).addEventListener("change", () => {
+    const f = document.getElementById("from").value, t = document.getElementById("to").value;
+    if (f && t && f <= t) setRange(f, t, null);
+  });
+  document.querySelectorAll(".card .tbl").forEach(btn => btn.addEventListener("click", () => {
+    const card = btn.closest(".card");
+    let wrap = card.querySelector(".tablewrap");
+    if (wrap) { wrap.remove(); btn.textContent = "Show table"; return; }
+    wrap = document.createElement("div"); wrap.className = "tablewrap"; card.append(wrap);
+    btn.textContent = "Hide table"; if (DATA) renderTableFor(card);
+  }));
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (DATA) render(); });
+}
+
+function show(data) {
+  clear();
+  DATA = data;
+  const days = Object.keys(DATA.days);
+  FIRST = days[0]; LAST = days[days.length - 1];
+  for (const id of ["from", "to"]) Object.assign(document.getElementById(id), {min: FIRST, max: LAST});
+  bind();
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem("inkvault-range")); } catch (e) {}
+  if (saved && saved.preset && presets[saved.preset]) setRange(...presets[saved.preset](), saved.preset);
+  else setRange(FIRST, LAST, "all");
+}
+
+// Forgetting (spec §4.4): nothing drawn from the old data may stay on screen, including an open tooltip.
+function clear() {
+  for (const [id, c] of Object.entries(charts)) { c.dispose(); delete charts[id]; }
+  resizer.disconnect();
+  for (const k of Object.keys(tables)) delete tables[k];
+  DATA = null; FIRST = null; LAST = null;
+  for (const id of ["tiles", "sources", "foot", "sub"]) document.getElementById(id).replaceChildren();
+  document.querySelectorAll(".chart").forEach(el => el.replaceChildren());
+  document.querySelectorAll(".tablewrap").forEach(w => w.remove());
+  document.querySelectorAll(".card .tbl").forEach(b => { b.textContent = "Show table"; });
+}
+
+window.Atlas = {show, clear};
