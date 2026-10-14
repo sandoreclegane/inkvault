@@ -139,7 +139,7 @@ freshness.
     nothing and says so: no helper runs without owning the lock.
   - `/control/code` accepts only that header, is subject to the same Host check, and is never reachable with the
     browser cookie alone.
-- **Lifetime.** Each open Atlas tab sends `/api/ping` every 60 seconds while visible. With no ping for 30 minutes
+- **Lifetime.** Each open Atlas tab sends `/api/ping` every 60 seconds, hidden or not. With no ping for 30 minutes
   the helper stops and removes its lock. Ctrl+C stops it immediately when run from a terminal.
 - **Routes** (anything else is 404; wrong method is 405):
   - `GET /open?code=…`: exchanges a one-time code for the session cookie, then redirects to `/`.

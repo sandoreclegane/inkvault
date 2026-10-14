@@ -12,7 +12,7 @@ NODE = shutil.which("node")
 
 
 @pytest.mark.skipif(not NODE, reason="Node isn't installed")
-@pytest.mark.parametrize("scenario", ["restore", "late_record", "rebuild_between", "atlas_revision"])
+@pytest.mark.parametrize("scenario", ["restore", "late_record", "rebuild_between", "atlas_revision", "hidden_and_closed"])
 def test_search_js(scenario, monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", REAL_POPEN)  # only for this test: the one Node run it starts
     r = REAL_RUN([NODE, str(JS / f"{scenario}.cjs")], capture_output=True, text=True, timeout=30)

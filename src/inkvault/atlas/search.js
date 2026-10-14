@@ -95,6 +95,10 @@ function view(name) {
 function closed() {
   for (const k of Object.keys(turn)) turn[k]++;
   clearTimeout(pollTimer); clearInterval(pingTimer);
+  // Nothing of the vault stays on a page whose helper is gone (and nothing is left to restore on reload).
+  $("results").replaceChildren(); $("reader").replaceChildren(); $("freshness").textContent = "";
+  Atlas.clear();
+  try { sessionStorage.removeItem(STATE); } catch (e) {}
   notice(null);
   showOnly("closed");
 }
@@ -334,8 +338,7 @@ async function restore(saved) {
   }
 }
 
-async function ping() {
-  if (document.visibilityState !== "visible") return;
+async function ping() {  // also while the tab is hidden: the helper stops 30 minutes after the last ping
   const a = await api("/api/ping", {});
   if (a.status === "closed") return closed();
   if (a.rebuilding && generation) return clearEverything("rebuilding");
