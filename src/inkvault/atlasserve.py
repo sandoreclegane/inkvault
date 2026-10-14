@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -156,7 +157,18 @@ def build_atlas():
         return "busy"
 
 
+UNREADABLE = (sqlite3.Error, OSError)  # a damaged or unreadable search/vault file; the page is told only "unavailable"
+
+
 def atlas_payload():
+    """The browser's view of atlas.json. A damaged or unreadable file is "unavailable", with no detail (MCP is unaffected)."""
+    try:
+        return atlas_payload_unguarded()
+    except (*UNREADABLE, ValueError):  # ValueError: atlas.json isn't valid JSON
+        return {"status": "unavailable"}
+
+
+def atlas_payload_unguarded():
     stamp = retrieval.published()
     if stamp[0]:
         return {"status": "rebuilding"}
@@ -208,6 +220,8 @@ def api_search(body):
                                         require_model=True)
     except retrieval.Refused as e:
         return {"status": e.status}
+    except UNREADABLE:
+        return {"status": "unavailable"}
     if offset and body.get("generation") != gen:
         return {"status": "changed"}
     if r.empty_index:
@@ -235,6 +249,8 @@ def api_record(body):
         r, gen = retrieval.guarded_call(retrieval.record, kind, id_, cursor)
     except retrieval.Refused as e:
         return {"status": e.status}
+    except UNREADABLE:
+        return {"status": "unavailable"}
     if cursor is None and expected != gen:  # rebuilt between choosing the hit and opening it
         return {"status": "changed"}
     return {**r, "generation": gen}
@@ -370,11 +386,15 @@ class Handler(BaseHTTPRequestHandler):
             body = self.body()
             if path == "/api/ping":
                 self.helper.last_ping = self.helper.now()
-                stamp = retrieval.published()
-                if stamp[3] is None:  # the vault can't be read right now: no generation to offer
+                try:
+                    stamp = retrieval.published()
+                    if stamp[3] is None:  # the vault can't be read right now: no generation to offer
+                        return self.answer(200, {"status": "unavailable"})
+                    ping = {"status": "ok", "generation": retrieval.generation(stamp),
+                            "rebuilding": bool(stamp[0]), "atlas_revision": atlas_revision()}
+                except UNREADABLE:
                     return self.answer(200, {"status": "unavailable"})
-                return self.answer(200, {"status": "ok", "generation": retrieval.generation(stamp),
-                                         "rebuilding": bool(stamp[0]), "atlas_revision": atlas_revision()})
+                return self.answer(200, ping)
             return self.answer(200, api_search(body) if path == "/api/search" else api_record(body))
         except TooLarge:
             self.close_connection = True

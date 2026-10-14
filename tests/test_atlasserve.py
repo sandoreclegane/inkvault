@@ -347,3 +347,54 @@ def test_write_info_replaces_a_leftover_temp_file_and_cleans_up(helper, monkeypa
     with pytest.raises(OSError):
         atlasserve.write_info(helper)
     assert not tmp.exists()
+
+
+def test_a_damaged_index_or_atlas_file_is_unavailable_not_a_bare_500(helper, session, capfd):
+    """Codex build review #2: sqlite/OS errors at the browser boundary become {"status": "unavailable"}, no detail."""
+    from inkvault import paths
+    s, found = api(helper, session, "/api/search", {"query": "backoff"})
+    assert s == 200 and found["status"] == "ok" and found["hits"]
+    hit = found["hits"][0]
+    record = {"kind": hit["kind"], "id": hit["id"], "generation": found["generation"]}
+    assert api(helper, session, "/api/record", record)[1]["status"] == "ok"
+    assert api(helper, session, "/api/atlas")[1]["status"] in ("ok", "no-days")
+    good_index = paths.search_db().read_bytes()
+    paths.search_db().write_bytes(b"this is not a database " * 200)  # damaged: junk bytes
+    for path, body in (("/api/search", {"query": "backoff"}), ("/api/record", record), ("/api/atlas", None),
+                       ("/api/search", {"query": "backoff", "offset": 25, "generation": found["generation"]})):
+        s, answer = api(helper, session, path, body)
+        assert (s, answer) == (200, {"status": "unavailable"}), (path, s, answer)  # and no private detail
+    assert api(helper, session, "/api/search", {"query": "backoff"}) == (200, {"status": "unavailable"})
+    assert api(helper, session, "/api/record", record) == (200, {"status": "unavailable"})
+    assert api(helper, session, "/api/atlas") == (200, {"status": "unavailable"})
+    assert api(helper, session, "/api/ping", {})[0] == 200
+    paths.search_db().write_bytes(good_index)  # a good index again: the next request succeeds
+    assert api(helper, session, "/api/search", {"query": "backoff"})[1]["status"] == "ok"
+    out, err = capfd.readouterr()
+    assert err == "" and "backoff" not in out + err
+
+
+def test_a_damaged_atlas_json_is_unavailable_and_recovers(helper, session):
+    from inkvault import paths
+    assert api(helper, session, "/api/atlas")[1]["status"] in ("ok", "no-days")
+    if not paths.dashboard().exists():
+        pytest.skip("no atlas.json was built for this fixture")
+    good = paths.dashboard().read_bytes()
+    paths.dashboard().write_bytes(b"{ not json")
+    assert api(helper, session, "/api/atlas") == (200, {"status": "unavailable"})
+    paths.dashboard().write_bytes(good)
+    assert api(helper, session, "/api/atlas")[1]["status"] == "ok"
+
+
+def test_an_unreadable_atlas_file_is_unavailable(helper, session, monkeypatch):
+    from inkvault import atlasserve
+    from pathlib import Path
+    real = Path.read_text
+
+    def refuse(self, *a, **k):
+        if self.name == "atlas.json":
+            raise PermissionError("secretword")
+        return real(self, *a, **k)
+    monkeypatch.setattr(Path, "read_text", refuse)
+    assert api(helper, session, "/api/atlas") == (200, {"status": "unavailable"})
+    assert atlasserve.atlas_payload() == {"status": "unavailable"}

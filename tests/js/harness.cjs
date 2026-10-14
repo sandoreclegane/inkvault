@@ -25,6 +25,7 @@ module.exports = function load({saved = null, answer}) {
       const body = o.body ? JSON.parse(o.body) : null;
       calls.push([p, body]);
       const a = await answer(p, body);
+      if (a && a.httpStatus) return {status: a.httpStatus, json: async () => { if (a.body) return a.body; throw new Error("empty body"); }};  // e.g. a bare 500
       return {status: 200, json: async () => a};
     },
   });

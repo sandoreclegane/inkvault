@@ -37,6 +37,7 @@ async function api(path, body) {
   let res;
   try { res = await fetch(path, options); } catch (e) { return {status: "closed"}; }
   if (res.status === 403) return {status: "closed"};
+  if (res.status >= 500) return {status: "unavailable"};  // the helper is there but couldn't answer: Retry, not "closed"
   try { return await res.json(); } catch (e) { return {status: "unavailable"}; }
 }
 
