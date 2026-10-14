@@ -63,12 +63,11 @@ def test_timeline_and_stats(vault):
     assert "snippets: 1" in server.memory_stats()
 
 
-def test_dashboard_detects_projects_and_embeds_no_template_marker(vault):
+def test_atlas_data_detects_projects(vault):
     from inkvault import dashboard, index
     index.build()
     out = dashboard.build()
     html = out.read_text(encoding="utf-8")
-    assert "/*DATA*/null" not in html
     assert '"Harbor Project"' in html  # recurring title phrase became a project
     assert '"Audit"' not in html.split('"themes":')[1].split("]")[0]  # one-off words did not
 
@@ -396,7 +395,7 @@ def test_dashboard_topics_card_data(vault):
     assert len(data["topic_docs"]) == 7 and all(found == [0] for _, found in data["topic_docs"])
     assert [day for day, _ in data["topic_docs"]] == sorted(day for day, _ in data["topic_docs"])
     html = dashboard.build().read_text(encoding="utf-8")
-    assert '"bursts":["harbor launch"]' in html and "/*DATA*/null" not in html
+    assert '"bursts":["harbor launch"]' in html
 
 
 def test_dashboard_without_tags_or_with_an_old_index_has_no_topics(vault):
@@ -426,3 +425,25 @@ def test_topic_docs_index_ongoing_then_bursts(monkeypatch):
     assert ["2026-01-05", [0]] in docs and ["2026-08-02", [1]] in docs
     assert ["2026-08-01", [0, 1]] in docs  # a summary with both topics
     assert len(docs) == 12
+
+
+def test_the_atlas_data_is_json_written_atomically(vault):
+    import json
+    from inkvault import dashboard, index, paths
+    index.build()
+    out = dashboard.build()
+    assert out == paths.dashboard() and out.name == "atlas.json"
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert {"days", "themes", "topics", "digests", "built"} <= set(data)
+    assert not list(paths.home().glob("*.tmp"))
+
+
+def test_the_first_build_removes_the_old_static_page_once(vault, capsys):
+    from inkvault import dashboard, index, paths
+    index.build()
+    old = paths.home() / "dashboard.html"
+    old.write_text("<html>old</html>", encoding="utf-8")
+    dashboard.build()
+    assert not old.exists() and "The Memory Atlas is live now" in capsys.readouterr().out
+    dashboard.build()
+    assert "The Memory Atlas is live now" not in capsys.readouterr().out

@@ -39,7 +39,18 @@ def digests_db() -> Path:
 
 
 def dashboard() -> Path:
-    return home() / "dashboard.html"
+    """The Memory Atlas's data (spec §3.2): what the charts draw, rebuilt nightly. The page itself is in the package."""
+    return home() / "atlas.json"
+
+
+def atlas_lock() -> Path:
+    """Held by the running Atlas helper for its whole life (spec §3.4)."""
+    return home() / "atlas.lock"
+
+
+def atlas_info() -> Path:
+    """The running helper's port and control secret, readable only by this user (spec §3.4)."""
+    return home() / "atlas-helper.json"
 
 
 def model_dir() -> Path:

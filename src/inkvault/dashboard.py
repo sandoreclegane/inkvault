@@ -1,15 +1,14 @@
-"""Build dashboard.html: a private, local visual overview of the vault ("Memory Atlas").
+"""Build atlas.json: the data behind the Memory Atlas, a private visual overview of the vault.
 
-The page embeds the user's data, so it is written to the InkVault home and opened from disk,
-never hosted. Charts are drawn in the browser with ECharts; only the library comes from a CDN,
-and no data is sent anywhere.
+The data stays in the InkVault home. The page (inkvault/atlas/) is served on this computer only by atlasserve.py,
+which reads this file; nothing is sent anywhere.
 """
 import json
+import os
 import re
 import sqlite3
 from collections import Counter, defaultdict
 from datetime import date, datetime
-from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import paths, screentime, sources, topics
@@ -234,13 +233,15 @@ def build():
     if not data["days"]:
         print("The vault is empty.")
         return None
-    payload = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
     out = paths.dashboard()
-    out.write_text(TEMPLATE.read_text(encoding="utf-8").replace("/*DATA*/null", payload), encoding="utf-8")
+    tmp = out.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+    os.replace(tmp, out)  # an open Atlas never reads half a file
+    old = paths.home() / "dashboard.html"
+    if old.exists():  # the static page of 0.3.0 and earlier: generated, never the user's data (spec §3.2)
+        old.unlink()
+        print("The Memory Atlas is live now: open it with `inkvault dashboard`.")
     n_topics = len(data["topics"]["ongoing"]) + len(data["topics"]["bursts"])
-    print(f"dashboard: {len(data['days'])} days, {len(data['themes'])} projects, {n_topics} topics, "
+    print(f"atlas: {len(data['days'])} days, {len(data['themes'])} projects, {n_topics} topics, "
           f"{len(data['digests'])} digests -> {out}")
     return out
-
-
-TEMPLATE = Path(__file__).with_name("atlas.html")  # the page; "/*DATA*/null" is replaced with the vault's data

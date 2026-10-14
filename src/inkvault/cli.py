@@ -18,7 +18,6 @@ import json
 import os
 import sqlite3
 import sys
-import webbrowser
 
 from . import __version__
 
@@ -41,8 +40,7 @@ Connect it to your AI tools (they read the vault; nothing leaves this machine):
 
 def open_dashboard(path):
     if path:
-        print(f"opening {path}")
-        webbrowser.open(path.as_uri())
+        print(f"Atlas data: {path}")
 
 
 @contextlib.contextmanager
