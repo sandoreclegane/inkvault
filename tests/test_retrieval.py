@@ -162,3 +162,43 @@ def test_freshness_and_chips_on_an_old_index(vault):
     assert retrieval.freshness()["built"] is None
     chips = retrieval.sources_present()
     assert chips["web"] is False and chips["captures"] is True
+
+
+def add_raw(*records):
+    from inkvault import index, paths
+    v = sqlite3.connect(paths.vault_db())
+    v.executemany("INSERT INTO raw_records VALUES (?,?,?)", records)
+    v.commit(); v.close()
+    index.build()
+
+
+def test_one_huge_message_does_not_slow_a_search(vault):
+    import json
+    import time
+    from inkvault import retrieval
+    word = "lighthouse "
+    big = word * 31819   # 350,009 characters, ~32,000 matches
+    add_raw(("conversation", "cbig", json.dumps({"id": "cbig", "name": "Huge"})),
+            ("message", "mbig", json.dumps({"id": "mbig", "created": {"value": "2026-03-02T10:00:00Z"}, "role": "USER",
+                                            "conversation": {"id": "cbig"}, "fragment": {"string": {"raw": big}}})))
+    t = time.perf_counter()
+    r = retrieval.search("lighthouse", markers=retrieval.ATLAS_MARKERS, require_model=True)
+    took = time.perf_counter() - t
+    print(f"350k-char search: {took:.3f}s")
+    assert took < 2
+    hit = next(h for h in r.hits if h.id == "mbig")
+    assert hit.snippet == "" and retrieval.excerpt(hit)[1] == []   # a keyword match with no spans
+    mcp = next((h for h in retrieval.search("lighthouse", mode="keyword", limit=50).hits if h.id == "mbig"), None)
+    assert mcp is None or "[" in mcp.snippet                       # MCP still makes its snippet
+
+
+def test_a_model_that_cannot_load_degrades_to_keyword_only(vault, monkeypatch):
+    from inkvault import embed, retrieval
+
+    def broken():
+        raise OSError("model folder is damaged")
+    monkeypatch.setattr(embed, "load_model", broken)
+    r = retrieval.search("backoff", markers=retrieval.ATLAS_MARKERS, require_model=True)
+    assert r.error is None and r.keyword_only is True and r.hits
+    with pytest.raises(OSError):                        # MCP keeps its v0.3.0 behaviour
+        retrieval.search("backoff")

@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -241,16 +242,12 @@ def meaning_ready():
 
 
 def keyword_ranked(conn, kind, query, since, until, **opts):
-    """opts (Atlas only; MCP passes none): markers=(open, close), event_source="pieces"|"screen"."""
-    table, fts, _, col, _, _ = SOURCES[kind]
-    o, c = opts.get("markers", MCP_MARKERS)
-    second = ""
-    if (o, c) != MCP_MARKERS:
-        p, q = SECOND_MARKERS
-        second = f", snippet({fts}, {col}, '{p}', '{q}', ' … ', 40) AS snip2"
+    """Ids best first (bm25 only: no snippets here, they are costly on long records). opts (Atlas only; MCP passes
+    none): event_source="pieces"|"screen"."""
+    table, fts, _, _, _, _ = SOURCES[kind]
     params = [fts_query(query)]
-    sql = (f"SELECT t.id, snippet({fts}, {col}, '{o}', '{c}', ' … ', 40) AS snip{second} FROM {fts} JOIN {table} t "
-           f"ON t.rowid = {fts}.rowid WHERE {fts} MATCH ?" + range_filter(kind, since, until, params))
+    sql = (f"SELECT t.id FROM {fts} JOIN {table} t ON t.rowid = {fts}.rowid WHERE {fts} MATCH ?"
+           + range_filter(kind, since, until, params))
     if kind == "events" and opts.get("event_source") and has_column(conn, "events", "source"):
         sql += " AND t.source = ?"
         params.append(opts["event_source"])
@@ -259,13 +256,39 @@ def keyword_ranked(conn, kind, query, since, until, **opts):
     return conn.execute(sql, params).fetchall()
 
 
+SNIPPET_LIMIT = 100_000  # Atlas only: a record whose snippet column is longer than this gets no highlight
+
+
+def keyword_snippets(conn, kind, query, id_, markers):
+    """(snippet, snippet2) for one hit. MCP (MCP_MARKERS): one snippet, exactly as before. Atlas: the snippet made
+    with its markers and with SECOND_MARKERS; for a record too long to snippet quickly, ("", "") (a keyword match
+    with no spans, never an invented highlight)."""
+    table, fts, _, col, body, _ = SOURCES[kind]
+    atlas = markers != MCP_MARKERS
+    if atlas:
+        n = conn.execute(f"SELECT length(t.{body}) FROM {table} t WHERE t.id = ?", (id_,)).fetchone()
+        if n and (n[0] or 0) > SNIPPET_LIMIT:
+            return "", ""
+    pairs = [markers] + ([SECOND_MARKERS] if atlas else [])
+    sel = ", ".join(f"snippet({fts}, {col}, '{o}', '{c}', ' … ', 40)" for o, c in pairs)
+    r = conn.execute(f"SELECT {sel} FROM {fts} WHERE {fts} MATCH ? AND rowid = (SELECT rowid FROM {table} WHERE id = ?)",
+                     (fts_query(query), id_)).fetchone()
+    if r is None:
+        return None, None
+    return r[0], (r[1] if atlas else None)
+
+
+_model_lock = threading.Lock()
+
+
 def meaning_ranked(kinds, query):
     global _model
     v = vectors()
     if v is None:
         return []
-    if _model is None:
-        _model = embed.load_model()
+    with _model_lock:
+        if _model is None:
+            _model = embed.load_model()
     q = _model.encode([query])[0]
     q /= np.linalg.norm(q) + 1e-9
     scores = v["vecs"] @ q
@@ -335,12 +358,11 @@ def search(query, source="all", mode="hybrid", since="", until="", limit=10, *, 
         return SearchResult(keyword_only=mode != "keyword" and not meaning_ready())
 
     opts = {}
-    if markers != MCP_MARKERS:
-        opts["markers"] = markers
     if event_source:
         opts["event_source"] = event_source
     meaning = mode != "keyword" and (meaning_ready() or not require_model)
-    scores, snippets, snippets2 = {}, {}, {}  # reciprocal rank fusion: each list adds 1/(k + rank) per hit
+    scores, matched = {}, set()  # reciprocal rank fusion: each list adds 1/(k + rank) per hit
+    degraded = False
     with db() as conn:
         if source == "web" and not has_table(conn, "pages"):
             return SearchResult(error="Web pages aren't in the search index yet: run `inkvault index`.")
@@ -356,11 +378,15 @@ def search(query, source="all", mode="hybrid", since="", until="", limit=10, *, 
                 for rank, r in enumerate(rows):
                     key = (kind, r["id"])
                     scores[key] = scores.get(key, 0) + 1 / (RRF_K + rank)
-                    snippets[key] = r["snip"]
-                    if "snip2" in r.keys():
-                        snippets2[key] = r["snip2"]
+                    matched.add(key)
         if meaning:
-            for rank, key in enumerate(meaning_ranked([k for k in kinds if k != "screen"], query)):
+            try:
+                ranked = meaning_ranked([k for k in kinds if k != "screen"], query)
+            except Exception:
+                if not require_model:
+                    raise
+                ranked, degraded = [], True  # the Atlas answers by keyword when the model can't load or run
+            for rank, key in enumerate(ranked):
                 scores[key] = scores.get(key, 0) + 1 / (RRF_K + rank)
 
         fetched = []
@@ -389,10 +415,13 @@ def search(query, source="all", mode="hybrid", since="", until="", limit=10, *, 
                 if (kind == "screen" and r["stretch"] in ocr_stretches) or r["stretch"] in seen:
                     continue      # one hit per stretch; the OCR row wins (screen spec §6)
                 seen.add(r["stretch"])
-            out.append(Hit(kind, id_, r["created"], r["title"], r["display"], snippets.get((kind, id_)), r["preview"],
-                           r["fact1"], r["fact2"], snippets2.get((kind, id_))))
+            out.append(Hit(kind, id_, r["created"], r["title"], r["display"], None, r["preview"],
+                           r["fact1"], r["fact2"], None))
             if len(out) > offset + limit:
                 break
+        for h in out[offset:offset + limit]:  # snippets only for the hits actually returned
+            if (h.kind, h.id) in matched:
+                h.snippet, h.snippet2 = keyword_snippets(conn, h.kind, query, h.id, markers)
         notes = []
         if mode == "meaning" and "screen" in kinds:
             notes.append("(screen stretches are keyword-only; they weren't searched by meaning)")
@@ -401,7 +430,7 @@ def search(query, source="all", mode="hybrid", since="", until="", limit=10, *, 
             notes.append(f"(search covers screen activity up to {local(c[0]):%Y-%m-%d %H:%M}; "
                          "timeline() shows it live)")
     return SearchResult(hits=out[offset:offset + limit], more=len(out) > offset + limit,
-                        keyword_only=mode != "keyword" and not meaning_ready(), notes=notes)
+                        keyword_only=mode != "keyword" and (degraded or not meaning_ready()), notes=notes)
 
 
 def excerpt(hit, markers=ATLAS_MARKERS):
@@ -543,7 +572,7 @@ def decode_cursor(s):
         d = json.loads(base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)))
     except (ValueError, RecursionError):  # deeply nested JSON in a short cursor
         raise BadCursor("bad cursor") from None
-    ok = (isinstance(d, dict) and d.get("op") in ("earlier", "later", "expand") and d.get("k") in SOURCES
+    ok = (isinstance(d, dict) and d.get("op") in ("earlier", "later", "expand") and d.get("k") in (*SOURCES, "screentext")
           and isinstance(d.get("i"), str) and isinstance(d.get("g"), str)
           and isinstance(d.get("at" if d.get("op") != "expand" else "off"), int)
           and d.get("at" if d.get("op") != "expand" else "off") >= 0)
@@ -614,6 +643,17 @@ def chat(mid, cursor, gen):
 
 def full_text(kind, id_):
     """The whole text that an expand cursor walks through, or None when the record is gone."""
+    if kind == "screentext":  # screen text reads live in vault.db and may not be indexed yet
+        if not paths.vault_db().exists():
+            return None
+        v = paths.connect_ro(paths.vault_db())
+        try:
+            if not has_table(v, "screen_text"):
+                return None
+            r = v.execute("SELECT text FROM screen_text WHERE id=?", (id_,)).fetchone()
+        finally:
+            v.close()
+        return None if r is None else (r[0] or "")
     column = {"chats": ("messages", "text"), "summaries": ("summaries", "text"), "events": ("events", "readable"),
               "snippets": ("snippets", "text")}.get(kind)
     if not column:
@@ -691,10 +731,11 @@ def stretch(id_, gen):
         more = v.execute("SELECT COUNT(*) FROM screen_text WHERE stretch_id=?", (id_,)).fetchone()[0] - len(texts)
     finally:
         v.close()
+    share = TEXT_CAP // max(1, len(texts))  # all the stretch's texts together stay within one answer's cap
     note = ("Timeline only: no text was read in this app." if not texts else
             f"{more} more text reads in this window; search finds them." if more > 0 else None)
     return base("screen", id_, st[3] or st[2], f"Screen · {st[2]}", f"{when(st[0])}–{when(st[1])[-5:]}",
-                [item("events", t[0], t[1], t[2], gen, share=TEXT_CAP) for t in texts], note=note)
+                [item("screentext", t[0], t[1], t[2], gen, share=share) for t in texts], note=note)
 
 
 def record(kind, id_=None, cursor=None):

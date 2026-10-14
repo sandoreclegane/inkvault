@@ -126,3 +126,26 @@ def test_memory_text_is_get_memory(vault):
     from inkvault import retrieval, server
     for id_ in ("x1", "s5", "e1", "m1", "m20", "screen:a", "screentext:1", atlasdata.web_id(), "nope"):
         assert retrieval.memory_text(id_) == server.get_memory(id_)
+
+
+def test_a_stretch_stays_within_the_answer_cap_and_its_texts_expand(vault):
+    from inkvault import paths, retrieval
+    v = sqlite3.connect(paths.vault_db())
+    v.executemany("INSERT INTO screen_text VALUES (?,?,?,?,?)",
+                  [(f"screentext:big{i}", "screen:b", atlasdata.S(10, i), "z" * 30_000, str(i)) for i in range(20)])
+    v.commit(); v.close()      # newer than the search file: not in search.db
+    r = retrieval.record("screen", "screen:b")
+    assert r["status"] == "ok" and len(r["items"]) == 20
+    assert sum(len(it["text"]) for it in r["items"]) <= retrieval.TEXT_CAP
+    first = r["items"][0]
+    assert first["truncated"] and first["expand"]
+    cur = retrieval.decode_cursor(first["expand"])
+    assert cur["k"] == "screentext"
+    more = retrieval.record("screen", cursor=cur)
+    assert more["status"] == "ok" and more["text"] == "z" * 25_000   # the rest of the 30,000, from the first cut on
+
+
+def test_screentext_is_not_a_record_kind(vault):
+    from inkvault import atlasserve
+    with pytest.raises(atlasserve.BadRequest):
+        atlasserve.api_record({"kind": "screentext", "id": "screentext:1", "generation": "x"})
