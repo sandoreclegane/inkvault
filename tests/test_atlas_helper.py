@@ -159,6 +159,25 @@ def test_a_lock_error_starts_nothing(tmp_path, monkeypatch, capsys):      # Code
 
 def test_the_helper_process_is_offline(monkeypatch):
     from inkvault import atlasserve
-    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
     atlasserve.prepare_process()
     assert os.environ["HF_HUB_OFFLINE"] == "1"
+
+
+def test_an_unopenable_lock_file_starts_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    from inkvault import atlasserve, paths
+    monkeypatch.setattr(paths, "atlas_lock", lambda: tmp_path / "missing dir" / "atlas.lock")
+    assert atlasserve.serve(open_browser=False) == 1
+    assert "Nothing was started" in capsys.readouterr().out
+
+
+def test_reuse_survives_a_non_helper_on_the_port(home, monkeypatch, capsys):
+    from inkvault import atlasserve, paths
+    monkeypatch.setenv("INKVAULT_HOME", str(home))
+    (home / "atlas-helper.json").write_text(json.dumps({"port": 9, "control": "x"}), encoding="utf-8")
+
+    def bad(info, timeout=2.0):
+        raise __import__("http.client").client.BadStatusLine("junk")
+    monkeypatch.setattr(atlasserve, "request_code", bad)
+    assert atlasserve.reuse(False, wait=0.5) == 1

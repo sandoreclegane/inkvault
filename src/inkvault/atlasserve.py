@@ -388,7 +388,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def prepare_process():
     """The helper never downloads a model or shows progress bars (spec §5 rule 11)."""
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
 
@@ -437,7 +437,7 @@ def reuse(open_browser, wait=10.0):
                 else:
                     print("The Memory Atlas is already running.")
                 return 0
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException):
             pass  # just started and still writing its info, or busy: try again until the deadline
         if time.monotonic() >= deadline:
             print("The Atlas is starting or busy; try again in a moment.")
@@ -458,13 +458,18 @@ def serve(open_browser=True, idle=IDLE, wait=10.0):
     """Become the helper if the OS lock says nobody else is, or hand the request to the one that is."""
     from . import nightly
     prepare_process()
-    fd = os.open(paths.atlas_lock(), os.O_RDWR | os.O_CREAT)
+    cant = ("The Atlas can't start: its lock couldn't be taken ({}). Nothing was started. If your InkVault "
+            "folder is on a network or synced drive, move it to a local drive (`--home`).")
+    try:
+        fd = os.open(paths.atlas_lock(), os.O_RDWR | os.O_CREAT)
+    except OSError as e:
+        print(cant.format(e))
+        return 1
     try:
         try:
             mine = nightly.try_lock(fd)
         except OSError as e:  # e.g. a drive without file locking: without the lock there's no safe owner (review #1)
-            print(f"The Atlas can't start: its lock couldn't be taken ({e}). Nothing was started. If your InkVault "
-                  "folder is on a network or synced drive, move it to a local drive (`--home`).")
+            print(cant.format(e))
             return 1
         if not mine:
             return reuse(open_browser, wait)
