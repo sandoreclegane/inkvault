@@ -163,6 +163,7 @@ def test_search_api_returns_hits_with_labels_and_spans(helper, session):
     # Either way only captures come back: no chat, summary, snippet, screen or web hit.
     assert {h["id"] for h in cap["hits"]} <= {"e1", "e2"} and "e2" in {h["id"] for h in cap["hits"]}
     assert {h["kind"] for h in cap["hits"]} == {"events"}
+    assert all(h["source_label"].startswith("Pieces capture") for h in cap["hits"])
 
 
 def test_search_api_punctuation_only(helper, session):
@@ -273,3 +274,31 @@ def test_nothing_is_logged(helper, session, capfd):
     req(helper, "GET", "/nope", headers=session)
     out, err = capfd.readouterr()
     assert "secretword" not in out + err and "GET" not in err and "POST" not in err
+
+
+def test_malformed_input_is_a_400_and_nothing_is_printed(helper, session, capfd):
+    for body in ({"kind": [], "id": "1", "generation": "g"}, {"kind": {}, "id": "1", "generation": "g"}):
+        assert api(helper, session, "/api/record", body)[0] == 400
+    for body in ({"query": "x", "to": "9999-12-31"}, {"query": "x", "from": "0001-01-01"}):
+        assert api(helper, session, "/api/search", body)[0] == 400
+    assert raw(helper, HEAD + "Content-Length: ²\r\n\r\n", session).startswith(b"HTTP/1.1 400")
+    out, err = capfd.readouterr()
+    assert err == "" and out == ""
+
+
+def test_an_unexpected_error_is_a_bare_500_with_nothing_printed(helper, session, monkeypatch, capfd):
+    from inkvault import atlasserve
+
+    def boom(body):
+        raise RuntimeError("secretword detail")
+    monkeypatch.setattr(atlasserve, "api_search", boom)
+    s, _, body = req(helper, "POST", "/api/search", {"query": "x"}, {**session, "X-InkVault": "1"})
+    assert s == 500 and body == b""
+    out, err = capfd.readouterr()
+    assert "secretword" not in out + err and err == ""
+    assert api(helper, session, "/api/ping", {})[1]["status"] == "ok"
+
+
+def test_refused_requests_close_the_connection(helper, session):
+    _, headers, _ = req(helper, "POST", "/api/search", {"query": "x"}, {})
+    assert headers.get("Connection", "").lower() == "close"

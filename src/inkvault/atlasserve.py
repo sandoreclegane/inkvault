@@ -39,6 +39,13 @@ CLOSED_TEXT = ("This Atlas link has already been used or has expired. Open the A
                "InkVault Atlas icon or `inkvault dashboard`.").encode()
 
 
+class QuietServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):  # socketserver would print a traceback: nothing may be logged
+        pass
+
+
 class Helper:
     """What request threads share: one-time codes, sessions, the control secret and the last ping."""
 
@@ -49,7 +56,7 @@ class Helper:
         self.control = secrets.token_hex(32)
         self.last_ping = now()
         self.lock = threading.Lock()
-        self.server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        self.server = QuietServer(("127.0.0.1", port), Handler)
         self.server.daemon_threads = True
         self.server.helper = self
         self.port = self.server.server_address[1]
@@ -99,17 +106,27 @@ def day_bounds(from_, to, tz=None):
     """Local calendar days -> UTC instants for retrieval.search (spec §4.2): the start of From, and the start of the
     day after To (an exclusive end), each with that date's own UTC offset, so daylight-saving days are 23 or 25
     hours. "" for a side that wasn't given."""
-    def start(day):
+    def parse(day):
         if not isinstance(day, str) or not DAY.fullmatch(day):
             raise BadRequest("Dates look like 2026-10-05.")
         try:
-            d = datetime.fromisoformat(day)
+            return datetime.fromisoformat(day)
         except ValueError:
             raise BadRequest(f"{day} isn't a date.") from None
-        local = d.replace(tzinfo=tz) if tz else d.astimezone()  # naive -> this computer's zone for that date
-        return local.astimezone(timezone.utc)
-    since = start(from_) if from_ else None
-    until = start((datetime.fromisoformat(to) + timedelta(days=1)).date().isoformat()) if to and start(to) else None
+
+    def start(d):
+        try:
+            local = d.replace(tzinfo=tz) if tz else d.astimezone()  # naive -> this computer's zone for that date
+            return local.astimezone(timezone.utc)
+        except (OverflowError, OSError, ValueError):  # year 1 or 9999 has no instant here
+            raise BadRequest("That date is out of range.") from None
+    since = start(parse(from_)) if from_ else None
+    until = None
+    if to:
+        try:
+            until = start(parse(to) + timedelta(days=1))
+        except OverflowError:
+            raise BadRequest("That date is out of range.") from None
     if since and until and since >= until:
         raise BadRequest("From is after To.")
     fmt = lambda t: t.strftime("%Y-%m-%dT%H:%M:%S.%fZ") if t else ""
@@ -205,7 +222,7 @@ def api_record(body):
     else:
         cursor, kind, id_ = None, body.get("kind"), body.get("id")
         expected = body.get("generation")  # the vault state the page is showing (Codex plan review #2)
-        if (kind not in retrieval.SOURCES or not isinstance(id_, str) or not 0 < len(id_) <= 200
+        if (not isinstance(kind, str) or kind not in retrieval.SOURCES or not isinstance(id_, str) or not 0 < len(id_) <= 200
                 or not isinstance(expected, str)):
             raise BadRequest("Bad record.")
     try:
@@ -231,11 +248,15 @@ class Handler(BaseHTTPRequestHandler):
         return self.server.helper
 
     def send(self, status, body=b"", ctype="application/json; charset=utf-8", extra=()):
+        if status >= 400:
+            self.close_connection = True  # a refused request's body (if any) must not be read as the next request
         self.send_response(status)
         for k, v in (("Content-Type", ctype), ("Content-Length", str(len(body))), ("Cache-Control", "no-store"),
                      ("Content-Security-Policy", CSP), ("Referrer-Policy", "no-referrer"),
                      ("X-Content-Type-Options", "nosniff"), ("X-Frame-Options", "DENY"), *extra):
             self.send_header(k, v)
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -266,7 +287,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Transfer-Encoding"):
             raise BadRequest("Send a plain request body.")
         length = (self.headers.get("Content-Length") or "0").strip()
-        if not length.isdigit():  # also refuses "-1", which rfile.read would treat as "read until the end"
+        if not (length.isascii() and length.isdigit()):  # also refuses "-1", which rfile.read would treat as "read until the end"
             raise BadRequest("Bad length.")
         n = int(length)
         if n > MAX_BODY:
@@ -285,7 +306,24 @@ class Handler(BaseHTTPRequestHandler):
             raise BadRequest("Send a JSON object.")
         return obj
 
+    def guarded(self, handle):
+        """Anything unexpected is a fixed 500 with no detail, and nothing is printed (spec §5 rule 10)."""
+        try:
+            return handle()
+        except Exception:
+            self.close_connection = True
+            try:
+                self.send(500)
+            except Exception:
+                pass
+
     def do_GET(self):
+        return self.guarded(self.get)
+
+    def do_POST(self):
+        return self.guarded(self.post)
+
+    def get(self):
         if not self.host_ok():
             return self.send(421)
         url = urlsplit(self.path)
@@ -308,7 +346,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(405)
         return self.send(404)
 
-    def do_POST(self):
+    def post(self):
         if not self.host_ok():
             return self.send(421)
         path = urlsplit(self.path).path
