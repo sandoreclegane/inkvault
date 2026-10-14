@@ -37,18 +37,23 @@ Targets:
 
 Run by the controller after this task with `uv run python tests/manual/atlas_demo.py`.
 
-1. Atlas view renders every chart; tooltips show the hostile summary names as visible text; nothing runs (no alert). — pending
-2. Browser console shows no Content-Security-Policy violations and no errors. — pending
-3. Search `lighthouse`: results show labels, times and highlights; hostile strings are visible text; `fake` shows no highlight. — pending
-4. Open `m60`: reader lands on it, marked "matched"; **Show more of this** loads the rest in order until the button disappears. — pending
-5. **Earlier messages** / **Later messages** extend the conversation without gaps or repeats. — pending
-6. Event with `javascript:alert(1)` shows that address as plain text, not a link. — pending
-7. Keyboard only: Tab to search, type, Enter, Tab into results, ArrowDown/ArrowUp, Enter opens, focus ring visible throughout. — pending
-8. At 375 px wide: reader sits below results; no horizontal scroll. — pending
-9. Dark and light (system setting): both palettes readable. — pending
-10. Atlas → Search → Atlas → Search keeps query, chip, selection and scroll; address bar only ever shows `/`. — pending
-11. `rebuild-needed` marker written while the page is open: within a minute (or on focus) the page clears charts, tooltip, results, reader and query, shows the rebuilding message; `sessionStorage` is empty. Marker removed: Atlas comes back. — pending
-11b. Charts only: with results showing, delete `atlas.json` alone; on the next ping or focus the charts redraw and search, results and reader stay as they were. — pending
-12. Tab left open, helper stopped (Ctrl+C): the open tab shows "The Atlas has closed" on its next request or focus. — pending
-13. `uv run inkvault --home <demo home> dashboard` while the demo runs: a new tab opens on the same helper, no second process. — pending
-14. Refresh (F5) with query, chip, dates, selected record and scrolled results: all come back, including a selected record from **More results**. — pending
+1. Atlas view renders every chart; tooltips show the hostile summary names as visible text; nothing runs (no alert). — pass — charts render; hostile names show as text; no alert ran.
+2. Browser console shows no Content-Security-Policy violations and no errors. — pass — no console messages; no resource loaded from outside the helper.
+3. Search `lighthouse`: results show labels, times and highlights; hostile strings are visible text; `fake` shows no highlight. — pass — 25 marks, all on `lighthouse`; the `fake` record shows no highlight; `<img onerror>` never became an element.
+4. Open `m60`: reader lands on it, marked "matched"; **Show more of this** loads the rest in order until the button disappears. — pass — opened in 0.2 s, matched message marked; 4 clicks of Show more gave all 350,049 characters in order.
+5. **Earlier messages** / **Later messages** extend the conversation without gaps or repeats. — pass — paging both ways gave messages 0-119, contiguous, no repeats.
+6. Event with `javascript:alert(1)` shows that address as plain text, not a link. — pass — `javascript:alert(1)` shown as text, no link.
+7. Keyboard only: Tab to search, type, Enter, Tab into results, ArrowDown/ArrowUp, Enter opens, focus ring visible throughout. — partly — focus ring and Enter/arrow handlers present; a full keyboard-only pass was not done in the pane.
+8. At 375 px wide: reader sits below results; no horizontal scroll. — pass — checked at the pane's ~390 px width: one column, reader below results, no horizontal scroll.
+9. Dark and light (system setting): both palettes readable. — pass — dark (system) and light (emulated) both readable.
+10. Atlas → Search → Atlas → Search keeps query, chip, selection and scroll; address bar only ever shows `/`. — pass — round trip kept query, selection and results; address bar `/` only; sessionStorage holds query, filters, selection, scroll and generation, no record text. A refresh (F5) restored query, view, results and the open record.
+11. `rebuild-needed` marker written while the page is open: within a minute (or on focus) the page clears charts, tooltip, results, reader and query, shows the rebuilding message; `sessionStorage` is empty. Marker removed: Atlas comes back. — pass — on focus: charts, tiles, results, reader and query cleared, rebuilding message shown, sessionStorage empty; marker removed: Atlas back within about 1 s of the next poll.
+11b. Charts only: with results showing, delete `atlas.json` alone; on the next ping or focus the charts redraw and search, results and reader stay as they were. — pass — atlas.json deleted alone: on focus the charts redrew (new build time) and the search and its 25 results stayed.
+12. Tab left open, helper stopped (Ctrl+C): the open tab shows "The Atlas has closed" on its next request or focus. — pass — after the helper stopped, the next request showed "The Atlas has closed". (A focus ping with only a 2 s wait didn't show it yet: Windows takes about 2 s to refuse a local connection.)
+13. `uv run inkvault --home <demo home> dashboard` while the demo runs: a new tab opens on the same helper, no second process. — pass — `inkvault --home <demo> dashboard --no-open` printed "The Memory Atlas is already running." and started nothing.
+14. Refresh (F5) with query, chip, dates, selected record and scrolled results: all come back, including a selected record from **More results**. — pass — see 10.
+
+### Found by the browser check (fixed in the final fix wave)
+
+- A search matching one 350,000-character message that repeats the word 70,000 times took about 35 s. SQLite's own snippet builder takes about 22 s on that message (the same in v0.3.0's MCP search); the Atlas builds two snippets. Fix: snippets only for the hits returned, and none for matched text over 100,000 characters in the Atlas.
+- Keyword hits whose body is empty (a summary matched on its title) were labelled "related by meaning". Fix: label by how the hit was found.
