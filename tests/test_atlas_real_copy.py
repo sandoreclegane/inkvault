@@ -99,3 +99,33 @@ def test_the_snapshot_process_never_downloads(script, backup, tmp_path):
     report = script.run(backup, make_root=make)  # no model given: keyword-only, nothing fetched
     import os
     assert os.environ["HF_HUB_OFFLINE"] == "1" and report["keyword_only_reason"] == "no model folder given"
+
+
+def test_a_symlinked_backup_is_rejected(script, backup, tmp_path):
+    link = tmp_path / "links" / "vault-2026-02-28.db"
+    link.parent.mkdir()
+    try:
+        link.symlink_to(backup)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks can't be created here")
+    with pytest.raises(ValueError):
+        script.run(link)
+
+
+def test_no_snapshot_path_reaches_the_output(script, backup, tmp_path, capsys):
+    made, make = roots(tmp_path)
+    report = script.run(backup, queries=["backoff"], make_root=make)
+    out = capsys.readouterr()
+    assert str(made[0]) not in out.out + out.err and str(made[0]) not in str(report)
+
+
+def test_a_failing_run_prints_only_the_kind_of_error(script, backup, monkeypatch, capsys, tmp_path):
+    secret = str(tmp_path / "secret-path")
+
+    def boom(*a, **k):
+        raise OSError(f"cannot open {secret}")
+    monkeypatch.setattr(script, "run", boom)
+    monkeypatch.setattr(script, "ask_queries", lambda: ["q"])
+    assert script.main(["x", str(backup)]) == 1
+    out = capsys.readouterr()
+    assert "OSError" in out.out and "secret-path" not in out.out + out.err

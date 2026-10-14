@@ -9,7 +9,9 @@ The snapshot is deleted whatever happens.
 Queries are asked for one at a time without echo (an empty line finishes); they're never printed, stored or put on
 the command line, so they don't reach shell history or process listings.
 """
+import contextlib
 import getpass
+import io
 import json
 import os
 import re
@@ -34,7 +36,8 @@ def check(root, queries, have_model):
     if not have_model:
         embed.build = lambda: None  # keyword-only: never fetch a model
     try:
-        return measure(queries, have_model)
+        with contextlib.redirect_stdout(io.StringIO()):  # index and dashboard print the snapshot's path: keep it out
+            return measure(queries, have_model)
     finally:
         embed.build = real_build
 
@@ -70,6 +73,8 @@ def measure(queries, have_model):
 
 def run(backup, model=None, queries=(), make_root=snapshot_root):
     backup = Path(backup)
+    if backup.is_symlink():
+        raise ValueError("Give the backup file itself, not a link to it.")
     if not BACKUP_NAME.fullmatch(backup.name) or not backup.is_file():
         raise ValueError("Give one nightly backup file named vault-YYYY-MM-DD.db.")
     os.environ["HF_HUB_OFFLINE"] = "1"
@@ -95,10 +100,19 @@ def ask_queries():
     return out
 
 
-if __name__ == "__main__":
-    if not 2 <= len(sys.argv) <= 3:
-        sys.exit(__doc__)
-    result = run(sys.argv[1], sys.argv[2] if len(sys.argv) == 3 else None, ask_queries())
+def main(argv):
+    if not 2 <= len(argv) <= 3:
+        return __doc__
+    try:
+        result = run(argv[1], argv[2] if len(argv) == 3 else None, ask_queries())
+    except Exception as e:  # only the kind of failure is printed: a message could carry a path or a query
+        print(f"The check failed ({type(e).__name__}). The snapshot was deleted.")
+        return 1
     print(json.dumps(result, indent=1))
     if not result["snapshot_deleted"]:
-        sys.exit("The snapshot folder couldn't be deleted; remove it by hand (it holds a copy of your vault).")
+        return "The snapshot folder couldn't be deleted; remove it by hand (it holds a copy of your vault)."
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
