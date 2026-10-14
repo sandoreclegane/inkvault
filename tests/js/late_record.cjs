@@ -12,6 +12,7 @@ const page = load({
 });
 (async () => {
   await page.sleep(50);                                       // restore has started the slow record open
+  if (!page.calls.some(c => c[0] === "/api/record")) { console.error("the slow record open never started"); process.exit(1); }
   page.els.q.value = "second";
   page.handlers["search-form:submit"]({preventDefault() {}}); // a new search replaces the results
   await page.sleep(500);                                      // the slow answer has arrived

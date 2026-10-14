@@ -149,8 +149,8 @@ function setChip(name, search = true) {
   if (search && state.query) runSearch(0);
 }
 
-async function runSearch(offset) {
-  const q = offset ? state.query : $("q").value.trim();
+async function runSearch(offset, fromForm) {
+  const q = offset || !fromForm ? state.query : $("q").value.trim();
   if (!q) return;
   if (!offset) {
     next("reader");  // a record still loading belongs to the old results: its answer must not appear (review #2)
@@ -320,7 +320,7 @@ async function restore(saved) {
     Object.assign(state, {source: saved.source || "all", from: saved.from || "", to: saved.to || ""});
     $("q").value = saved.query; $("s-from").value = state.from; $("s-to").value = state.to;
     setChip(state.source, false);
-    const a = await runSearch(0);
+    const a = await runSearch(0, true);
     if (!a || !restoring) return;
     $("results").scrollTop = saved.scroll || 0;
     if (saved.selected) {
@@ -348,7 +348,7 @@ async function ping() {
   }
 }
 
-$("search-form").addEventListener("submit", e => { e.preventDefault(); runSearch(0); });
+$("search-form").addEventListener("submit", e => { e.preventDefault(); runSearch(0, true); });
 $("tab-atlas").addEventListener("click", () => view("atlas"));
 $("tab-search").addEventListener("click", () => view("search"));
 $("more").addEventListener("click", () => runSearch(hits.length));
