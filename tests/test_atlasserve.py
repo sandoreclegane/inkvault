@@ -45,6 +45,7 @@ def session(helper):
     status, headers, _ = req(helper, "GET", f"/open?code={helper.new_code()}")
     assert status == 303 and headers["Location"] == "/"
     cookie = headers["Set-Cookie"]
+    assert cookie.startswith(f"inkvault_atlas_{helper.port}=")  # one name per helper (cookies ignore ports)
     assert "HttpOnly" in cookie and "SameSite=Strict" in cookie
     return {"Cookie": cookie.split(";")[0]}
 
@@ -302,3 +303,47 @@ def test_an_unexpected_error_is_a_bare_500_with_nothing_printed(helper, session,
 def test_refused_requests_close_the_connection(helper, session):
     _, headers, _ = req(helper, "POST", "/api/search", {"query": "x"}, {})
     assert headers.get("Connection", "").lower() == "close"
+
+
+def test_a_session_cookie_from_another_helper_is_not_accepted(helper, session):
+    value = session["Cookie"].split("=", 1)[1]
+    assert req(helper, "GET", "/", headers={"Cookie": f"inkvault_atlas={value}"})[0] == 403
+    assert req(helper, "GET", "/", headers={"Cookie": f"inkvault_atlas_{helper.port + 1}={value}"})[0] == 403
+
+
+def test_a_title_only_keyword_match_is_not_labelled_meaning(helper, session):
+    from inkvault import index, paths
+    import sqlite3
+    v = sqlite3.connect(paths.vault_db())
+    v.execute("INSERT INTO raw_records VALUES ('summary','s20',?)", (json.dumps(
+        {"id": "s20", "name": "Zeppelin Harbor", "created": {"value": "2026-02-26T09:00:00Z"}}),))
+    v.commit(); v.close()
+    index.build()
+    _, a = api(helper, session, "/api/search", {"query": "zeppelin"})
+    hit = next(h for h in a["hits"] if h["id"] == "s20")
+    assert hit["match"] == {"type": "keyword", "spans": []}
+
+
+def test_ping_with_an_unreadable_vault_has_no_generation(helper, session, monkeypatch):
+    from inkvault import retrieval
+    monkeypatch.setattr(retrieval, "removal_gen", lambda: None)
+    s, a = api(helper, session, "/api/ping", {})
+    assert s == 200 and a == {"status": "unavailable"}
+
+
+def test_control_code_closes_the_connection(helper):
+    s, headers, _ = req(helper, "POST", "/control/code", {}, {"X-InkVault-Control": helper.control})
+    assert s == 200 and headers.get("Connection", "").lower() == "close"
+
+
+def test_write_info_replaces_a_leftover_temp_file_and_cleans_up(helper, monkeypatch):
+    import os
+    from inkvault import atlasserve, paths
+    tmp = paths.atlas_info().with_suffix(".tmp")
+    tmp.write_text("leftover", encoding="utf-8")
+    atlasserve.write_info(helper)
+    assert json.loads(paths.atlas_info().read_text(encoding="utf-8"))["port"] == helper.port and not tmp.exists()
+    monkeypatch.setattr(os, "replace", lambda *a: (_ for _ in ()).throw(OSError("no")))
+    with pytest.raises(OSError):
+        atlasserve.write_info(helper)
+    assert not tmp.exists()

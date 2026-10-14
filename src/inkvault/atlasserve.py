@@ -38,7 +38,7 @@ PAGE_SIZE = 25
 MAX_OFFSET = 10_000
 IDLE = 30 * 60
 READ_TIMEOUT = 10  # seconds a connection may sit silent, or a body may take to arrive, before it's closed
-COOKIE = "inkvault_atlas"
+COOKIE = "inkvault_atlas"  # the helper adds its port: one cookie name per helper
 DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 CLOSED_TEXT = ("This Atlas link has already been used or has expired. Open the Atlas again from the "
                "InkVault Atlas icon or `inkvault dashboard`.").encode()
@@ -65,6 +65,7 @@ class Helper:
         self.server.daemon_threads = True
         self.server.helper = self
         self.port = self.server.server_address[1]
+        self.cookie = f"{COOKIE}_{self.port}"  # cookies ignore ports: another helper on 127.0.0.1 mustn't share one
 
     def new_code(self):
         code = secrets.token_urlsafe(32)
@@ -142,7 +143,7 @@ def hit_json(h):
     text, spans = retrieval.excerpt(h)
     return {"kind": h.kind, "id": h.id, "time": retrieval.when(h.created), "title": h.display or h.title or "",
             "source_label": retrieval.source_label(h), "excerpt": text,
-            "match": {"type": "keyword", "spans": spans} if h.snippet else {"type": "meaning"}}
+            "match": {"type": "keyword", "spans": spans} if h.snippet is not None else {"type": "meaning"}}
 
 
 def build_atlas():
@@ -281,7 +282,7 @@ class Handler(BaseHTTPRequestHandler):
             cookie.load(self.headers.get("Cookie") or "")
         except CookieError:
             return False
-        morsel = cookie.get(COOKIE)
+        morsel = cookie.get(self.helper.cookie)
         return morsel is not None and morsel.value in self.helper.sessions
 
     def api_ok(self):
@@ -337,7 +338,7 @@ class Handler(BaseHTTPRequestHandler):
             if not session:
                 return self.send(403, CLOSED_TEXT, "text/plain; charset=utf-8")
             return self.send(303, extra=(("Location", "/"),
-                                         ("Set-Cookie", f"{COOKIE}={session}; HttpOnly; SameSite=Strict; Path=/")))
+                                         ("Set-Cookie", f"{self.helper.cookie}={session}; HttpOnly; SameSite=Strict; Path=/")))
         if url.path in ASSETS and not url.query:
             if not self.session_ok():
                 return self.send(403, CLOSED_TEXT, "text/plain; charset=utf-8")
@@ -359,6 +360,7 @@ class Handler(BaseHTTPRequestHandler):
             given = self.headers.get("X-InkVault-Control") or ""
             if not hmac.compare_digest(given.encode(), self.helper.control.encode()):
                 return self.send(403)
+            self.close_connection = True  # the request body (if any) is never read: don't parse it as a next request
             return self.answer(200, {"code": self.helper.new_code()})
         if path not in ("/api/search", "/api/record", "/api/ping"):
             return self.send(405 if path in ASSETS or path in ("/api/atlas", "/open") else 404)
@@ -369,6 +371,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/ping":
                 self.helper.last_ping = self.helper.now()
                 stamp = retrieval.published()
+                if stamp[3] is None:  # the vault can't be read right now: no generation to offer
+                    return self.answer(200, {"status": "unavailable"})
                 return self.answer(200, {"status": "ok", "generation": retrieval.generation(stamp),
                                          "rebuilding": bool(stamp[0]), "atlas_revision": atlas_revision()})
             return self.answer(200, api_search(body) if path == "/api/search" else api_record(body))
@@ -399,10 +403,15 @@ def write_info(helper):
     info = {"pid": os.getpid(), "port": helper.port, "control": helper.control,
             "started": datetime.now(timezone.utc).isoformat()}
     tmp = paths.atlas_info().with_suffix(".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(info, f)
-    os.replace(tmp, paths.atlas_info())
+    tmp.unlink(missing_ok=True)  # a leftover file may have looser permissions: create it fresh
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(info, f)
+        os.replace(tmp, paths.atlas_info())
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def request_code(info, timeout=2.0):
@@ -546,12 +555,12 @@ def make_shortcut():
     exe = pythonw()
     args = f'-m inkvault --home "{paths.home()}" dashboard'
     script = (
-        "$ErrorActionPreference='Stop'; $w=New-Object -ComObject WScript.Shell; $out=@(); "
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Stop'; $w=New-Object -ComObject WScript.Shell; $out=@(); "
         "foreach ($dir in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) { "
         f"$p=Join-Path $dir '{SHORTCUT}.lnk'; $s=$w.CreateShortcut($p); $s.TargetPath='{q(exe)}'; "
         f"$s.Arguments='{q(args)}'; $s.IconLocation='{q(ICON)},0'; $s.WorkingDirectory='{q(paths.home())}'; "
         "$s.Description='Open the InkVault Memory Atlas'; $s.Save(); $r=$w.CreateShortcut($p); "
-        "$out+=@{path=$p; target=$r.TargetPath; arguments=$r.Arguments} }; ConvertTo-Json -Compress @($out)")
+        "$out+=@{path=$p; target=$r.TargetPath; arguments=$r.Arguments; iconLocation=$r.IconLocation} }; ConvertTo-Json -Compress @($out)")
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
                            capture_output=True, text=True, encoding="utf-8")
@@ -560,7 +569,8 @@ def make_shortcut():
         made = []
     made = made if isinstance(made, list) else [made]
     good = [m for m in made if isinstance(m, dict) and str(m.get("target", "")).lower() == str(exe).lower()
-            and m.get("arguments") == args]
+            and m.get("arguments") == args
+            and str(m.get("iconLocation", "")).lower() == f"{ICON},0".lower()]
     if len(good) != 2:
         print("The InkVault Atlas icon couldn't be made, or didn't read back as expected. "
               "Open the Atlas with `inkvault dashboard`.")

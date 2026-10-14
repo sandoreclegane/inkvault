@@ -1,9 +1,6 @@
 """`inkvault dashboard`, the Windows icon, rescue and status (spec §3.6)."""
 import json
 import subprocess
-import sys
-
-import pytest
 
 import atlasdata
 
@@ -37,8 +34,10 @@ def test_shortcut_script_quotes_the_home_path(tmp_path, monkeypatch, capsys):
     from inkvault import atlasserve, paths
     exe = atlasserve.pythonw()
     args = f'-m inkvault --home "{paths.home()}" dashboard'
-    seen = fake_powershell(monkeypatch, lambda cmd: [{"path": "Desktop\\InkVault Atlas.lnk", "target": str(exe), "arguments": args},
-                                                    {"path": "Programs\\InkVault Atlas.lnk", "target": str(exe), "arguments": args}])
+    icon = f"{atlasserve.ICON},0"
+    seen = fake_powershell(monkeypatch, lambda cmd: [
+        {"path": "Desktop\\InkVault Atlas.lnk", "target": str(exe), "arguments": args, "iconLocation": icon},
+        {"path": "Programs\\InkVault Atlas.lnk", "target": str(exe), "arguments": args, "iconLocation": icon}])
     assert atlasserve.make_shortcut() == 0
     script = seen["cmd"][-1]
     assert "O''Brien vault" in script and "GetFolderPath('Programs')" in script and "inkvault.ico" in script
@@ -84,3 +83,35 @@ def test_status_reports_the_atlas(tmp_path, monkeypatch, capsys):
     cli.main(["status"])
     out = capsys.readouterr().out
     assert "atlas: built" in out and "inkvault dashboard" in out
+
+
+def test_shortcut_script_forces_utf8_and_checks_the_icon(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "Zoë Müller vault"
+    home.mkdir()
+    monkeypatch.setenv("INKVAULT_HOME", str(home))
+    from inkvault import atlasserve, paths
+    exe = atlasserve.pythonw()
+    args = f'-m inkvault --home "{paths.home()}" dashboard'
+
+    def readback(icon):
+        return lambda cmd: [{"path": p, "target": str(exe).upper(), "arguments": args, "iconLocation": icon}
+                            for p in ("Desktop-a.lnk", "Programs-a.lnk")]
+    seen = fake_powershell(monkeypatch, readback(f"{atlasserve.ICON},0".upper()))  # paths compare case-insensitively
+    assert atlasserve.make_shortcut() == 0
+    script = seen["cmd"][-1]
+    assert script.startswith("[Console]::OutputEncoding=[Text.Encoding]::UTF8; ") and "Zoë Müller" in script
+    assert "iconLocation=$r.IconLocation" in script
+    fake_powershell(monkeypatch, readback(r"C:\Windows\other.ico,0"))  # a wrong or missing icon is not "good"
+    assert atlasserve.make_shortcut() == 1
+    fake_powershell(monkeypatch, readback(""))
+    assert atlasserve.make_shortcut() == 1
+
+
+def test_status_with_an_atlas_file_that_is_not_an_object(tmp_path, monkeypatch, capsys):
+    atlasdata.make_vault(tmp_path, monkeypatch)
+    monkeypatch.setenv("INKVAULT_PIECES_PORTS", "1")
+    from inkvault import cli, paths
+    paths.dashboard().write_text("[1, 2]", encoding="utf-8")
+    capsys.readouterr()
+    assert cli.main(["status"]) in (0, None)
+    assert "atlas: not built yet" in capsys.readouterr().out

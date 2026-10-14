@@ -432,7 +432,10 @@ def cmd_status(_args):
     print(f"search index: {'ready' if paths.search_db().exists() else 'not built'}; "
           f"digests: {'yes' if paths.digests_db().exists() else 'none'}")
     try:
-        built = json.loads(paths.dashboard().read_text(encoding="utf-8")).get("built", "?")
+        data = json.loads(paths.dashboard().read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("not an Atlas file")
+        built = data.get("built", "?")
         print(f"atlas: built {built} (open it with `inkvault dashboard`)")
     except (OSError, ValueError):
         print("atlas: not built yet (`inkvault dashboard` builds it)")
