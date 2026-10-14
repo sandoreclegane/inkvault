@@ -51,3 +51,19 @@ def test_mark_and_icon():
     png = (ATLAS / "mark.png").read_bytes()
     assert png[:8] == b"\x89PNG\r\n\x1a\n" and len(png) < 100_000
     assert (ATLAS / "inkvault.ico").read_bytes()[:4] == b"\x00\x00\x01\x00"
+
+
+def test_search_uses_every_api_with_the_header_and_never_puts_queries_in_urls():
+    js = text("search.js")
+    for path in ('"/api/atlas"', '"/api/search"', '"/api/record"', '"/api/ping"'):
+        assert path in js
+    assert '"X-InkVault": "1"' in js and "sessionStorage" in js
+    assert "location.hash" not in js and "history.pushState" not in js and "URLSearchParams" not in js
+
+
+def test_every_id_the_scripts_use_is_in_the_page():
+    html = text("index.html")
+    for name in ("search.js", "atlas.js"):
+        for id_ in re.findall(r'\$\("([\w-]+)"\)|getElementById\("([\w-]+)"\)', text(name)):
+            id_ = id_[0] or id_[1]
+            assert f'id="{id_}"' in html, (name, id_)
