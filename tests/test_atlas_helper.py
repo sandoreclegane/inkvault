@@ -29,14 +29,23 @@ def launch(home, idle=60, wait=10):
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
-def wait_for_info(home, timeout=20):
+def wait_for_info(home, *processes, timeout=20):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             return json.loads((home / "atlas-helper.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            failed = [p for p in processes if p.poll() is not None and p.returncode != 0]
+            if failed or (processes and all(p.poll() is not None for p in processes)):
+                break
             time.sleep(0.1)
-    raise AssertionError("no helper info")
+    diagnostics = []
+    for p in processes:
+        if p.poll() is None:
+            p.kill()
+        out, err = p.communicate(timeout=20)
+        diagnostics.append(f"exit={p.returncode}, stdout={out!r}, stderr={err!r}")
+    raise AssertionError("no helper info; " + "; ".join(diagnostics))
 
 
 def stop(p):
@@ -59,7 +68,7 @@ def test_two_launches_at_once_make_one_helper(home):
     from inkvault import atlasserve
     a, b = launch(home), launch(home)
     try:
-        info = wait_for_info(home)
+        info = wait_for_info(home, a, b)
         deadline = time.monotonic() + 20
         while a.poll() is None and b.poll() is None and time.monotonic() < deadline:
             time.sleep(0.1)
@@ -90,7 +99,7 @@ def test_a_killed_helpers_lock_is_free_at_once(home):
     from inkvault import atlasserve
     first = launch(home)
     try:
-        old = wait_for_info(home)
+        old = wait_for_info(home, first)
         first.kill(); first.wait(timeout=20)
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:   # gone: it no longer answers
@@ -106,7 +115,7 @@ def test_a_killed_helpers_lock_is_free_at_once(home):
             info = old
             while info["control"] == old["control"] and time.monotonic() < deadline:
                 time.sleep(0.1)
-                info = wait_for_info(home)
+                info = wait_for_info(home, second)
             assert info["control"] != old["control"] and atlasserve.request_code(info)
             assert second.poll() is None  # it became the helper instead of reporting a busy one
         finally:
@@ -117,15 +126,18 @@ def test_a_killed_helpers_lock_is_free_at_once(home):
 
 def test_an_idle_helper_stops_and_cleans_up(home):
     p = launch(home, idle=1)
-    wait_for_info(home)
-    assert p.wait(timeout=30) == 0
-    assert not (home / "atlas-helper.json").exists()
+    try:
+        wait_for_info(home, p)
+        assert p.wait(timeout=30) == 0
+        assert not (home / "atlas-helper.json").exists()
+    finally:
+        stop(p)
 
 
 def test_helper_in_a_home_with_spaces_and_accents(home):
     p = launch(home)
     try:
-        info = wait_for_info(home)
+        info = wait_for_info(home, p)
         from inkvault import atlasserve
         assert atlasserve.request_code(info)
     finally:
@@ -137,7 +149,7 @@ def test_info_file_is_private_on_posix(home, monkeypatch):
         pytest.skip("POSIX permissions")
     p = launch(home)
     try:
-        wait_for_info(home)
+        wait_for_info(home, p)
         assert (home / "atlas-helper.json").stat().st_mode & 0o077 == 0
     finally:
         stop(p)
@@ -181,3 +193,29 @@ def test_reuse_survives_a_non_helper_on_the_port(home, monkeypatch, capsys):
         raise __import__("http.client").client.BadStatusLine("junk")
     monkeypatch.setattr(atlasserve, "request_code", bad)
     assert atlasserve.reuse(False, wait=0.5) == 1
+
+
+def test_startup_failure_includes_child_exit_and_stderr(home):
+    p = subprocess.Popen([sys.executable, "-c", "import sys; sys.stderr.write('startup sentinel'); sys.exit(7)"],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        with pytest.raises(AssertionError, match="exit=7.*startup sentinel"):
+            wait_for_info(home, p)
+    finally:
+        stop(p)
+
+
+def test_helper_startup_does_not_resolve_loopback(monkeypatch):
+    import socket
+    from inkvault import atlasserve
+
+    def no_dns(*args):
+        raise AssertionError("loopback startup must not wait for reverse DNS")
+    monkeypatch.setattr(socket, "getfqdn", no_dns)
+    helper = atlasserve.Helper()
+    try:
+        assert helper.server.server_address == ("127.0.0.1", helper.port)
+        assert helper.server.server_name == "127.0.0.1"
+        assert helper.server.server_port == helper.port
+    finally:
+        helper.server.server_close()

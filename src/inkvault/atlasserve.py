@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import socketserver
 import sqlite3
 import subprocess
 import sys
@@ -47,6 +48,12 @@ CLOSED_TEXT = ("This Atlas link has already been used or has expired. Open the A
 
 class QuietServer(ThreadingHTTPServer):
     daemon_threads = True
+
+    def server_bind(self):
+        # HTTPServer.server_bind does reverse DNS for server_name. This helper only uses its numeric loopback
+        # address: DNS is unnecessary and can stall startup even though binding the socket succeeded.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def handle_error(self, request, client_address):  # socketserver would print a traceback: nothing may be logged
         pass

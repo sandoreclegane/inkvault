@@ -24,8 +24,8 @@ def rig(tmp_path, monkeypatch):
     state = {"window": Identity(1, 10, 1, "Discord.exe", "Chat")}
     sups = []
 
-    def make(mode, timeout=0.5):
-        sup = worker.Supervisor([sys.executable, FAKE, mode], timeout=timeout)
+    def make(mode, timeout=0.5, worker_clock=time.monotonic):
+        sup = worker.Supervisor([sys.executable, FAKE, mode], timeout=timeout, clock=worker_clock)
         sups.append(sup)
         sampler = lambda: Sample(clock["t"], T0 + timedelta(seconds=clock["t"]), state["window"], 0.0, False)
         return watch.Watcher(sampler, sup, conn, screen.SettingsSource(), clock=lambda: clock["t"],
@@ -39,10 +39,9 @@ def rig(tmp_path, monkeypatch):
 
 def step(w, clock, n=1):
     for _ in range(n):
-        t = time.monotonic()
+        # These integration tests assert state/queue behavior, not the runner's scheduling latency.
+        # The separate hang test below forbids synchronous waits and pins the supervisor deadline.
         assert w.tick()
-        # Shared runners can preempt a tick or delay process startup; still bound it below the 2-second poll.
-        assert time.monotonic() - t < 1.5
         clock["t"] += 2.0
 
 
@@ -77,7 +76,7 @@ def test_many_window_changes_under_contention(rig):
     make, clock, state, conn = rig
     w, sup = make("ok")
     # This test covers queue behavior under a real writer, not the host's timer precision. The production
-    # timeout is pinned in test_screenstore; shorter fixture waits retain the wall-time nonblocking guard.
+    # timeout is pinned in test_screenstore; short fixture waits keep the contention exercise quick.
     conn.execute("PRAGMA busy_timeout=10")
     blocker = export.open_vault(); blocker.execute("BEGIN IMMEDIATE")
     try:
@@ -106,3 +105,28 @@ def test_the_vault_reopen_publishes_a_heartbeat_and_stops_promptly(tmp_path, mon
     assert time.monotonic() - start < 1.2                                    # not the full 10 s retry wait
     hb = json.loads(paths.watch_heartbeat().read_text())
     assert hb["state"] == "waiting for the vault" and hb["db_error"] == "StoreError" and hb["attempts"] >= 1
+
+
+def test_ticks_never_wait_for_a_hung_worker_and_keep_its_exact_deadline(rig, monkeypatch):
+    from inkvault import watch
+    make, clock, state, conn = rig
+    worker_clock = {"t": 0.0}
+    w, sup = make("hang", timeout=5.0, worker_clock=lambda: worker_clock["t"])
+    step(w, clock, 16)
+    proc = sup.proc
+    assert proc is not None and sup.busy()
+
+    def blocking(*args, **kwargs):
+        pytest.fail("a watcher tick must not sleep or wait for its worker")
+
+    with monkeypatch.context() as m:
+        m.setattr(watch.time, "sleep", blocking)
+        m.setattr(proc, "wait", blocking)
+        m.setattr(proc, "communicate", blocking)
+        worker_clock["t"] = 4.999
+        step(w, clock)
+        assert sup.busy() and sup.timeouts == 0
+        worker_clock["t"] = 5.0
+        step(w, clock)
+        assert not sup.busy() and sup.timeouts == 1 and sup.cooling("Discord.exe")
+    proc.wait(timeout=20)  # outside the tick: prove the real hung process was killed
