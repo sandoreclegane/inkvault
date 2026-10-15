@@ -125,25 +125,25 @@
       "id": "dickinson-frigate-1",
       "text": "There is no frigate like a book / To take us lands away, / Nor any coursers like a page / Of prancing poetry.",
       "author": "Emily Dickinson",
-      "work": "Poems, Series One (1890)",
+      "work": "Poems, Third Series (1896)",
       "source_url": "https://www.gutenberg.org/cache/epub/12242/pg12242-images.html",
-      "note": "Checked against Gutenberg #12242, poem 'A Book' (verse lines joined with ' / ')."
+      "note": "Checked against Gutenberg #12242, Third Series, Life XVI, 'A Book' (verse lines joined with ' / ')."
     },
     {
       "id": "dickinson-brain-1",
       "text": "The brain is wider than the sky, / For, put them side by side, / The one the other will include / With ease, and you beside.",
       "author": "Emily Dickinson",
-      "work": "Poems, Series One (1890)",
+      "work": "Poems, Third Series (1896)",
       "source_url": "https://www.gutenberg.org/cache/epub/12242/pg12242-images.html",
-      "note": "Checked against Gutenberg #12242, poem 'The Brain', first stanza (verse lines joined with ' / ')."
+      "note": "Checked against Gutenberg #12242, Third Series, Life XLIII, 'The Brain', first stanza (verse lines joined with ' / ')."
     },
     {
       "id": "dickinson-word-1",
       "text": "A word is dead / When it is said, / Some say. / I say it just / Begins to live / That day.",
       "author": "Emily Dickinson",
-      "work": "Poems, Series One (1890)",
+      "work": "Poems, Third Series (1896)",
       "source_url": "https://www.gutenberg.org/cache/epub/12242/pg12242-images.html",
-      "note": "Checked against Gutenberg #12242, poem 'A Word' (verse lines joined with ' / ')."
+      "note": "Checked against Gutenberg #12242, Third Series, Life VI, 'A Word' (verse lines joined with ' / ')."
     },
     {
       "id": "whitman-song-of-myself-1",
@@ -154,12 +154,12 @@
       "note": "Checked against Gutenberg #1322, 'Song of Myself' section 1 (verse lines joined with ' / ')."
     },
     {
-      "id": "whitman-song-of-myself-2",
+      "id": "whitman-miracles-1",
       "text": "To me every hour of the light and dark is a miracle, / Every cubic inch of space is a miracle",
       "author": "Walt Whitman",
       "work": "Leaves of Grass",
       "source_url": "https://www.gutenberg.org/cache/epub/1322/pg1322-images.html",
-      "note": "Checked against Gutenberg #1322, 'Song of Myself' section 4 (verse lines joined with ' / ')."
+      "note": "Checked against Gutenberg #1322, the poem 'Miracles' (verse lines joined with ' / ')."
     },
     {
       "id": "whitman-song-of-myself-3",
@@ -195,7 +195,7 @@
     },
     {
       "id": "ruskin-sesame-1",
-      "text": "Do you know, if you read this, that you cannot read that--that what you lose to-day you cannot gain to-morrow?",
+      "text": "Do you know, if you read this, that you cannot read that—that what you lose to-day you cannot gain to-morrow?",
       "author": "John Ruskin",
       "work": "Sesame and Lilies (1865)",
       "source_url": "https://www.gutenberg.org/cache/epub/1293/pg1293-images.html",
@@ -203,7 +203,7 @@
     },
     {
       "id": "ruskin-sesame-2",
-      "text": "you must get into the habit of looking intensely at words, and assuring yourself of their meaning, syllable by syllable--nay, letter by letter.",
+      "text": "you must get into the habit of looking intensely at words, and assuring yourself of their meaning, syllable by syllable—nay, letter by letter.",
       "author": "John Ruskin",
       "work": "Sesame and Lilies (1865)",
       "source_url": "https://www.gutenberg.org/cache/epub/1293/pg1293-images.html",
@@ -211,7 +211,7 @@
     },
     {
       "id": "ruskin-sesame-3",
-      "text": "You have heard as much before;--yet have you measured and mapped out this short life and its possibilities?",
+      "text": "You have heard as much before;—yet have you measured and mapped out this short life and its possibilities?",
       "author": "John Ruskin",
       "work": "Sesame and Lilies (1865)",
       "source_url": "https://www.gutenberg.org/cache/epub/1293/pg1293-images.html",
