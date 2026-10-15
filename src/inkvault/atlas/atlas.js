@@ -374,6 +374,7 @@ function show(data) {
   try { saved = JSON.parse(localStorage.getItem("inkvault-range")); } catch (e) {}
   if (saved && saved.preset && presets[saved.preset]) setRange(...presets[saved.preset](), saved.preset);
   else setRange(FIRST, LAST, "all");
+  if (window.DailyLight && DailyLight.show) DailyLight.show(days);
 }
 
 // Forgetting (spec §4.4): nothing drawn from the old data may stay on screen, including an open tooltip.
@@ -386,6 +387,7 @@ function clear() {
   document.querySelectorAll(".chart").forEach(el => el.replaceChildren());
   document.querySelectorAll(".tablewrap").forEach(w => w.remove());
   document.querySelectorAll(".card .tbl").forEach(b => { b.textContent = "Show table"; });
+  if (window.DailyLight && DailyLight.clear) DailyLight.clear();
 }
 
 window.Atlas = {show, clear};

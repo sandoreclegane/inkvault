@@ -27,6 +27,8 @@ ASSETS = {  # request path -> (packaged file, content type). Nothing else is eve
     "/": ("index.html", "text/html; charset=utf-8"),
     "/assets/atlas.css": ("atlas.css", "text/css; charset=utf-8"),
     "/assets/atlas.js": ("atlas.js", "text/javascript; charset=utf-8"),
+    "/assets/daily.js": ("daily.js", "text/javascript; charset=utf-8"),
+    "/assets/quotes.json": ("quotes.json", "application/json"),
     "/assets/search.js": ("search.js", "text/javascript; charset=utf-8"),
     "/assets/echarts.min.js": ("echarts.min.js", "text/javascript; charset=utf-8"),
     "/assets/mark.png": ("mark.png", "image/png"),
