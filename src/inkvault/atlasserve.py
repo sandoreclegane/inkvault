@@ -151,7 +151,8 @@ def hit_json(h):
     text, spans = retrieval.excerpt(h)
     return {"kind": h.kind, "id": h.id, "time": retrieval.when(h.created), "title": h.display or h.title or "",
             "source_label": retrieval.source_label(h), "excerpt": text,
-            "match": {"type": "keyword", "spans": spans} if h.snippet is not None else {"type": "meaning"}}
+            "match": ({"type": "date"} if h.browsed else
+                      {"type": "keyword", "spans": spans} if h.snippet is not None else {"type": "meaning"})}
 
 
 def build_atlas():
@@ -211,7 +212,9 @@ def atlas_payload_unguarded():
 
 def api_search(body):
     q = body.get("query")
-    if not isinstance(q, str) or not q.strip() or len(q) > MAX_QUERY:
+    # An empty query is a date browse, and only when both days are given (the Atlas's "explore this day").
+    browsing = isinstance(q, str) and not q.strip() and bool(body.get("from")) and bool(body.get("to"))
+    if not browsing and (not isinstance(q, str) or not q.strip() or len(q) > MAX_QUERY):
         raise BadRequest(f"Type something to search for (at most {MAX_QUERY} characters).")
     chip = body.get("source", "all")
     if chip not in retrieval.CHIPS:
@@ -222,9 +225,13 @@ def api_search(body):
     since, until = day_bounds(body.get("from"), body.get("to"))
     kinds, event_source = retrieval.CHIPS[chip]
     try:
-        r, gen = retrieval.guarded_call(retrieval.search, q, "all", "hybrid", since, until, PAGE_SIZE, offset=offset,
-                                        kinds=kinds, event_source=event_source, markers=retrieval.ATLAS_MARKERS,
-                                        require_model=True)
+        if browsing:
+            r, gen = retrieval.guarded_call(retrieval.browse, since, until, kinds=kinds, event_source=event_source,
+                                            limit=PAGE_SIZE, offset=offset)
+        else:
+            r, gen = retrieval.guarded_call(retrieval.search, q, "all", "hybrid", since, until, PAGE_SIZE,
+                                            offset=offset, kinds=kinds, event_source=event_source,
+                                            markers=retrieval.ATLAS_MARKERS, require_model=True)
     except retrieval.Refused as e:
         return {"status": e.status}
     except UNREADABLE:

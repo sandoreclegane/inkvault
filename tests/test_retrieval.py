@@ -202,3 +202,119 @@ def test_a_model_that_cannot_load_degrades_to_keyword_only(vault, monkeypatch):
     assert r.error is None and r.keyword_only is True and r.hits
     with pytest.raises(OSError):                        # MCP keeps its v0.3.0 behaviour
         retrieval.search("backoff")
+
+
+# --- retrieval.browse: everything in a date range, no query ---------------------------------------------------------
+
+def ids(r):
+    return [(h.kind, h.id) for h in r.hits]
+
+
+def test_browse_lists_a_day_oldest_first_with_no_snippets(vault):
+    from inkvault import retrieval
+    r = retrieval.browse("2026-02-27T00:00:00.000000Z", "2026-02-28T00:00:00.000000Z", limit=50)
+    assert r.error is None and r.more is False and r.keyword_only is False
+    assert [h.created for h in r.hits] == sorted(h.created for h in r.hits)
+    assert ("events", "e2") in ids(r) and ("chats", "m1") in ids(r) and ("screen", "screen:b") in ids(r)
+    assert ("events", "e1") not in ids(r)  # the day before
+    assert all(h.snippet is None and h.snippet2 is None and h.browsed for h in r.hits)
+    assert all(len(h.preview or "") <= 300 for h in r.hits)
+    assert retrieval.excerpt(r.hits[0])[1] == []
+
+
+def test_browse_range_edges_are_start_inclusive_end_exclusive(vault):
+    from inkvault import retrieval
+    # e2 is at 15:00:00Z exactly; the end bound is exclusive, the start bound inclusive
+    def got(s, u):
+        return ids(retrieval.browse(s, u, kinds=["events"], event_source="pieces"))
+    assert got("2026-02-27T15:00:00.000000Z", "2026-02-27T15:00:01.000000Z") == [("events", "e2")]
+    assert got("2026-02-27T14:00:00.000000Z", "2026-02-27T15:00:00.000000Z") == []
+    assert got("2026-02-27T15:00:00.000000Z", "") == [("events", "e2")]
+
+
+def test_browse_a_daylight_saving_day_through_day_bounds(vault):
+    from zoneinfo import ZoneInfo
+    from inkvault import atlasserve, index, paths, retrieval
+    ny = ZoneInfo("America/New_York")  # 2026-03-08 is 23 hours long: 05:00Z to 04:00Z the next day
+    since, until = atlasserve.day_bounds("2026-03-08", "2026-03-08", tz=ny)
+    assert (since, until) == ("2026-03-08T05:00:00.000000Z", "2026-03-09T04:00:00.000000Z")
+    v = sqlite3.connect(paths.vault_db())
+    for n, t in enumerate(["2026-03-08T04:59:59Z", "2026-03-08T05:00:00Z", "2026-03-09T03:59:59Z",
+                           "2026-03-09T04:00:00Z"]):
+        v.execute("INSERT INTO raw_records VALUES (?,?,?)",
+                  atlasdata.rec("summary", f"dst{n}", name=f"Day {n}", created={"value": t}))
+    v.commit()
+    v.close()
+    index.build()
+    r = retrieval.browse(since, until, kinds=["summaries"], limit=50)
+    assert [h.id for h in r.hits] == ["dst1", "dst2"]
+
+
+def test_browse_chips_filter_like_search(vault):
+    from inkvault import retrieval
+    day = ("2026-02-26T00:00:00.000000Z", "2026-03-01T00:00:00.000000Z")
+    for chip, (kinds, event_source) in retrieval.CHIPS.items():
+        r = retrieval.browse(*day, kinds=kinds, event_source=event_source, limit=50)
+        assert r.error is None
+        if kinds:
+            assert {h.kind for h in r.hits} <= set(kinds)
+    cap = retrieval.browse(*day, kinds=["events"], event_source="pieces", limit=50)
+    assert {h.id for h in cap.hits} == {"e1", "e2"}
+    scr = retrieval.browse(*day, kinds=["screen", "events"], event_source="screen", limit=50)
+    assert scr.hits and all(h.id.startswith(("screen:", "screentext:")) for h in scr.hits)
+    assert {h.kind for h in retrieval.browse(*day, kinds=["web"], limit=50).hits} == {"web"}
+
+
+def test_browse_shows_one_hit_per_stretch_and_the_ocr_row_wins(vault):
+    from inkvault import retrieval
+    day = ("2026-02-27T00:00:00.000000Z", "2026-02-28T00:00:00.000000Z")
+    r = retrieval.browse(*day, kinds=["screen", "events"], event_source="screen", limit=50)
+    assert ("screen", "screen:a") not in ids(r)               # its text is indexed as events rows: those win
+    assert sum(1 for h in r.hits if h.kind == "events") == 1  # three text reads, one stretch, one hit
+    assert ("screen", "screen:b") in ids(r)                   # a stretch without text still shows
+    only = retrieval.browse(*day, kinds=["screen"], limit=50)  # no events kind: nothing to win, the stretches show
+    assert {h.id for h in only.hits} == {"screen:a", "screen:b"}
+
+
+def test_browse_pages_without_gaps_or_repeats_and_reports_more(vault):
+    from inkvault import retrieval
+    day = ("2026-02-25T00:00:00.000000Z", "2026-03-01T00:00:00.000000Z")
+    whole = ids(retrieval.browse(*day, limit=500))
+    assert len(whole) > 6
+    got, offset, pages = [], 0, 0
+    while True:
+        r = retrieval.browse(*day, limit=3, offset=offset)
+        got += ids(r)
+        pages += 1
+        assert r.more == (offset + 3 < len(whole))
+        if not r.more:
+            break
+        offset += 3
+    assert got == whole and pages == -(-len(whole) // 3)
+    assert retrieval.browse(*day, limit=len(whole)).more is False
+
+
+def test_browse_walks_batches_across_kinds(vault, monkeypatch):
+    from inkvault import retrieval
+    day = ("2026-02-25T00:00:00.000000Z", "2026-03-01T00:00:00.000000Z")
+    whole = ids(retrieval.browse(*day, limit=500))
+    monkeypatch.setattr(retrieval, "BROWSE_BATCH", 1)  # every kind refilled one row at a time
+    assert ids(retrieval.browse(*day, limit=500)) == whole
+
+
+def test_browse_leaves_out_what_was_forgotten(vault):
+    from inkvault import forget, retrieval
+    day = ("2026-02-27T00:00:00.000000Z", "2026-02-28T00:00:00.000000Z")
+    assert any(k == "web" for k, _ in ids(retrieval.browse(*day, limit=50)))
+    forget.forget_profile("chrome/Default")
+    assert not any(k == "web" for k, _ in ids(retrieval.browse(*day, limit=50)))
+
+
+def test_browse_errors_like_search(vault):
+    from inkvault import paths, retrieval
+    assert "Bad date" in retrieval.browse("garbage", "").error
+    assert retrieval.browse("2026-02-28", "2026-02-25").error
+    assert retrieval.browse("2026-02-25", "2026-02-26", kinds=["nope"]).error
+    paths.search_db().unlink()
+    r = retrieval.browse("2026-02-25", "2026-02-26")
+    assert r.empty_index and r.error

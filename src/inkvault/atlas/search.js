@@ -130,7 +130,8 @@ async function loadAtlas() {
   if (a.status === "ok") Atlas.show(a.data);
   if (!restored) {
     restored = true;
-    if (SAVED && SAVED.generation === generation && SAVED.query) return restore(SAVED);
+    if (SAVED && SAVED.generation === generation
+        && (SAVED.query || (SAVED.view === "search" && SAVED.from && SAVED.to))) return restore(SAVED);
   }
   view(state.view);
 }
@@ -148,15 +149,18 @@ function showChips(sources) {
   document.querySelectorAll("[data-source]").forEach(b => { b.hidden = b.dataset.source !== "all" && !sources[b.dataset.source]; });
 }
 
+// A search is running or wanted: a query, or a date browse (an empty query with both days set) on the Search view.
+function searching() { return Boolean(state.query || (state.view === "search" && state.from && state.to)); }
+
 function setChip(name, search = true) {
   state.source = name;
   document.querySelectorAll("[data-source]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.source === name)));
-  if (search && state.query) runSearch(0);
+  if (search && searching()) runSearch(0);
 }
 
 async function runSearch(offset, fromForm) {
   const q = offset || !fromForm ? state.query : $("q").value.trim();
-  if (!q) return;
+  if (!q && !(state.from && state.to)) return;  // no query is allowed only when both days are set (browse)
   if (!offset) {
     next("reader");  // a record still loading belongs to the old results: its answer must not appear (review #2)
     state.query = q; state.selected = null; hits = [];
@@ -179,8 +183,9 @@ async function runSearch(offset, fromForm) {
   hits.push(...a.hits);
   a.hits.forEach((h, i) => $("results").append(hitNode(h, start + i)));
   $("more").hidden = !a.more;
-  const count = hits.length ? `${hits.length}${a.more ? "+" : ""} result${hits.length === 1 ? "" : "s"}.`
-                            : "No matches. Try All sources or a wider date range.";
+  const none = state.query ? "No matches. Try All sources or a wider date range."
+    : state.from === state.to ? "Nothing indexed on this day." : "Nothing indexed in this date range.";
+  const count = hits.length ? `${hits.length}${a.more ? "+" : ""} result${hits.length === 1 ? "" : "s"}.` : none;
   $("search-status").textContent = count + (a.keyword_only ? " Keyword search only." : "");
   save();
   return a;
@@ -201,6 +206,10 @@ function hitNode(h, index) {
 }
 
 function excerpt(box, h) {
+  if (h.match.type === "date") {  // listed by date, not matched: no highlight
+    box.append(h.excerpt, el("span", " · on this day", "by-meaning"));
+    return;
+  }
   if (h.match.type !== "keyword") {
     box.append(h.excerpt, el("span", " · related by meaning", "by-meaning"));
     return;
@@ -352,6 +361,15 @@ async function ping() {  // also while the tab is hidden: the helper stops 30 mi
   }
 }
 
+// "Explore this day": everything indexed on one local day, as a search with no query (Back is the usual tab).
+window.exploreDay = day => {
+  next("reader");
+  state.query = ""; state.source = "all"; state.from = day; state.to = day;
+  $("q").value = ""; $("s-from").value = day; $("s-to").value = day;
+  setChip("all", false);
+  return runSearch(0);
+};
+
 $("search-form").addEventListener("submit", e => { e.preventDefault(); runSearch(0, true); });
 $("tab-atlas").addEventListener("click", () => view("atlas"));
 $("tab-search").addEventListener("click", () => view("search"));
@@ -359,7 +377,7 @@ $("more").addEventListener("click", () => runSearch(hits.length));
 document.querySelectorAll("[data-source]").forEach(b => b.addEventListener("click", () => setChip(b.dataset.source)));
 for (const id of ["s-from", "s-to"]) $(id).addEventListener("change", () => {
   state.from = $("s-from").value; state.to = $("s-to").value;
-  if (state.query) runSearch(0);
+  if (searching()) runSearch(0);
 });
 $("results").addEventListener("keydown", e => {
   if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;

@@ -398,3 +398,42 @@ def test_an_unreadable_atlas_file_is_unavailable(helper, session, monkeypatch):
     monkeypatch.setattr(Path, "read_text", refuse)
     assert api(helper, session, "/api/atlas") == (200, {"status": "unavailable"})
     assert atlasserve.atlas_payload() == {"status": "unavailable"}
+
+
+def test_an_empty_query_with_both_days_browses_the_day(helper, session):
+    body = {"query": "  ", "from": "2026-02-27", "to": "2026-02-27", "source": "all"}
+    s, a = api(helper, session, "/api/search", body)
+    assert s == 200 and a["status"] == "ok" and len(a["generation"]) == 16 and a["keyword_only"] is False
+    assert a["hits"] and all(h["match"] == {"type": "date"} for h in a["hits"])  # never "meaning", never spans
+    assert [h["time"] for h in a["hits"]] == sorted(h["time"] for h in a["hits"])
+    s, cap = api(helper, session, "/api/search",
+                 {"query": "", "from": "2026-02-26", "to": "2026-02-27", "source": "captures"})
+    assert {h["id"] for h in cap["hits"]} == {"e1", "e2"}
+
+
+def test_an_empty_query_without_both_days_is_still_refused(helper, session):
+    for body in ({"query": ""}, {"query": "", "from": "2026-02-27"}, {"query": "", "to": "2026-02-27"},
+                 {"query": " ", "from": "", "to": "2026-02-27"}, {"query": "", "from": "2026-02-27", "to": None}):
+        s, a = api(helper, session, "/api/search", body)
+        assert s == 400 and a["status"] == "bad" and a["message"].startswith("Type something")
+
+
+def test_browse_page_two_needs_the_first_pages_generation(helper, session):
+    from inkvault import paths
+    body = {"query": "", "from": "2026-02-01", "to": "2026-02-28", "source": "all"}
+    _, first = api(helper, session, "/api/search", body)
+    _, same = api(helper, session, "/api/search", {**body, "offset": 1, "generation": first["generation"]})
+    assert same["status"] == "ok" and same["hits"][0] == first["hits"][1]
+    _, wrong = api(helper, session, "/api/search", {**body, "offset": 1, "generation": "nope"})
+    assert wrong["status"] == "changed"
+    atlasdata.bump(paths.vectors())
+    _, page2 = api(helper, session, "/api/search", {**body, "offset": 1, "generation": first["generation"]})
+    assert page2["status"] == "changed" and "hits" not in page2
+
+
+def test_hit_json_marks_browse_hits_as_date():
+    from inkvault import atlasserve, retrieval
+    h = retrieval.Hit("events", "e2", "2026-02-27T15:00:00Z", "t", "Code", None, "backoff", browsed=True)
+    assert atlasserve.hit_json(h)["match"] == {"type": "date"}
+    h.browsed = False
+    assert atlasserve.hit_json(h)["match"] == {"type": "meaning"}
