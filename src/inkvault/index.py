@@ -116,6 +116,7 @@ def build():
             CREATE INDEX visits_created ON visits(created);
             CREATE INDEX visits_page ON visits(page_id);
             CREATE INDEX events_created ON events(created);
+            CREATE INDEX events_stretch ON events(stretch_id);
             CREATE INDEX summaries_created ON summaries(created);
             CREATE INDEX messages_created ON messages(created);
             CREATE INDEX snippets_created ON snippets(created);

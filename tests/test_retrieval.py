@@ -318,3 +318,57 @@ def test_browse_errors_like_search(vault):
     paths.search_db().unlink()
     r = retrieval.browse("2026-02-25", "2026-02-26")
     assert r.empty_index and r.error
+
+
+def _dense_ocr_index(n):
+    """Add n screen stretches, each with one OCR events row, two minutes apart through 2026-03 onward."""
+    from datetime import datetime, timedelta, timezone
+    from inkvault import paths
+    t0 = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    iso = lambda d: d.strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+    c = sqlite3.connect(paths.search_db())
+    stretches = [(f"screen:z{i:05d}", iso(t0 + timedelta(minutes=2 * i)), iso(t0 + timedelta(minutes=2 * i + 1)), "App", f"T{i}")
+                 for i in range(n)]
+    events = [(f"zev{i:05d}", iso(t0 + timedelta(minutes=2 * i)), "App", f"T{i}", None, "text", "screen", f"screen:z{i:05d}")
+              for i in range(n)]
+    c.executemany("INSERT INTO screen_stretches VALUES (?,?,?,?,?)", stretches)
+    c.executemany("INSERT INTO events (id, created, app, window_title, url, readable, source, stretch_id) VALUES (?,?,?,?,?,?,?,?)", events)
+    c.commit(); c.close()
+    return ("2026-03-01", "2027-03-01")
+
+
+@pytest.mark.parametrize("indexed", [True, False])
+def test_browse_screen_suppression_work_is_bounded_by_the_page(vault, monkeypatch, indexed):
+    """Finding 1: 5,000 OCR-backed stretches must not be walked to return the first screen-chip page."""
+    import time
+    from inkvault import paths, retrieval
+    bounds = _dense_ocr_index(5000)
+    if not indexed:                       # an index built before events_stretch existed: same answer, only slower
+        c = sqlite3.connect(paths.search_db()); c.execute("DROP INDEX IF EXISTS events_stretch"); c.commit(); c.close()
+    fetched = {"rows": 0}
+    real = retrieval.db
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def counting():
+        with real() as conn:
+            class Cursor:
+                def __init__(self, cur): self.cur = cur
+                def fetchall(self):
+                    rows = self.cur.fetchall(); fetched["rows"] += len(rows); return rows
+                def __getattr__(self, name): return getattr(self.cur, name)
+                def __iter__(self): return iter(self.cur)
+
+            class Conn:
+                def execute(self, *a): return Cursor(conn.execute(*a))
+                def __getattr__(self, name): return getattr(conn, name)
+            yield Conn()
+    monkeypatch.setattr(retrieval, "db", counting)
+    t = time.perf_counter()
+    r = retrieval.browse(*bounds, kinds=["screen", "events"], event_source="screen", limit=20)
+    took = time.perf_counter() - t
+    print(f"indexed={indexed} took={took:.3f}s rows_fetched={fetched['rows']}")
+    assert len(r.hits) == 20 and r.more and all(h.kind == "events" for h in r.hits)
+    assert fetched["rows"] <= 2 * retrieval.BROWSE_BATCH + 20   # one batch per kind, not the whole range
+    assert took < (5 if indexed else 60)

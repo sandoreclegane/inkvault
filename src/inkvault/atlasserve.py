@@ -244,8 +244,10 @@ def api_search(body):
         return {"status": "empty"}
     if r.error:
         raise BadRequest(r.error)
-    return {"status": "ok", "generation": gen, "hits": [hit_json(h) for h in r.hits], "more": r.more,
-            "keyword_only": r.keyword_only}
+    # Never offer a page the offset check above would refuse: at the ceiling, More is off and the page says why.
+    capped = bool(r.more) and offset + PAGE_SIZE > MAX_OFFSET
+    return {"status": "ok", "generation": gen, "hits": [hit_json(h) for h in r.hits], "more": bool(r.more) and not capped,
+            "capped": capped, "keyword_only": r.keyword_only}
 
 
 def api_record(body):

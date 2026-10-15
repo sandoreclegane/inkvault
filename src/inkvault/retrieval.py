@@ -466,25 +466,25 @@ def browse(since, until, *, kinds=None, event_source=None, limit=10, offset=0):
         has_stretch = has_column(conn, "events", "stretch_id")
         filter_source = bool(event_source) and has_column(conn, "events", "source")
 
-        def ocr_stretches(ids):
-            """Which of these screen stretches have an events (OCR) row in the same range and chip."""
-            if not ids or "events" not in kinds or not has_stretch:
-                return set()
-            params = list(ids)
-            sql = (f"SELECT DISTINCT t.stretch_id FROM events t WHERE t.stretch_id IN ({','.join('?' * len(ids))})"
-                   + range_filter("events", since, until, params))
-            if filter_source:
-                sql += " AND t.source = ?"
-                params.append(event_source)
-            return {r[0] for r in conn.execute(sql, params)}
-
         def rows(kind):
             table, _, title, _, body, display = SOURCES[kind]
             f1, f2 = facts_sql(conn, kind)
             created = "t.started" if kind == "screen" else "t.created"
             stretch = ("t.id" if kind == "screen" else
                        "t.stretch_id" if kind == "events" and has_stretch else "NULL")
-            done = 0
+            # The OCR row wins (screen spec §6): a screen stretch with an events row in the same range and chip is
+            # left out in SQL, so suppressed stretches cost an index probe each and never reach Python. With the
+            # events(stretch_id) index (current builds) that probe is cheap; on an older index it is a scan, but
+            # the answer is the same.
+            anti, anti_params = "", []
+            if kind == "screen" and "events" in kinds and has_stretch:
+                anti = " AND NOT EXISTS (SELECT 1 FROM events e WHERE e.stretch_id = t.id"
+                anti += date_filter("e.created", since, until, anti_params)
+                if filter_source:
+                    anti += " AND e.source = ?"
+                    anti_params.append(event_source)
+                anti += ")"
+            last = None  # (created, id) of the last row seen: keyset paging, so every batch starts where it ended
             while True:
                 params = []
                 sql = (f"SELECT t.id AS id, {created} AS created, {title} AS title, {display} AS display, "
@@ -493,16 +493,22 @@ def browse(since, until, *, kinds=None, event_source=None, limit=10, offset=0):
                 if kind == "events" and filter_source:
                     sql += " AND t.source = ?"
                     params.append(event_source)
-                sql += f" ORDER BY {created}, t.id LIMIT ? OFFSET ?"
-                batch = conn.execute(sql, params + [BROWSE_BATCH, done]).fetchall()
-                skip = ocr_stretches([r["stretch"] for r in batch]) if kind == "screen" else set()
+                sql += anti
+                params += anti_params
+                if last is not None:            # NULL times sort first, then by id
+                    if last[0] is None:
+                        sql += f" AND ({created} IS NOT NULL OR t.id > ?)"
+                        params.append(last[1])
+                    else:
+                        sql += f" AND ({created} > ? OR ({created} = ? AND t.id > ?))"
+                        params += [last[0], last[0], last[1]]
+                sql += f" ORDER BY {created}, t.id LIMIT ?"
+                batch = conn.execute(sql, params + [BROWSE_BATCH]).fetchall()
                 for r in batch:
-                    if kind == "screen" and r["stretch"] in skip:
-                        continue          # the OCR row wins (screen spec §6)
                     yield (r["created"] or "", kind, r["id"]), r
                 if len(batch) < BROWSE_BATCH:
                     return
-                done += BROWSE_BATCH
+                last = (batch[-1]["created"], batch[-1]["id"])
 
         out, seen = [], set()
         for (_, kind, id_), r in heapq.merge(*(rows(k) for k in kinds), key=lambda x: x[0]):

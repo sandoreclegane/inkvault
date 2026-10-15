@@ -183,10 +183,12 @@ async function runSearch(offset, fromForm) {
   hits.push(...a.hits);
   a.hits.forEach((h, i) => $("results").append(hitNode(h, start + i)));
   $("more").hidden = !a.more;
+  const capped = Boolean(a.capped);
   const none = state.query ? "No matches. Try All sources or a wider date range."
     : state.from === state.to ? "Nothing indexed on this day." : "Nothing indexed in this date range.";
   const count = hits.length ? `${hits.length}${a.more ? "+" : ""} result${hits.length === 1 ? "" : "s"}.` : none;
-  $("search-status").textContent = count + (a.keyword_only ? " Keyword search only." : "");
+  $("search-status").textContent = count + (a.keyword_only ? " Keyword search only." : "")
+    + (capped ? ` Showing the first ${hits.length} results. Narrow the dates or pick a source to see more.` : "");
   save();
   return a;
 }
@@ -376,7 +378,17 @@ $("tab-search").addEventListener("click", () => view("search"));
 $("more").addEventListener("click", () => runSearch(hits.length));
 document.querySelectorAll("[data-source]").forEach(b => b.addEventListener("click", () => setChip(b.dataset.source)));
 for (const id of ["s-from", "s-to"]) $(id).addEventListener("change", () => {
+  const browsing = state.view === "search" && !state.query && state.from && state.to;  // a date-only browse is showing
   state.from = $("s-from").value; state.to = $("s-to").value;
+  if (browsing && !(state.from && state.to)) {
+    // One bound cleared: the shown list no longer matches the controls, and an unbounded browse is never sent.
+    next("search"); next("reader");  // answers still on their way belong to the old range: they must not appear
+    state.selected = null; hits = [];
+    $("results").replaceChildren(); $("reader").replaceChildren(); $("more").hidden = true;
+    $("search-status").textContent = "Choose both dates to list a day or range.";
+    save();
+    return;
+  }
   if (searching()) runSearch(0);
 });
 $("results").addEventListener("keydown", e => {

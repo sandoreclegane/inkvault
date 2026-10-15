@@ -437,3 +437,28 @@ def test_hit_json_marks_browse_hits_as_date():
     assert atlasserve.hit_json(h)["match"] == {"type": "date"}
     h.browsed = False
     assert atlasserve.hit_json(h)["match"] == {"type": "meaning"}
+
+
+def test_more_is_never_offered_past_the_offset_ceiling(helper, session, monkeypatch):
+    """Finding 3: at the last page the API can serve, More is off and `capped` says why (browse and search)."""
+    import sqlite3
+    from inkvault import atlasserve, paths
+    monkeypatch.setattr(atlasserve, "PAGE_SIZE", 10)
+    monkeypatch.setattr(atlasserve, "MAX_OFFSET", 30)
+    c = sqlite3.connect(paths.search_db())
+    c.executemany("INSERT INTO events (id, created, app, window_title, url, readable, source) VALUES (?,?,?,?,?,?,?)",
+                  [(f"cap{i:03d}", f"2026-03-01T10:{i // 60:02d}:{i % 60:02d}.000000Z", "App", f"T{i}", None, "capwordxyz", "pieces")
+                   for i in range(60)])
+    c.execute("INSERT INTO events_fts(events_fts) VALUES ('rebuild')")
+    c.commit(); c.close()
+    browse = {"query": "", "from": "2026-03-01", "to": "2026-03-01", "source": "captures"}
+    sources = [("browse", browse), ("search", {"query": "capwordxyz", "source": "captures", "from": "2026-03-01", "to": "2026-03-01"})]
+    for name, body in sources:
+        gen = None
+        for offset, more, capped in ((0, True, False), (20, True, False), (30, False, True)):
+            s, a = api(helper, session, "/api/search", {**body, "offset": offset, "generation": gen if offset else None})
+            assert s == 200 and a["status"] == "ok", (name, offset, a)
+            gen = a["generation"]
+            assert len(a["hits"]) == 10 and a["more"] is more and a["capped"] is capped, (name, offset, a["more"], a.get("capped"))
+        s, a = api(helper, session, "/api/search", {**body, "offset": 40, "generation": gen})   # never reachable from the UI
+        assert s == 400 and a["status"] == "bad"
