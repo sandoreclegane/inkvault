@@ -339,10 +339,10 @@ def _dense_ocr_index(n):
 
 @pytest.mark.parametrize("indexed", [True, False])
 def test_browse_screen_suppression_work_is_bounded_by_the_page(vault, monkeypatch, indexed):
-    """Finding 1: 5,000 OCR-backed stretches must not be walked to return the first screen-chip page."""
+    """Finding 1 + recheck: 20,000 OCR-backed stretches must not be walked to return the first screen-chip page."""
     import time
     from inkvault import paths, retrieval
-    bounds = _dense_ocr_index(5000)
+    bounds = _dense_ocr_index(20000)
     if not indexed:                       # an index built before events_stretch existed: same answer, only slower
         c = sqlite3.connect(paths.search_db()); c.execute("DROP INDEX IF EXISTS events_stretch"); c.commit(); c.close()
     fetched = {"rows": 0}
@@ -371,4 +371,4 @@ def test_browse_screen_suppression_work_is_bounded_by_the_page(vault, monkeypatc
     print(f"indexed={indexed} took={took:.3f}s rows_fetched={fetched['rows']}")
     assert len(r.hits) == 20 and r.more and all(h.kind == "events" for h in r.hits)
     assert fetched["rows"] <= 2 * retrieval.BROWSE_BATCH + 20   # one batch per kind, not the whole range
-    assert took < (5 if indexed else 60)
+    assert took < 2  # the old index too: NOT IN builds the OCR set once (19.7 s as a scan per stretch)

@@ -465,6 +465,7 @@ def browse(since, until, *, kinds=None, event_source=None, limit=10, offset=0):
         kinds = [k for k in kinds if has_table(conn, SOURCES[k][0])]
         has_stretch = has_column(conn, "events", "stretch_id")
         filter_source = bool(event_source) and has_column(conn, "events", "source")
+        stretch_indexed = any(r[1] == "events_stretch" for r in conn.execute("PRAGMA index_list('events')"))
 
         def rows(kind):
             table, _, title, _, body, display = SOURCES[kind]
@@ -473,12 +474,16 @@ def browse(since, until, *, kinds=None, event_source=None, limit=10, offset=0):
             stretch = ("t.id" if kind == "screen" else
                        "t.stretch_id" if kind == "events" and has_stretch else "NULL")
             # The OCR row wins (screen spec §6): a screen stretch with an events row in the same range and chip is
-            # left out in SQL, so suppressed stretches cost an index probe each and never reach Python. With the
-            # events(stretch_id) index (current builds) that probe is cheap; on an older index it is a scan, but
-            # the answer is the same.
+            # left out in SQL, so suppressed stretches never reach Python. With the events(stretch_id) index
+            # (current builds) each stretch costs one cheap probe. An index built before it has no such index, so
+            # there SQLite builds the range's OCR stretch ids once per query instead (an uncorrelated NOT IN), not a
+            # scan per stretch (Codex recheck).
             anti, anti_params = "", []
             if kind == "screen" and "events" in kinds and has_stretch:
-                anti = " AND NOT EXISTS (SELECT 1 FROM events e WHERE e.stretch_id = t.id"
+                if stretch_indexed:
+                    anti = " AND NOT EXISTS (SELECT 1 FROM events e WHERE e.stretch_id = t.id"
+                else:
+                    anti = " AND t.id NOT IN (SELECT e.stretch_id FROM events e WHERE e.stretch_id IS NOT NULL"
                 anti += date_filter("e.created", since, until, anti_params)
                 if filter_source:
                     anti += " AND e.source = ?"
