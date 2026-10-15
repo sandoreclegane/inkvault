@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.2 — Atlas Daily Light
+
+- **A little light.** The Atlas opens with a short daily quotation from a curated collection of 32 public-domain
+  passages, each checked word for word against a Project Gutenberg edition. The quote is picked by your local
+  calendar day (same all day, new at midnight); your history is never used. "Source" opens the book only when you
+  click it, and "Hide daily quote" tucks it away until the Atlas closes.
+- **On this day.** When an earlier year has indexed activity on today's date, a small card offers "Explore this
+  day": Search opens with that date and every source, listing what you kept in time order. February 29 only
+  matches an earlier February 29.
+- Search can now list a date range with no keyword (Atlas only). MCP tools answer exactly as before.
+
 ## 0.3.1 — Searchable Memory Atlas
 
 - **Search in the Atlas.** Type what you remember; results come from every source in your vault (conversations,

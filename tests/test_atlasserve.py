@@ -398,3 +398,67 @@ def test_an_unreadable_atlas_file_is_unavailable(helper, session, monkeypatch):
     monkeypatch.setattr(Path, "read_text", refuse)
     assert api(helper, session, "/api/atlas") == (200, {"status": "unavailable"})
     assert atlasserve.atlas_payload() == {"status": "unavailable"}
+
+
+def test_an_empty_query_with_both_days_browses_the_day(helper, session):
+    body = {"query": "  ", "from": "2026-02-27", "to": "2026-02-27", "source": "all"}
+    s, a = api(helper, session, "/api/search", body)
+    assert s == 200 and a["status"] == "ok" and len(a["generation"]) == 16 and a["keyword_only"] is False
+    assert a["hits"] and all(h["match"] == {"type": "date"} for h in a["hits"])  # never "meaning", never spans
+    assert [h["time"] for h in a["hits"]] == sorted(h["time"] for h in a["hits"])
+    s, cap = api(helper, session, "/api/search",
+                 {"query": "", "from": "2026-02-26", "to": "2026-02-27", "source": "captures"})
+    assert {h["id"] for h in cap["hits"]} == {"e1", "e2"}
+
+
+def test_an_empty_query_without_both_days_is_still_refused(helper, session):
+    for body in ({"query": ""}, {"query": "", "from": "2026-02-27"}, {"query": "", "to": "2026-02-27"},
+                 {"query": " ", "from": "", "to": "2026-02-27"}, {"query": "", "from": "2026-02-27", "to": None}):
+        s, a = api(helper, session, "/api/search", body)
+        assert s == 400 and a["status"] == "bad" and a["message"].startswith("Type something")
+
+
+def test_browse_page_two_needs_the_first_pages_generation(helper, session):
+    from inkvault import paths
+    body = {"query": "", "from": "2026-02-01", "to": "2026-02-28", "source": "all"}
+    _, first = api(helper, session, "/api/search", body)
+    _, same = api(helper, session, "/api/search", {**body, "offset": 1, "generation": first["generation"]})
+    assert same["status"] == "ok" and same["hits"][0] == first["hits"][1]
+    _, wrong = api(helper, session, "/api/search", {**body, "offset": 1, "generation": "nope"})
+    assert wrong["status"] == "changed"
+    atlasdata.bump(paths.vectors())
+    _, page2 = api(helper, session, "/api/search", {**body, "offset": 1, "generation": first["generation"]})
+    assert page2["status"] == "changed" and "hits" not in page2
+
+
+def test_hit_json_marks_browse_hits_as_date():
+    from inkvault import atlasserve, retrieval
+    h = retrieval.Hit("events", "e2", "2026-02-27T15:00:00Z", "t", "Code", None, "backoff", browsed=True)
+    assert atlasserve.hit_json(h)["match"] == {"type": "date"}
+    h.browsed = False
+    assert atlasserve.hit_json(h)["match"] == {"type": "meaning"}
+
+
+def test_more_is_never_offered_past_the_offset_ceiling(helper, session, monkeypatch):
+    """Finding 3: at the last page the API can serve, More is off and `capped` says why (browse and search)."""
+    import sqlite3
+    from inkvault import atlasserve, paths
+    monkeypatch.setattr(atlasserve, "PAGE_SIZE", 10)
+    monkeypatch.setattr(atlasserve, "MAX_OFFSET", 30)
+    c = sqlite3.connect(paths.search_db())
+    c.executemany("INSERT INTO events (id, created, app, window_title, url, readable, source) VALUES (?,?,?,?,?,?,?)",
+                  [(f"cap{i:03d}", f"2026-03-01T10:{i // 60:02d}:{i % 60:02d}.000000Z", "App", f"T{i}", None, "capwordxyz", "pieces")
+                   for i in range(60)])
+    c.execute("INSERT INTO events_fts(events_fts) VALUES ('rebuild')")
+    c.commit(); c.close()
+    browse = {"query": "", "from": "2026-03-01", "to": "2026-03-01", "source": "captures"}
+    sources = [("browse", browse), ("search", {"query": "capwordxyz", "source": "captures", "from": "2026-03-01", "to": "2026-03-01"})]
+    for name, body in sources:
+        gen = None
+        for offset, more, capped in ((0, True, False), (20, True, False), (30, False, True)):
+            s, a = api(helper, session, "/api/search", {**body, "offset": offset, "generation": gen if offset else None})
+            assert s == 200 and a["status"] == "ok", (name, offset, a)
+            gen = a["generation"]
+            assert len(a["hits"]) == 10 and a["more"] is more and a["capped"] is capped, (name, offset, a["more"], a.get("capped"))
+        s, a = api(helper, session, "/api/search", {**body, "offset": 40, "generation": gen})   # never reachable from the UI
+        assert s == 400 and a["status"] == "bad"

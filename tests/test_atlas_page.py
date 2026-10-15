@@ -67,3 +67,19 @@ def test_every_id_the_scripts_use_is_in_the_page():
         for id_ in re.findall(r'\$\("([\w-]+)"\)|getElementById\("([\w-]+)"\)', text(name)):
             id_ = id_[0] or id_[1]
             assert f'id="{id_}"' in html, (name, id_)
+
+
+def test_daily_light_assets_are_served_with_the_right_types_and_the_page_loads_daily_js_in_order():
+    assert atlasserve.ASSETS["/assets/daily.js"] == ("daily.js", "text/javascript; charset=utf-8")
+    assert atlasserve.ASSETS["/assets/quotes.json"] == ("quotes.json", "application/json")
+    html = text("index.html")
+    order = [html.index(f'src="/assets/{n}"') for n in ("atlas.js", "daily.js", "search.js")]
+    assert order == sorted(order)
+    assert '<script src="/assets/daily.js" defer>' in html
+    assert (ATLAS / "daily.js").is_file() and (ATLAS / "quotes.json").is_file()  # both live in the package directory
+
+
+def test_daily_js_never_uses_html_or_inline_styles():
+    js = text("daily.js")
+    for banned in ("innerHTML", "outerHTML", "insertAdjacentHTML", "style=", ".style", "toISOString", "eval("):
+        assert banned not in js, banned

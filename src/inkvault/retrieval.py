@@ -7,6 +7,7 @@ each process that answers questions sets HF_HUB_OFFLINE itself.
 import base64
 import functools
 import hashlib
+import heapq
 import json
 import re
 import sqlite3
@@ -309,6 +310,7 @@ class Hit:
     fact1: str | None = None
     fact2: str | None = None
     snippet2: str | None = None  # the Atlas only: the same snippet made with SECOND_MARKERS
+    browsed: bool = False        # listed by date (browse), not found by a query
 
 
 @dataclass
@@ -431,6 +433,104 @@ def search(query, source="all", mode="hybrid", since="", until="", limit=10, *, 
                          "timeline() shows it live)")
     return SearchResult(hits=out[offset:offset + limit], more=len(out) > offset + limit,
                         keyword_only=mode != "keyword" and (degraded or not meaning_ready()), notes=notes)
+
+
+BROWSE_BATCH = 100  # rows fetched per kind at a time while walking a date range
+
+
+def browse(since, until, *, kinds=None, event_source=None, limit=10, offset=0):
+    """Everything in a date range, oldest first, with no query (the Atlas's "explore this day"). The same range
+    filters, chips, facts and one-hit-per-stretch rule as search(); every kind is read in time order (ties: kind,
+    then id) a batch at a time and merged, so nothing is loaded beyond what the requested page needs."""
+    kinds = list(SOURCES) if kinds is None else list(kinds)
+    if any(k not in SOURCES for k in kinds):
+        return SearchResult(error=f"Unknown source. Use one of: all, {', '.join(SOURCES)}")
+    for bound in (since, until):
+        if bound and len(bound) != 10:
+            try:
+                utc_bound(bound)
+            except ValueError:
+                return SearchResult(error=f"Bad date {bound!r}: use a date (2026-10-05) or a UTC time (2026-10-05T14:30).")
+    if since or until:
+        try:
+            screen.bounds(since or "1970-01-01", until)
+        except ValueError as e:
+            return SearchResult(error=f"Bad range: {e}")
+    if not paths.search_db().exists():
+        return SearchResult(error="The vault hasn't been indexed yet. Run `inkvault rescue` first.", empty_index=True)
+
+    with db() as conn:
+        if kinds == ["web"] and not has_table(conn, "pages"):
+            return SearchResult(error="Web pages aren't in the search index yet: run `inkvault index`.")
+        kinds = [k for k in kinds if has_table(conn, SOURCES[k][0])]
+        has_stretch = has_column(conn, "events", "stretch_id")
+        filter_source = bool(event_source) and has_column(conn, "events", "source")
+        stretch_indexed = any(r[1] == "events_stretch" for r in conn.execute("PRAGMA index_list('events')"))
+
+        def rows(kind):
+            table, _, title, _, body, display = SOURCES[kind]
+            f1, f2 = facts_sql(conn, kind)
+            created = "t.started" if kind == "screen" else "t.created"
+            stretch = ("t.id" if kind == "screen" else
+                       "t.stretch_id" if kind == "events" and has_stretch else "NULL")
+            # The OCR row wins (screen spec §6): a screen stretch with an events row in the same range and chip is
+            # left out in SQL, so suppressed stretches never reach Python. With the events(stretch_id) index
+            # (current builds) each stretch costs one cheap probe. An index built before it has no such index, so
+            # there SQLite builds the range's OCR stretch ids once per query instead (an uncorrelated NOT IN), not a
+            # scan per stretch (Codex recheck).
+            anti, anti_params = "", []
+            if kind == "screen" and "events" in kinds and has_stretch:
+                if stretch_indexed:
+                    anti = " AND NOT EXISTS (SELECT 1 FROM events e WHERE e.stretch_id = t.id"
+                else:
+                    anti = " AND t.id NOT IN (SELECT e.stretch_id FROM events e WHERE e.stretch_id IS NOT NULL"
+                anti += date_filter("e.created", since, until, anti_params)
+                if filter_source:
+                    anti += " AND e.source = ?"
+                    anti_params.append(event_source)
+                anti += ")"
+            last = None  # (created, id) of the last row seen: keyset paging, so every batch starts where it ended
+            while True:
+                params = []
+                sql = (f"SELECT t.id AS id, {created} AS created, {title} AS title, {display} AS display, "
+                       f"substr(t.{body}, 1, 300) AS preview, {stretch} AS stretch, {f1} AS fact1, {f2} AS fact2 "
+                       f"FROM {table} t WHERE 1=1" + range_filter(kind, since, until, params))
+                if kind == "events" and filter_source:
+                    sql += " AND t.source = ?"
+                    params.append(event_source)
+                sql += anti
+                params += anti_params
+                if last is not None:            # NULL times sort first, then by id
+                    if last[0] is None:
+                        sql += f" AND ({created} IS NOT NULL OR t.id > ?)"
+                        params.append(last[1])
+                    else:
+                        sql += f" AND ({created} > ? OR ({created} = ? AND t.id > ?))"
+                        params += [last[0], last[0], last[1]]
+                sql += f" ORDER BY {created}, t.id LIMIT ?"
+                batch = conn.execute(sql, params + [BROWSE_BATCH]).fetchall()
+                for r in batch:
+                    yield (r["created"] or "", kind, r["id"]), r
+                if len(batch) < BROWSE_BATCH:
+                    return
+                last = (batch[-1]["created"], batch[-1]["id"])
+
+        out, seen = [], set()
+        for (_, kind, id_), r in heapq.merge(*(rows(k) for k in kinds), key=lambda x: x[0]):
+            if r["stretch"]:
+                if r["stretch"] in seen:
+                    continue              # one hit per stretch
+                seen.add(r["stretch"])
+            out.append(Hit(kind, id_, r["created"], r["title"], r["display"], None, r["preview"],
+                           r["fact1"], r["fact2"], None, browsed=True))
+            if len(out) > offset + limit:
+                break
+        notes = []
+        if {"screen", "events"} & set(kinds) and has_table(conn, "meta") and (
+                c := conn.execute("SELECT value FROM meta WHERE key='screen_cutoff'").fetchone()):
+            notes.append(f"(search covers screen activity up to {local(c[0]):%Y-%m-%d %H:%M}; "
+                         "timeline() shows it live)")
+    return SearchResult(hits=out[offset:offset + limit], more=len(out) > offset + limit, notes=notes)
 
 
 def excerpt(hit, markers=ATLAS_MARKERS):
