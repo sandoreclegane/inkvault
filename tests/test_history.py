@@ -21,9 +21,9 @@ class FakeModel:
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("INKVAULT_HOME", str(tmp_path / "vault"))
-    from inkvault import embed, server
+    from inkvault import embed, retrieval
     monkeypatch.setattr(embed, "load_model", FakeModel)
-    monkeypatch.setattr(server, "_model", None)
+    monkeypatch.setattr(retrieval, "_model", None)
     return tmp_path
 
 
@@ -333,7 +333,7 @@ def test_pages_are_one_per_address_per_local_day(home, monkeypatch):
         ("https://x.example/reset/…", 1), ("https://x.example/reset/…", 1)]
     assert search_rows("SELECT COUNT(*), COUNT(DISTINCT page_id) FROM visits") == [(5, 4)]
     assert all(pid.startswith("web:") and len(pid) == 20 for (pid,) in search_rows("SELECT id FROM pages"))
-    assert search_rows("SELECT key FROM meta") == [("timezone",)]
+    assert search_rows("SELECT key FROM meta ORDER BY key") == [("built",), ("timezone",)]
 
 
 def test_the_title_observed_last_wins_over_a_later_visit_from_another_profile(home, monkeypatch):
@@ -385,7 +385,7 @@ def test_with_nothing_left_to_embed_the_old_vectors_go(home, monkeypatch):
 
 
 def test_an_old_vault_without_browser_tables_still_indexes(home):
-    from inkvault import export, index, paths
+    from inkvault import export, index
     db = export.open_vault()
     db.execute("DROP TABLE browser_visits")
     db.commit()
@@ -508,15 +508,15 @@ def test_the_tools_refuse_while_a_removal_is_unfinished(home, monkeypatch):
 
 
 def test_a_tool_whose_files_were_replaced_while_it_worked_asks_again(home, monkeypatch):
-    from inkvault import paths, server
+    from inkvault import paths, retrieval, server
     web_vault(home, monkeypatch)
-    real = server.keyword_ranked
+    real = retrieval.keyword_ranked
 
     def slow(*a, **k):
         rows = real(*a, **k)
         paths.vectors().write_bytes(b"replaced")  # stands in for a search build publishing new files meanwhile
         return rows
-    monkeypatch.setattr(server, "keyword_ranked", slow)
+    monkeypatch.setattr(retrieval, "keyword_ranked", slow)
     assert server.search_memories("backoff", mode="keyword") == server.CHANGED
 
 
@@ -531,7 +531,7 @@ def test_the_dashboard_counts_pages_opened_here_and_lists_browser_sites(home, mo
     assert data["days"][day]["pages"] == 1 and data["days"][day]["hours"]
     assert data["web_sites"] == {day: {"docs.example.com": 1}}
     page = dashboard.build().read_text(encoding="utf-8")
-    assert 'id="web_sites"' in page and "Pages opened" in page
+    assert '"web_sites"' in page
 
 
 def material_db(with_web=True):
@@ -700,7 +700,7 @@ def test_commands_that_write_wait_while_another_process_holds_the_lock(home, mon
     from inkvault import browsers, cli, paths
     chrome(home, monkeypatch, "Default")
     with holder(paths.home()):
-        for argv in (["index"], ["digest"], ["dashboard", "--no-open"], ["sync"],
+        for argv in (["index"], ["digest"], ["sync"],
                      ["browsers", "--skip-site", "x.example"], ["browsers", "--yes", "chrome/Default"]):
             assert cli.main(argv) == 1, argv
     assert browsers.load_choices() == {"profiles": {}, "skip_sites": []}  # nothing was changed

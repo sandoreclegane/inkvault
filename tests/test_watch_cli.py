@@ -1,6 +1,5 @@
 """The watch command (spec §3, §7): preview before recording, truthful install and uninstall, cooperative stop."""
 import json
-import os
 import sys
 
 import pytest
@@ -164,7 +163,7 @@ def test_install_removes_a_task_that_reads_back_wrong(win, monkeypatch, capsys):
 
 
 def test_install_asks_about_messaging_and_chrome(win):
-    from inkvault import paths, screen, watch
+    from inkvault import paths, watch
     asked = []
     watch.install(ask=lambda q: asked.append(q) or "messag" in q.lower())
     d = json.loads(paths.screen_file().read_text())

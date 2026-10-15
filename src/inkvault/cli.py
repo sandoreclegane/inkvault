@@ -6,7 +6,7 @@
     inkvault browsers    choose which browser profiles are yours, and sites never to keep
     inkvault index       rebuild keyword + meaning search
     inkvault digest      write per-day digests with a local Ollama model
-    inkvault dashboard   rebuild and open the Memory Atlas
+    inkvault dashboard   open the Memory Atlas (search and charts), on this computer only
     inkvault serve       run the MCP server (for Claude Code, Codex, Hermes, …)
     inkvault status      what's in the vault and where it lives
     inkvault schedule    refresh and back up the vault every night (`--off` to stop)
@@ -18,7 +18,6 @@ import json
 import os
 import sqlite3
 import sys
-import webbrowser
 
 from . import __version__
 
@@ -37,12 +36,6 @@ Connect it to your AI tools (they read the vault; nothing leaves this machine):
   Codex (~/.codex/config.toml), Hermes and other MCP clients: run this command over stdio
     uvx --from {REPO} inkvault serve
 """
-
-
-def open_dashboard(path):
-    if path:
-        print(f"opening {path}")
-        webbrowser.open(path.as_uri())
 
 
 @contextlib.contextmanager
@@ -118,8 +111,12 @@ def rescue(args):
         digest.run(model=args.model)
     path = dashboard.build()
     print(mcp_instructions())
-    if not args.no_open:
-        open_dashboard(path)
+    if path and not args.no_open:
+        from . import atlasserve
+        atlasserve.start_detached()  # the rescue holds the nightly lock; the helper must not run inside it
+        print("Opening the Memory Atlas in your browser.")
+    if sys.platform == "win32":
+        print("Tip: `inkvault dashboard --shortcut` adds an InkVault Atlas icon.")
     return 0
 
 
@@ -133,8 +130,10 @@ def partial_rescue(args):
     index.build()
     path = dashboard.build()
     print("\nThis is a partial rescue. Run `inkvault rescue` again anytime to continue where it stopped.")
-    if not args.no_open:
-        open_dashboard(path)
+    if path and not args.no_open:
+        from . import atlasserve
+        atlasserve.start_detached()  # the rescue holds the nightly lock; the helper must not run inside it
+        print("Opening the Memory Atlas in your browser.")
     return 130  # the conventional exit code for "stopped with Ctrl+C"
 
 
@@ -431,8 +430,15 @@ def cmd_status(_args):
     if paths.rebuild_marker().exists():
         print("search: being rebuilt after something was removed; run `inkvault index`")
     print(f"search index: {'ready' if paths.search_db().exists() else 'not built'}; "
-          f"digests: {'yes' if paths.digests_db().exists() else 'none'}; "
-          f"dashboard: {paths.dashboard() if paths.dashboard().exists() else 'not built'}")
+          f"digests: {'yes' if paths.digests_db().exists() else 'none'}")
+    try:
+        data = json.loads(paths.dashboard().read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("not an Atlas file")
+        built = data.get("built", "?")
+        print(f"atlas: built {built} (open it with `inkvault dashboard`)")
+    except (OSError, ValueError):
+        print("atlas: not built yet (`inkvault dashboard` builds it)")
     from . import watch
     for line in watch.status_lines():
         print(line)
@@ -488,8 +494,9 @@ def main(argv=None):
     d = sub.add_parser("digest", help="per-day digests with a local Ollama model")
     d.add_argument("--model", default=None, help="Ollama model (default qwen3.5:4b)")
     d.add_argument("--redo", action="store_true", help="rewrite every day (after changing model)")
-    b = sub.add_parser("dashboard", help="rebuild and open the Memory Atlas")
-    b.add_argument("--no-open", action="store_true")
+    b = sub.add_parser("dashboard", help="open the Memory Atlas (a live page, on this computer only)")
+    b.add_argument("--no-open", action="store_true", help="start it without opening the browser")
+    b.add_argument("--shortcut", action="store_true", help="Windows: add an InkVault Atlas icon to the desktop and Start menu")
     sub.add_parser("serve", help="run the MCP server over stdio")
     sub.add_parser("status", help="what's in the vault and where it lives")
     s = sub.add_parser("schedule", help="refresh and back up the vault every night")
@@ -562,14 +569,10 @@ def dispatch(args):
         with locked("digest", "no digests were written.") as ok:
             return (0 if digest.run(model=args.model, redo=args.redo) else 1) if ok else 1
     if args.cmd == "dashboard":
-        from . import dashboard
-        with locked("dashboard", "the dashboard wasn't rebuilt.") as ok:
-            if not ok:
-                return 1
-            path = dashboard.build()
-        if not args.no_open:
-            open_dashboard(path)
-        return 0 if path else 1
+        from . import atlasserve
+        if args.shortcut:
+            return atlasserve.make_shortcut()
+        return atlasserve.launch(open_browser=not args.no_open)
     if args.cmd == "serve":
         from . import server
         server.run()

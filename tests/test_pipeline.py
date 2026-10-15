@@ -63,12 +63,11 @@ def test_timeline_and_stats(vault):
     assert "snippets: 1" in server.memory_stats()
 
 
-def test_dashboard_detects_projects_and_embeds_no_template_marker(vault):
+def test_atlas_data_detects_projects(vault):
     from inkvault import dashboard, index
     index.build()
     out = dashboard.build()
     html = out.read_text(encoding="utf-8")
-    assert "/*DATA*/null" not in html
     assert '"Harbor Project"' in html  # recurring title phrase became a project
     assert '"Audit"' not in html.split('"themes":')[1].split("]")[0]  # one-off words did not
 
@@ -204,35 +203,42 @@ def test_embedding_never_uses_worker_processes(vault, monkeypatch):
     assert paths.vectors().exists()
 
 
-class SlowPiecesOS:
-    """500 events at 20 ms each: only a time budget can end a run quickly."""
+class BudgetPiecesOS:
+    """Enough fictional events to test partial exports and resumption."""
     base = "http://localhost:1"
 
     def get(self, path, timeout=60):
-        import time
         if path.endswith("identifiers"):
             return {"iterable": [{"id": f"e{i}"} for i in range(500)]} if "workstream" in path else {"iterable": []}
         if path.startswith("/workstream_event/"):
-            time.sleep(0.02)
             return {"id": path.rsplit("/", 1)[1], "created": {"value": "2026-01-01T00:00:00Z"}}
         return {"iterable": []}
 
 
-def test_export_stops_cleanly_at_its_time_budget(tmp_path, monkeypatch, capsys):
+@pytest.fixture
+def budget_export(monkeypatch):
     import time
+    from types import SimpleNamespace
+    from inkvault import export
+    # Start, empty snippets, events entry, one result just before the deadline, then the exact deadline.
+    # Replace only export's clock reference; worker threads and other modules keep the real time module.
+    ticks = iter([0.0, 0.0, 0.0, 0.299, 0.3])
+    monkeypatch.setattr(export, "time", SimpleNamespace(monotonic=lambda: next(ticks, 0.3), time=time.time))
+    monkeypatch.setattr(export.PiecesOS, "find", staticmethod(lambda: (BudgetPiecesOS(), "12.0")))
+
+
+def test_export_stops_cleanly_at_its_time_budget(tmp_path, monkeypatch, capsys, budget_export):
     monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
     from inkvault import export
-    monkeypatch.setattr(export.PiecesOS, "find", staticmethod(lambda: (SlowPiecesOS(), "12.0")))
-    start = time.time()
     assert export.run(budget_seconds=0.3) == "partial"
-    assert time.time() - start < 3
     assert "export stopped after its time budget; the next run continues where it stopped" in capsys.readouterr().out
     check = sqlite3.connect(tmp_path / "vault.db")
     n = check.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-    assert 0 < n < 500  # progress was committed, and it did not run to the end
+    assert n == 1  # the pre-deadline record was committed; nothing was saved at/after the deadline
     # the next run continues where it stopped, and with no budget it finishes
     assert export.run() is True
     assert check.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 500
+    check.close()
 
 
 def fake_export(monkeypatch, nightly, result="partial"):
@@ -296,10 +302,9 @@ def test_the_piecesos_wait_is_capped_by_the_remaining_budget(tmp_path, monkeypat
     assert waits and waits[0] <= 90 and waits[0] < nightly.PIECES_WAIT
 
 
-def test_export_records_last_export_at_the_end_and_whether_it_was_partial(tmp_path, monkeypatch):
+def test_export_records_last_export_at_the_end_and_whether_it_was_partial(tmp_path, monkeypatch, budget_export):
     monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
     from inkvault import export
-    monkeypatch.setattr(export.PiecesOS, "find", staticmethod(lambda: (SlowPiecesOS(), "12.0")))
     assert export.run(budget_seconds=0.3) == "partial"
     meta = dict(sqlite3.connect(tmp_path / "vault.db").execute("SELECT key, value FROM meta"))
     assert meta["last_export"] and meta["last_export_partial"] == "1"
@@ -308,11 +313,10 @@ def test_export_records_last_export_at_the_end_and_whether_it_was_partial(tmp_pa
     assert meta["last_export_partial"] == "0"
 
 
-def test_status_says_when_the_last_export_was_partial(tmp_path, monkeypatch, capsys):
+def test_status_says_when_the_last_export_was_partial(tmp_path, monkeypatch, capsys, budget_export):
     monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
     monkeypatch.setenv("INKVAULT_PIECES_PORTS", "1")
     from inkvault import cli, export
-    monkeypatch.setattr(export.PiecesOS, "find", staticmethod(lambda: (SlowPiecesOS(), "12.0")))
     export.run(budget_seconds=0.3)
     monkeypatch.setattr(export.PiecesOS, "find", staticmethod(lambda: (None, None)))
     assert cli.main(["status"]) == 0
@@ -396,7 +400,7 @@ def test_dashboard_topics_card_data(vault):
     assert len(data["topic_docs"]) == 7 and all(found == [0] for _, found in data["topic_docs"])
     assert [day for day, _ in data["topic_docs"]] == sorted(day for day, _ in data["topic_docs"])
     html = dashboard.build().read_text(encoding="utf-8")
-    assert '"bursts":["harbor launch"]' in html and "/*DATA*/null" not in html
+    assert '"bursts":["harbor launch"]' in html
 
 
 def test_dashboard_without_tags_or_with_an_old_index_has_no_topics(vault):
@@ -426,3 +430,42 @@ def test_topic_docs_index_ongoing_then_bursts(monkeypatch):
     assert ["2026-01-05", [0]] in docs and ["2026-08-02", [1]] in docs
     assert ["2026-08-01", [0, 1]] in docs  # a summary with both topics
     assert len(docs) == 12
+
+
+def test_the_atlas_data_is_json_written_atomically(vault):
+    import json
+    from inkvault import dashboard, index, paths
+    index.build()
+    out = dashboard.build()
+    assert out == paths.dashboard() and out.name == "atlas.json"
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert {"days", "themes", "topics", "digests", "built"} <= set(data)
+    assert not list(paths.home().glob("*.tmp"))
+
+
+def test_the_first_build_removes_the_old_static_page_once(vault, capsys):
+    from inkvault import dashboard, index, paths
+    index.build()
+    old = paths.home() / "dashboard.html"
+    old.write_text("<html>old</html>", encoding="utf-8")
+    dashboard.build()
+    assert not old.exists() and "The Memory Atlas is live now" in capsys.readouterr().out
+    dashboard.build()
+    assert "The Memory Atlas is live now" not in capsys.readouterr().out
+
+
+def test_a_leftover_dashboard_html_that_cannot_be_removed_does_not_fail_the_build(vault, monkeypatch):
+    from pathlib import Path
+    from inkvault import dashboard, index, paths
+    index.build()
+    old = paths.home() / "dashboard.html"
+    old.write_text("<html>old</html>", encoding="utf-8")
+    real = Path.unlink
+
+    def locked(self, *a, **k):
+        if self == old:
+            raise PermissionError("in use")
+        return real(self, *a, **k)
+    monkeypatch.setattr(Path, "unlink", locked)
+    assert dashboard.build() == paths.dashboard()
+    assert old.exists()

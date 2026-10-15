@@ -61,9 +61,11 @@ a dashboard of what you have. Run the same command again later and it picks up w
   websites, people), saved as the raw records Pieces returned, so nothing is lost to interpretation. One SQLite file.
 - **Search for your AI tools**: an MCP server with `search_memories` (keyword + meaning, merged), `timeline`
   ("what was I doing in March?"), `get_memory`, and `memory_stats`.
-- **Memory Atlas**: a dashboard of your year. Active hours per day (hover a day for what it was about), when you work,
-  how your projects connect, projects over time, topics over time (from Pieces' own topic tags: ongoing interests
-  and short bursts), top apps and sites. Every chart has a table view.
+- **Memory Atlas**: open it with `inkvault dashboard` (or the **InkVault Atlas** icon from `inkvault dashboard --shortcut`
+  on Windows). It shows your year: active hours per day (hover a day for what it was about), when you work, how your
+  projects connect, projects and topics over time, top apps and sites. Every chart has a table view. A **Search** view
+  finds things across your vault and opens the original in a reader. It runs on this computer only (127.0.0.1, a
+  private link, stops when idle) and needs no internet.
 - **Your Claude Code, Codex and Claude desktop sessions**: your prompts and the replies, side by side with your
   Pieces history, searchable as chats (named like `Claude Code · project: title`), and part of the timeline, the
   digests and the dashboard.
@@ -308,8 +310,8 @@ This is your screen history, your chats, your browsing and your code. InkVault s
 - No telemetry, no accounts, no cloud.
 - InkVault itself does not upload your archive. When you connect an AI client through MCP, memories returned to that
   client may be sent to its model provider under that client's settings. Choose your client and settings accordingly.
-- Two things are downloaded: the search model (~130 MB from Hugging Face, once)
-  and the dashboard's chart library (from cdnjs, when you open the page).
+- One thing is downloaded: the search model (~130 MB from Hugging Face, once). The Atlas makes no network requests;
+  its chart library (ECharts) is bundled, so it works offline.
 - Digests use Ollama on your own machine. Skip them with `--no-digest`.
 - From Claude Code and Codex sessions, InkVault keeps what you typed, what the assistant replied and session titles.
   Claude Code's replies include its tool calls, so a file it wrote is kept as written. Tool output (files it read,

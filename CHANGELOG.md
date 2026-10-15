@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.1 — Searchable Memory Atlas
+
+- **Search in the Atlas.** Type what you remember; results come from every source in your vault (conversations,
+  Pieces summaries and captures, snippets, screen capture, browser history), and a reader opens the original —
+  chats open at the matching message, with earlier and later messages a click away.
+- **The Atlas is live now.** `inkvault dashboard` starts a small private helper on this computer and opens the
+  Atlas in your browser. It listens on 127.0.0.1 only, answers only the tab it opened, never changes your vault,
+  and stops by itself 30 minutes after you close the tab. On Windows, `inkvault dashboard --shortcut` adds an
+  **InkVault Atlas** icon.
+- **Behaviour change:** the static `dashboard.html` is gone (the first update removes it). The Atlas's data is now
+  `atlas.json` in your InkVault folder, rebuilt nightly as before.
+- **New look:** Ink & Light, with the InkVault mark; charts work offline (ECharts 5.5.0 is bundled).
+- MCP tools answer exactly as before.
+
 ## 0.3.0 — screen capture
 
 - **`inkvault watch`** (Windows): a timeline of the windows you use, and the text of windows in apps you choose.

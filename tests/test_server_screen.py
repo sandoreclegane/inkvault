@@ -13,9 +13,9 @@ class FakeModel:
 @pytest.fixture
 def vault(tmp_path, monkeypatch):
     monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
-    from inkvault import embed, export, server
+    from inkvault import embed, export, retrieval
     monkeypatch.setattr(embed, "load_model", FakeModel)
-    monkeypatch.setattr(server, "_model", None)
+    monkeypatch.setattr(retrieval, "_model", None)
     v = export.open_vault()
     v.executemany("INSERT INTO screen_stretches VALUES (?,?,?,?,?)", [
         ("screen:a", S(9), S(9, 30), "Discord.exe", "Retry chat"),

@@ -1,166 +1,11 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Memory Atlas</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js"></script>
-<style>
-:root {
-  color-scheme: light;
-  --page: #f9f9f7; --surface-1: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
-  --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10); --series-1: #2a78d6;
-  --empty: #f0efec;
-  --seq: #cde2fb,#9ec5f4,#6da7ec,#3987e5,#256abf,#184f95,#0d366b;
-}
-@media (prefers-color-scheme: dark) {
-  :root:where(:not([data-theme="light"])) {
-    color-scheme: dark;
-    --page: #0d0d0d; --surface-1: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
-    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10); --series-1: #3987e5;
-    --empty: #232322;
-    --seq: #104281,#184f95,#1c5cab,#2a78d6,#5598e7,#86b6ef,#b7d3f6;
-  }
-}
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --page: #0d0d0d; --surface-1: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
-  --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10); --series-1: #3987e5;
-  --empty: #232322;
-  --seq: #104281,#184f95,#1c5cab,#2a78d6,#5598e7,#86b6ef,#b7d3f6;
-}
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--page); color: var(--ink);
-  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-main { max-width: 1180px; margin: 0 auto; padding: 24px 16px 64px; }
-h1 { font-size: 22px; font-weight: 600; margin: 0 0 2px; }
-.sub { color: var(--ink-2); margin: 0 0 20px; }
-.filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 20px; }
-.filters button, .filters input { font: inherit; color: var(--ink); background: var(--surface-1);
-  border: 1px solid var(--ring); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
-.filters button[aria-pressed="true"] { font-weight: 600; border-color: var(--series-1); }
-.filters button[aria-pressed="true"]::before { content: "✓ "; }
-.filters .custom { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--ink-2); margin-left: 8px; }
-.filters input { min-width: 0; max-width: 100%; }
-.tiles { display: grid; grid-template-columns: 1.4fr repeat(5, 1fr); gap: 12px; margin-bottom: 16px; }
-.tile, .card { background: var(--surface-1); border: 1px solid var(--ring); border-radius: 12px; padding: 16px; }
-.tile .label { color: var(--ink-2); font-size: 13px; }
-.tile .value { font-size: 26px; font-weight: 600; margin-top: 4px; }
-.tile.hero .value { font-size: 48px; line-height: 1.1; }
-.tile .note { color: var(--muted); font-size: 12px; margin-top: 2px; }
-.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.card { margin-bottom: 16px; min-width: 0; }
-.card h2 { font-size: 15px; font-weight: 600; margin: 0; }
-.card .desc { color: var(--ink-2); font-size: 13px; margin: 2px 0 10px; }
-.head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
-.head button { font: inherit; font-size: 12px; color: var(--ink-2); background: none; border: 1px solid var(--ring);
-  border-radius: 6px; padding: 3px 8px; cursor: pointer; white-space: nowrap; }
-.chart { width: 100%; }
-.card h3.group { font-size: 13px; font-weight: 600; color: var(--ink-2); margin: 12px 0 0; }
-.multiples { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
-.multiples .mini h3 { font-size: 13px; font-weight: 600; margin: 0; }
-.multiples .mini .total { color: var(--ink-2); font-size: 12px; }
-.tablewrap { max-height: 320px; overflow: auto; margin-top: 8px; }
-table { border-collapse: collapse; width: 100%; font-size: 13px; }
-th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--grid); }
-td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-.empty { color: var(--muted); padding: 24px 0; text-align: center; }
-footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
-@media (max-width: 820px) { .grid2 { grid-template-columns: 1fr; } .tiles { grid-template-columns: 1fr 1fr; } .tile.hero { grid-column: 1 / -1; } .filters .custom { margin-left: 0; } }
-</style>
-</head>
-<body>
-<main>
-  <h1>Memory Atlas</h1>
-  <p class="sub" id="sub"></p>
-
-  <div class="filters" role="group" aria-label="Date range">
-    <button data-range="all">All time</button>
-    <button data-range="30">Last 30 days</button>
-    <button data-range="90">Last 90 days</button>
-    <button data-range="365">Last year</button>
-    <span class="custom">from <input type="date" id="from"> to <input type="date" id="to"></span>
-  </div>
-
-  <div class="tiles" id="tiles"></div>
-
-  <section class="card" data-table="calendar">
-    <div class="head"><div><h2>Active hours per day</h2>
-      <p class="desc">How many different hours of each day you were on the computer (Pieces captures, screen capture, session summaries, chats, pages opened in a browser). Hover a day for what it was about.</p></div>
-      <button class="tbl">Show table</button></div>
-    <div class="chart" id="calendar" style="height:200px"></div>
-  </section>
-
-  <div class="grid2">
-    <section class="card" data-table="rhythm">
-      <div class="head"><div><h2>When you work</h2>
-        <p class="desc">Share of days you were active in each hour, by weekday (local time).</p></div>
-        <button class="tbl">Show table</button></div>
-      <div class="chart" id="rhythm" style="height:360px"></div>
-    </section>
-    <section class="card" data-table="graph">
-      <div class="head"><div><h2>How projects connect</h2>
-        <p class="desc">Projects that come up in the same session. Bigger dot = more sessions; thicker line = more shared sessions.</p></div>
-        <button class="tbl">Show table</button></div>
-      <div class="chart" id="graph" style="height:360px"></div>
-    </section>
-  </div>
-
-  <section class="card" data-table="themes">
-    <div class="head"><div><h2>Projects over time</h2>
-      <p class="desc">Sessions per week that mention each project, found automatically in your session and chat titles. To choose your own, write <code>Name = pattern</code> lines in <code>themes.txt</code> in your InkVault folder.</p></div>
-      <button class="tbl">Show table</button></div>
-    <div class="chart" id="themes" style="height:460px"></div>
-  </section>
-
-  <section class="card" data-table="topics" id="topics-card">
-    <div class="head"><div><h2>Topics over time</h2>
-      <p class="desc">Pieces' own topic tags on your sessions. Ongoing topics recur across months; bursts are concentrated in a few weeks. Each group has its own color scale.</p></div>
-      <button class="tbl">Show table</button></div>
-    <div id="topics-ongoing-box"><h3 class="group">Ongoing</h3><div class="chart" id="topics-ongoing"></div></div>
-    <div id="topics-bursts-box"><h3 class="group">Bursts</h3><div class="chart" id="topics-bursts"></div></div>
-    <p class="empty" id="topics-none" hidden>No tagged sessions in this range</p>
-  </section>
-
-  <section class="card" data-table="sources">
-    <div class="head"><div><h2>Activity by source</h2>
-      <p class="desc">Records per week from each source. Each panel has its own scale — compare shapes, not heights.</p></div>
-      <button class="tbl">Show table</button></div>
-    <div class="multiples" id="sources"></div>
-  </section>
-
-  <div class="grid2">
-    <section class="card" data-table="apps">
-      <div class="head"><div><h2>Top apps</h2><p class="desc">Pieces captures per app.</p></div>
-        <button class="tbl">Show table</button></div>
-      <div class="chart" id="apps" style="height:380px"></div>
-    </section>
-    <section class="card" data-table="sites">
-      <div class="head"><div><h2>Top sites seen by Pieces</h2><p class="desc">Screen captures per website (from Pieces' browser captures).</p></div>
-        <button class="tbl">Show table</button></div>
-      <div class="chart" id="sites" style="height:380px"></div>
-    </section>
-  </div>
-  <section class="card" data-table="screen_apps">
-    <div class="head"><div><h2>Screen time by app</h2><p class="desc">Minutes each app was in front, from screen capture.</p></div>
-      <button class="tbl">Show table</button></div>
-    <div class="chart" id="screen_apps" style="height:380px"></div>
-  </section>
-  <section class="card" data-table="web_sites">
-    <div class="head"><div><h2>Top sites opened in a browser</h2><p class="desc">Page visits per website, from the browser profiles you chose. Visits synced from your other devices aren't counted here.</p></div>
-      <button class="tbl">Show table</button></div>
-    <div class="chart" id="web_sites" style="height:380px"></div>
-  </section>
-
-  <footer id="foot"></footer>
-</main>
-
-<script>
-const DATA = /*DATA*/null;
+"use strict";
+// The Atlas view (spec §4.1): v0.3.0's charts, computing exactly what they did. The data now comes from the helper
+// (search.js calls Atlas.show) instead of being baked into the page, and Atlas.clear() empties everything when
+// something is forgotten (spec §4.4).
+let DATA = null;
 const SOURCES = [["captures", "Screen captures"], ["sessions", "Session summaries"], ["chats", "Chat messages"], ["pages", "Pages opened"]];
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const allDays = Object.keys(DATA.days);
-const FIRST = allDays[0], LAST = allDays[allDays.length - 1];
+let FIRST = null, LAST = null;
 
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 const fmt = n => n.toLocaleString();
@@ -173,7 +18,7 @@ const weekOf = iso => { const d = new Date(iso + "T00:00:00Z"); d.setUTCDate(d.g
 const bits = m => { let n = 0; for (; m; m &= m - 1) n++; return n; };
 const weeksBetween = (a, b) => { const out = []; for (let w = weekOf(a); w <= b; w = addDays(w, 7)) out.push(w); return out; };
 
-let range = {from: FIRST, to: LAST};
+let range = {from: null, to: null};
 const charts = {};
 const tables = {};  // chart id -> {head: [...], rows: [[...]]}
 
@@ -248,9 +93,9 @@ function renderCalendar(t) {
               formatter: p => {
                 const day = p.value[0], digest = DATA.digests[day], hl = DATA.highlights[day] || [];
                 const when = new Date(day + "T12:00:00").toLocaleDateString(undefined, {weekday: "long", month: "long", day: "numeric", year: "numeric"});
-                const story = digest ? `<div style="margin-top:6px;line-height:1.45">${esc(digest)}</div>`
-                  : hl.length ? `<div style="margin-top:6px;color:${t.ink2}">${hl.map(esc).join("<br>")}</div>` : "";
-                return `<b>${p.value[1]} active hours</b> <span style="color:${t.ink2}">· ${esc(when)}</span>${story}`;
+                const story = digest ? `<div class="tt-story">${esc(digest)}</div>`
+                  : hl.length ? `<div class="tt-story tt-muted">${hl.map(esc).join("<br>")}</div>` : "";
+                return `<b>${p.value[1]} active hours</b> <span class="tt-muted">· ${esc(when)}</span>${story}`;
               }},
     visualMap: {min: 0, max, calculable: false, orient: "horizontal", right: 0, bottom: 0, itemWidth: 10, itemHeight: 100,
                 inRange: {color: t.seq}, textStyle: {color: t.muted, fontSize: 11}, text: [String(max) + " h", "0"]},
@@ -281,7 +126,7 @@ function renderRhythm(t) {
   const hourName = h => h === 0 ? "12a" : h < 12 ? h + "a" : h === 12 ? "12p" : (h - 12) + "p";
   chart("rhythm").setOption({
     tooltip: {...tooltipBase(t), formatter: p => `<b>${p.value[2]}% of ${esc(WEEKDAYS[p.value[1]])}s</b><br>` +
-              `<span style="color:${t.ink2}">active at ${hourName(p.value[0])}</span>`},
+              `<span class="tt-muted">active at ${hourName(p.value[0])}</span>`},
     grid: {top: 8, left: 40, right: 8, bottom: 56},
     xAxis: {type: "category", data: [...Array(24).keys()].map(hourName), axisTick: {show: false},
             axisLine: {lineStyle: {color: t.axis}}, axisLabel: {color: t.muted, fontSize: 10, interval: 2}},
@@ -319,8 +164,8 @@ function renderGraph(t) {
     rows: edgesAll.sort((a, b) => b.value - a.value).map(e => [DATA.themes[e.source], DATA.themes[e.target], fmt(e.value)])};
   chart("graph").setOption({
     tooltip: {...tooltipBase(t), formatter: p => p.dataType === "edge"
-      ? `<b>${fmt(p.data.value)} shared sessions</b><br><span style="color:${t.ink2}">${esc(DATA.themes[p.data.source])} + ${esc(DATA.themes[p.data.target])}</span>`
-      : `<b>${fmt(p.data.value)} sessions</b><br><span style="color:${t.ink2}">${esc(p.data.name)}</span>`},
+      ? `<b>${fmt(p.data.value)} shared sessions</b><br><span class="tt-muted">${esc(DATA.themes[p.data.source])} + ${esc(DATA.themes[p.data.target])}</span>`
+      : `<b>${fmt(p.data.value)} sessions</b><br><span class="tt-muted">${esc(p.data.name)}</span>`},
     series: [{type: "graph", layout: "force", roam: true, draggable: true, data: nodes, links: edges,
               force: {repulsion: 170, edgeLength: [50, 130], gravity: 0.3},
               emphasis: {focus: "adjacency", lineStyle: {color: t.s1}}}],
@@ -352,7 +197,7 @@ function drawWeekly(id, names, {weeks, grid, order}, t) {
   chart(id).resize();
   chart(id).setOption({
     tooltip: {...tooltipBase(t), formatter: p => `<b>${fmt(p.value[2] || 0)} sessions</b><br>` +
-              `<span style="color:${t.ink2}">${esc(names[order[p.value[1]]])} · week of ${esc(weeks[p.value[0]])}</span>`},
+              `<span class="tt-muted">${esc(names[order[p.value[1]]])} · week of ${esc(weeks[p.value[0]])}</span>`},
     grid: {top: 8, left: 170, right: 12, bottom: 56},
     xAxis: {type: "category", data: weeks.map(w => new Date(w + "T12:00:00").toLocaleDateString(undefined, {month: "short", day: "numeric"})),
             axisTick: {show: false}, axisLine: {lineStyle: {color: t.axis}}, axisLabel: {color: t.muted, fontSize: 10}},
@@ -415,7 +260,7 @@ function renderSources(t) {
     document.getElementById("tot-" + k).textContent = fmt(sums[k].reduce((a, b) => a + b, 0)) + " in range";
     chart("src-" + k).setOption({
       tooltip: {...tooltipBase(t), trigger: "axis", axisPointer: {type: "line", lineStyle: {color: t.axis}},
-                formatter: ps => `<b>${fmt(ps[0].value)}</b><br><span style="color:${t.ink2}">week of ${esc(ps[0].axisValue)}</span>`},
+                formatter: ps => `<b>${fmt(ps[0].value)}</b><br><span class="tt-muted">week of ${esc(ps[0].axisValue)}</span>`},
       grid: {top: 8, left: 4, right: 8, bottom: 20, containLabel: true},
       xAxis: {type: "category", data: labels, boundaryGap: false, axisTick: {show: false},
               axisLine: {lineStyle: {color: t.axis}}, axisLabel: {color: t.muted, fontSize: 10, interval: "auto", hideOverlap: true}},
@@ -437,7 +282,7 @@ function renderBars(id, byDay, t, noun) {
   const el = document.getElementById(id);
   if (!top.length) { chart(id).clear(); el.dataset.empty = "1"; return; }
   chart(id).setOption({
-    tooltip: {...tooltipBase(t), formatter: p => `<b>${fmt(p.value)}</b><br><span style="color:${t.ink2}">${esc(p.name)}</span>`},
+    tooltip: {...tooltipBase(t), formatter: p => `<b>${fmt(p.value)}</b><br><span class="tt-muted">${esc(p.name)}</span>`},
     grid: {top: 4, left: 8, right: 56, bottom: 4, containLabel: true},
     xAxis: {type: "value", show: false},
     yAxis: {type: "category", data: top.map(([k]) => k), axisTick: {show: false}, axisLine: {lineStyle: {color: t.axis}},
@@ -472,9 +317,13 @@ function render() {
   document.getElementById("sub").textContent =
     `Everything your vault holds, ${range.from} to ${range.to}. Private: built from files on this PC.`;
   renderTiles();
-  renderCalendar(t); renderRhythm(t); renderGraph(t); renderThemes(t); renderTopics(t); renderSources(t);
-  renderBars("apps", DATA.apps, t, "App"); renderBars("sites", DATA.sites, t, "Site"); renderBars("web_sites", DATA.web_sites || {}, t, "Site");
-  renderBars("screen_apps", DATA.screen_apps || {}, t, "App");
+  if (!window.echarts) {  // the bundled library failed to load: say so where the charts would be; search still works
+    document.querySelectorAll(".chart").forEach(el => { el.textContent = "Charts couldn't load. Search still works."; });
+  } else {
+    renderCalendar(t); renderRhythm(t); renderGraph(t); renderThemes(t); renderTopics(t); renderSources(t);
+    renderBars("apps", DATA.apps, t, "App"); renderBars("sites", DATA.sites, t, "Site"); renderBars("web_sites", DATA.web_sites || {}, t, "Site");
+    renderBars("screen_apps", DATA.screen_apps || {}, t, "App");
+  }
   document.querySelectorAll(".card[data-table]").forEach(renderTableFor);
   document.getElementById("foot").textContent =
     `Built ${DATA.built} by InkVault from your local vault. Nothing on this page was sent anywhere.`;
@@ -495,25 +344,48 @@ const presets = {
   all: () => [FIRST, LAST], 30: () => [addDays(LAST, -29), LAST], 90: () => [addDays(LAST, -89), LAST],
   365: () => [addDays(LAST, -364), LAST],
 };
-document.querySelectorAll("[data-range]").forEach(b => b.addEventListener("click", () => setRange(...presets[b.dataset.range](), b.dataset.range)));
-for (const id of ["from", "to"]) Object.assign(document.getElementById(id), {min: FIRST, max: LAST});
-for (const id of ["from", "to"]) document.getElementById(id).addEventListener("change", () => {
-  const f = document.getElementById("from").value, t = document.getElementById("to").value;
-  if (f && t && f <= t) setRange(f, t, null);
-});
-document.querySelectorAll(".card .tbl").forEach(btn => btn.addEventListener("click", () => {
-  const card = btn.closest(".card");
-  let wrap = card.querySelector(".tablewrap");
-  if (wrap) { wrap.remove(); btn.textContent = "Show table"; return; }
-  wrap = document.createElement("div"); wrap.className = "tablewrap"; card.append(wrap);
-  btn.textContent = "Hide table"; renderTableFor(card);
-}));
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+let bound = false;
+function bind() {
+  if (bound) return;
+  bound = true;
+  document.querySelectorAll("[data-range]").forEach(b => b.addEventListener("click", () => setRange(...presets[b.dataset.range](), b.dataset.range)));
+  for (const id of ["from", "to"]) document.getElementById(id).addEventListener("change", () => {
+    const f = document.getElementById("from").value, t = document.getElementById("to").value;
+    if (f && t && f <= t) setRange(f, t, null);
+  });
+  document.querySelectorAll(".card .tbl").forEach(btn => btn.addEventListener("click", () => {
+    const card = btn.closest(".card");
+    let wrap = card.querySelector(".tablewrap");
+    if (wrap) { wrap.remove(); btn.textContent = "Show table"; return; }
+    wrap = document.createElement("div"); wrap.className = "tablewrap"; card.append(wrap);
+    btn.textContent = "Hide table"; if (DATA) renderTableFor(card);
+  }));
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (DATA) render(); });
+}
 
-let saved = null;
-try { saved = JSON.parse(localStorage.getItem("inkvault-range")); } catch (e) {}
-if (saved && saved.preset && presets[saved.preset]) setRange(...presets[saved.preset](), saved.preset);
-else setRange(FIRST, LAST, "all");
-</script>
-</body>
-</html>
+function show(data) {
+  clear();
+  DATA = data;
+  const days = Object.keys(DATA.days);
+  FIRST = days[0]; LAST = days[days.length - 1];
+  for (const id of ["from", "to"]) Object.assign(document.getElementById(id), {min: FIRST, max: LAST});
+  bind();
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem("inkvault-range")); } catch (e) {}
+  if (saved && saved.preset && presets[saved.preset]) setRange(...presets[saved.preset](), saved.preset);
+  else setRange(FIRST, LAST, "all");
+}
+
+// Forgetting (spec §4.4): nothing drawn from the old data may stay on screen, including an open tooltip.
+function clear() {
+  for (const [id, c] of Object.entries(charts)) { c.dispose(); delete charts[id]; }
+  resizer.disconnect();
+  for (const k of Object.keys(tables)) delete tables[k];
+  DATA = null; FIRST = null; LAST = null;
+  for (const id of ["tiles", "sources", "foot", "sub"]) document.getElementById(id).replaceChildren();
+  document.querySelectorAll(".chart").forEach(el => el.replaceChildren());
+  document.querySelectorAll(".tablewrap").forEach(w => w.remove());
+  document.querySelectorAll(".card .tbl").forEach(b => { b.textContent = "Show table"; });
+}
+
+window.Atlas = {show, clear};

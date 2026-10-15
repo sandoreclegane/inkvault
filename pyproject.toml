@@ -1,6 +1,6 @@
 [project]
 name = "inkvault"
-version = "0.3.0"
+version = "0.3.1"
 description = "A local long-term memory: rescue your Pieces history, keep every Claude Code and Codex session and your browser history, and search it all from any MCP client."
 readme = "README.md"
 license = "MIT"
