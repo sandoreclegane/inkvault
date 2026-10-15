@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — Atlas Daily Light
+## 0.3.2 — Atlas Daily Light
 
 - **A little light.** The Atlas opens with a short daily quotation from a curated collection of 32 public-domain
   passages, each checked word for word against a Project Gutenberg edition. The quote is picked by your local

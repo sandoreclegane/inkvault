@@ -64,3 +64,41 @@ Focused run: `.venv/Scripts/python.exe -m pytest tests/test_retrieval.py tests/t
 ## Disposition
 
 Address the three P2 findings and correct quote metadata before calling the update ready. Re-review fixes, run the required final checks, and inspect both themes before release. This review does not authorize push, installation or release.
+
+## Recheck
+
+Reviewed October 15, 2026 at `57c0b61` (fix commits `e6688b9` and `3fe414d`), against the original reviewed head `6632c05`. This section supersedes the original disposition only to the extent stated below. No implementation changes were made.
+
+### [P2] Existing search indexes regress to a slow correlated scan until rebuilt
+
+Location: `src/inkvault/retrieval.py:475-486`, especially the correlated `NOT EXISTS` at 481; index creation occurs only in `src/inkvault/index.py:119`.
+
+Scenario: update an existing v0.3.1 installation and browse All sources or Screen before the next search-index rebuild. That existing search.db has no events_stretch index. The new suppression query probes events for each candidate screen stretch; without the new index it repeatedly scans matching events. Existing indexes remain accepted by the reader, and opening the Atlas does not rebuild the search index just to add this index. Correct answers therefore come with a substantial user-visible delay on a supported upgrade path.
+
+Reran the original synthetic reproduction: 20,000 stretches, one OCR event each, distinct timestamps two minutes apart from January 1, 2024, browse January 1, 2024 through January 1, 2025, limit 20, offset 0. Results:
+
+| Fixture | Events only | Screen + events | Hits / more |
+|---|---:|---:|---|
+| With new events_stretch index | 0.006 s | 0.018 s | 20 / true |
+| Without events_stretch (v0.3.1 index layout) | 0.007 s | 19.657 s | 20 / true |
+
+Original review measurement for screen + events was 2.241 s. These are individual local measurements on disposable synthetic databases, not hardware-independent guarantees. The new-index path is much faster; the old-index path is roughly nine times slower than the original measurement. No live vault was read. The newly added 5,000-row test allows up to 60 seconds without the index, so its passing result does not establish an acceptable upgrade experience. Counting rows fetched into Python also does not measure SQLite's internal scan work.
+
+Suggested fix: detect absence of events_stretch and use an efficient read-only fallback (for example a range-filtered/materialized set of OCR stretch IDs with explicit resource bounds), or introduce an explicit compatible index-upgrade/rebuild flow before enabling this browse path. Keep read-only helper and no-automatic-indexing boundaries unless a change is separately designed. Do not silently perform a full reindex merely on opening the page. Validate the old-index path using this 20,000-row fixture and measure internal work or latency with a meaningful bound.
+
+### Original finding status
+
+1. **Browse cost: fixed for newly built indexes; still open for existing indexes.** SQL suppression preserves the same date/chip rules, events_stretch makes it fast, and keyset batches replace OFFSET. The benchmark above confirms the improvement and the compatibility regression. SQL must still inspect suppressed candidate stretches; a low Python fetched-row count alone does not prove work bounded by page size.
+2. **Incomplete date range: confirmed fixed for the reported scenario.** Clearing either bound during a date-only browse advances search/reader counters, clears results/reader/More/selection, saves the cleared state and displays the instruction without sending an unbounded request. `date_range.cjs` includes a delayed old browse response and passed.
+3. **Offset ceiling: confirmed fixed.** Both search and browse now suppress More and set capped when the next page would exceed MAX_OFFSET. The UI presents narrowing guidance. The focused API and Node cap regressions passed; no new off-by-one issue identified with the implemented PAGE_SIZE/MAX_OFFSET contract.
+4. **Quote metadata: confirmed fixed.** All three Dickinson work labels and Life VI/XVI/XLIII locators match the source checked in the original review. Whitman now uses the Miracles ID and locator. Exactly three Ruskin entries changed double hyphens to em dashes; the punctuation matches the linked Gutenberg #1293 text at the two relevant passages. Source: https://www.gutenberg.org/cache/epub/1293/pg1293-images.html (paragraphs beginning 'Now books of this kind' and 'And, therefore, first of all'). This recheck does not independently certify every unchanged quote locator.
+
+### Recheck validation and limits
+
+- Focused suite: `.venv/Scripts/python.exe -m pytest tests/test_retrieval.py tests/test_atlasserve.py tests/test_quotes.py tests/test_atlas_page_js.py -q -p no:cacheprovider --basetemp C:/Users/Tmatt/inkvault-daily-recheck-temp` — **81 passed in 43.21 s**, with approved execution outside the sandbox's temporary-database restrictions. This includes the two new date-range/cap Node scenarios and both indexed/unindexed suppression tests.
+- Additional synthetic NULL/tie probe: 260 messages (125 NULL timestamps followed by 135 identical non-NULL timestamps), BROWSE_BATCH=100, exercised both a whole read and 13 pages of 20. Exact expected ordering, no duplicates/omissions, correct more flags. This exercises the NULL-to-non-NULL transition and identical-time batch boundaries. NULL timestamps are not included in ordinary bounded date requests, as before.
+- No additional functional or security regression identified in the reviewed fix diff beyond the old-index performance issue above. This is not an exhaustive proof of absence.
+- Builder-reported full suite (747 passed, 3 skipped) and lint are recorded in the request but were not rerun by this recheck. No new full-suite/privacy run or visual browser inspection was performed here.
+- **Light-theme card inspection remains open**, as stated in the recheck request. No release, push or install approval is implied.
+
+Recheck disposition: findings 2, 3 and 4 are closed; finding 1 is closed for rebuilt indexes but remains open as the P2 upgrade-path issue above. Address that path and complete light-theme/final validation before declaring the update ready.
