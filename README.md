@@ -4,43 +4,50 @@
   <img src="docs/assets/inkvault-logo-horizontal.png" alt="InkVault logo" width="560">
 </p>
 
-**A long-term memory you own: rescue what Pieces knew about you, keep every Claude Code and Codex session and the
-pages you open in your browser from here on, and search all of it from your AI tools.**
+**Local-first, user-owned persistent memory for your AI conversations, browsing, and work.**
 
-Your working memory is scattered across tools that don't keep it. Pieces for Developers shut down on September 27,
-2026. Claude Code deletes your sessions after 30 days. Codex keeps them in files nobody reads twice. Your browser
-forgets what you read after about 90 days.
+Keep the context behind your work: what you asked, what you learned, and the pages you opened.
+InkVault preserves supported AI sessions and the browser history you choose in a local SQLite vault,
+so you can find them again after the original tools have cleared their history.
 
-InkVault gathers all of it into one file on your machine: your Pieces memory, rescued once, and your conversations
-with Claude Code, Codex and the Claude desktop app and the history of the browser profiles you choose, added every
-night. It makes the whole thing searchable by your AI
-tools and draws it as a private dashboard. InkVault itself does not upload your archive. If you connect an AI client,
-memories returned to that client may be sent to its model provider under that client's settings.
+Search your vault yourself in the **Memory Atlas**, or connect an AI tool through **MCP** so it can retrieve
+past context when you ask. Optional Windows screen capture adds a timeline of the apps you use and text
+from apps you choose. You control the sources, the vault folder, and the backups.
 
-**Coming from Pieces?** Rescue your memory while PiecesOS still runs (read-only now, and gone once you uninstall it):
+InkVault is free and MIT licensed. No account or telemetry. InkVault itself does not upload your archive.
+If you connect an AI client, memories returned to that client may be sent to its model provider under
+that client's settings.
 
-```bash
-uvx --from git+https://github.com/sandoreclegane/inkvault inkvault rescue
-```
+## Start your vault
 
-**Never used Pieces?** Start a vault from your Claude Code and Codex sessions and your browser history alone (in a
-terminal, it first asks which browser profiles are yours):
+You need [uv](https://docs.astral.sh/uv/getting-started/installation/) and a terminal.
+Copy your supported local sessions and chosen browser history into a vault:
 
 ```bash
 uvx --from git+https://github.com/sandoreclegane/inkvault inkvault sync
 ```
 
-Either way, add [`inkvault schedule`](#keep-it-up-to-date) and the vault keeps growing on its own. All it needs is
-[uv](https://docs.astral.sh/uv/getting-started/installation/).
+In a terminal, InkVault asks which browser profiles are yours before reading their history.
+It downloads the search model on first use (about 130 MB). Then open the Atlas:
 
-### The vault keeps learning
+```bash
+uvx --from git+https://github.com/sandoreclegane/inkvault inkvault dashboard
+```
 
-Every night, InkVault reads the session files Claude Code and Codex already keep on disk, and the history of the
+Search for something you remember, select a result, and read it in context. Add
+[`inkvault schedule`](#keep-it-up-to-date) to refresh and back up your vault nightly, or
+[connect your AI tools](#connect-your-ai-tools) to search it from a conversation.
+
+**Have a Pieces archive to save?** See [Rescuing from Pieces](#rescuing-from-pieces).
+
+## What InkVault preserves
+
+With a nightly schedule, InkVault reads the session files Claude Code and Codex already keep on disk, and the history of the
 browser profiles you chose, and copies in what's new: what you asked, what the assistant answered, what each session
 was called, and which pages you opened. Your AI tools can then search what they helped you with, and what you were
 reading, last month or last year, long after the original files are gone.
 
-- **Claude Code**: every project, from `~/.claude/projects`. Kept past its 30-day cleanup.
+- **Claude Code**: every project, from `~/.claude/projects`. Synced messages stay in your vault after source cleanup.
 - **Codex**: every session it saved, from `~/.codex/sessions`.
 - **Claude desktop app** (agent mode, Windows): including prompts only its audit log kept.
 - **Your browsers**: Chrome, Edge, Comet, Brave, Arc, Vivaldi, Opera and Firefox, only the profiles you say are yours
@@ -49,16 +56,10 @@ reading, last month or last year, long after the original files are gone.
 Only what's new since the last sync is added. Tool output and attachments are left out, and sign-in codes and
 tokens are cleaned out of web addresses (see [Privacy](#privacy)).
 
-### Rescuing from Pieces
-
-**It takes a while.** PiecesOS hands records over at about 8 per second, so a year of captures (~100,000) takes
-around 3-4 hours. Leave it running, or press **Ctrl+C** anytime: InkVault keeps everything saved so far and opens
-a dashboard of what you have. Run the same command again later and it picks up where it left off.
-
 ## What you get
 
-- **The vault**: everything PiecesOS will hand over (captures, summaries and their text, chats, snippets, tags,
-  websites, people), saved as the raw records Pieces returned, so nothing is lost to interpretation. One SQLite file.
+- **A vault you own**: preserved sessions, chosen browser history, optional screen activity, and any rescued
+  Pieces records in one local SQLite file, `vault.db`. Keep it independently of the tools that produced it.
 - **Search for your AI tools**: an MCP server with `search_memories` (keyword + meaning, merged), `timeline`
   ("what was I doing in March?"), `get_memory`, and `memory_stats`.
 - **Memory Atlas**: open it with `inkvault dashboard` (or the **InkVault Atlas** icon from `inkvault dashboard --shortcut`
@@ -66,16 +67,20 @@ a dashboard of what you have. Run the same command again later and it picks up w
   projects connect, projects and topics over time, top apps and sites. Every chart has a table view. A **Search** view
   finds things across your vault and opens the original in a reader. It runs on this computer only (127.0.0.1, a
   private link, stops when idle) and needs no internet.
+- **Daily Light (v0.3.2)**: a daily quotation from 32 curated public-domain passages, chosen by your local date,
+  without using your history. Hide it for the current Atlas session. When indexed activity exists on today's date
+  in an earlier year, **On this day** opens it in Search. You can also browse any date range by setting both
+  From and To without entering a keyword. These date-browsing additions are Atlas-only; MCP tools are unchanged.
 - **Your Claude Code, Codex and Claude desktop sessions**: your prompts and the replies, side by side with your
-  Pieces history, searchable as chats (named like `Claude Code · project: title`), and part of the timeline, the
+  other preserved history, searchable as chats (named like `Claude Code · project: title`), and part of the timeline, the
   digests and the dashboard.
-- **Your browser history** (new in 0.2.1): pages you opened in Chrome, Edge, Comet, Brave, Arc, Vivaldi, Opera or
-  Firefox, from the browser profiles you say are yours. Browsers delete history after about 90 days; the vault
-  keeps it. Searchable as `web`, on the timeline, in the digests and on the dashboard.
-- **Screen capture** (new in 0.3.0, Windows): a timeline of the windows you used, plus the text of the windows in
+- **Your browser history**: pages you opened in Chrome, Edge, Comet, Brave, Arc, Vivaldi, Opera or
+  Firefox, from the browser profiles you say are yours. Visits already copied stay in the vault after the browser
+  removes them. Searchable as `web`, on the timeline, in the digests and on the dashboard.
+- **Screen capture** (optional, Windows): a timeline of the windows you used, plus the text of the windows in
   apps you choose. No images are kept. See [Screen capture](#screen-capture-windows).
 - **Daily digests** (optional): a 2-3 sentence summary of each day, written by a *local* model through
-  [Ollama](https://ollama.com). Pieces stopped writing summaries; this picks up where it left off.
+  [Ollama](https://ollama.com). Summarize your preserved activity without sending it to a hosted model.
 
 ## Connect your AI tools
 
@@ -128,9 +133,9 @@ Safari isn't supported yet (macOS blocks reading it without Full Disk Access).
 
 ## Screen capture (Windows)
 
-Pieces recorded the app in front, its window title and the text on screen. `inkvault watch` brings that back, built
-into InkVault: one app, one store, nothing uploaded. It's Windows-only for now; on macOS and Linux `inkvault watch`
-says so and exits.
+With `inkvault watch`, you can add a local timeline of foreground windows and read text from apps you choose.
+Screen capture stays off until you install the watcher. It's Windows-only for now; on macOS and Linux
+`inkvault watch` says so and exits.
 
 **What it records**
 
@@ -237,8 +242,8 @@ can't be recalled. Forgetting removes the past only: to stop recording an app, u
 
 ## Keep it up to date
 
-PiecesOS keeps capturing for as long as it runs on your computer. To pull in what's new every night and back up
-your vault:
+Keep supported sessions and chosen browser history up to date, rebuild search and the Atlas, and back up
+your vault every night:
 
 ```bash
 uvx --from git+https://github.com/sandoreclegane/inkvault inkvault schedule
@@ -264,7 +269,7 @@ replaces it), or points at an InkVault install that's gone, and it flags a run t
 Each run is logged to `nightly.log` in your InkVault folder (or `nightly-fallback.log` next to it, if `nightly.log`
 can't be written).
 
-The schedule is tied to your vault folder, so if you rescued with `--home`, run `schedule` with the same `--home`.
+The schedule is tied to your vault folder, so if you started with `--home`, run `schedule` with the same `--home`.
 
 If the computer is asleep or off at run time:
 
@@ -331,6 +336,24 @@ This is your screen history, your chats, your browsing and your code. InkVault s
 **Back up your vault.** It is one file: `vault.db` in your InkVault folder. Everything else can be rebuilt from it
 with `inkvault index`.
 
+## Rescuing from Pieces
+
+InkVault began as a way to preserve Pieces memory. Rescue remains a supported use case; you can also
+start and keep a vault without Pieces.
+
+Keep PiecesOS installed and running until your export is safely complete:
+
+```bash
+uvx --from git+https://github.com/sandoreclegane/inkvault inkvault rescue
+```
+
+The export preserves the raw records PiecesOS returns: captures, summaries and their text, chats,
+snippets, tags, websites, and people.
+
+**It takes a while.** PiecesOS hands records over at about 8 per second, so a year of captures (~100,000) takes
+around 3-4 hours. Leave it running, or press **Ctrl+C** anytime: InkVault keeps everything saved so far and opens
+a dashboard of what you have. Run the same command again later and it picks up where it left off.
+
 ## Good to know
 
 - **Your projects** on the dashboard are detected from recurring phrases in your session titles. To choose your own,
@@ -356,6 +379,6 @@ with `inkvault index`.
 
 ## Not affiliated with Pieces
 
-InkVault is an independent, community tool for people moving on from Pieces. "Pieces" is a trademark of its owner.
+InkVault is an independent project. "Pieces" is a trademark of its owner.
 
 MIT licensed. Made by [T. Matthew Chase](https://github.com/sandoreclegane) / Logos 7.
