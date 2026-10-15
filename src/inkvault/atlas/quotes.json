@@ -1,0 +1,261 @@
+{
+  "version": 1,
+  "quotes": [
+    {
+      "id": "thoreau-walden-where-i-lived-1",
+      "text": "I went to the woods because I wished to live deliberately, to front only the essential facts of life, and see if I could not learn what it had to teach",
+      "author": "Henry David Thoreau",
+      "work": "Walden (1854)",
+      "source_url": "https://www.gutenberg.org/cache/epub/205/pg205-images.html",
+      "note": "Checked against Gutenberg #205, chapter 'Where I Lived, and What I Lived For', paragraph beginning 'I went to the woods'."
+    },
+    {
+      "id": "thoreau-walden-where-i-lived-2",
+      "text": "Time is but the stream I go a-fishing in. I drink at it; but while I drink I see the sandy bottom and detect how shallow it is.",
+      "author": "Henry David Thoreau",
+      "work": "Walden (1854)",
+      "source_url": "https://www.gutenberg.org/cache/epub/205/pg205-images.html",
+      "note": "Checked against Gutenberg #205, chapter 'Where I Lived, and What I Lived For', paragraph beginning 'Time is but the stream'."
+    },
+    {
+      "id": "thoreau-walden-conclusion-1",
+      "text": "Only that day dawns to which we are awake. There is more day to dawn. The sun is but a morning star.",
+      "author": "Henry David Thoreau",
+      "work": "Walden (1854)",
+      "source_url": "https://www.gutenberg.org/cache/epub/205/pg205-images.html",
+      "note": "Checked against Gutenberg #205, closing paragraph of 'Conclusion'."
+    },
+    {
+      "id": "emerson-self-reliance-1",
+      "text": "Insist on yourself; never imitate.",
+      "author": "Ralph Waldo Emerson",
+      "work": "Essays: First Series (1841)",
+      "source_url": "https://www.gutenberg.org/cache/epub/2944/pg2944-images.html",
+      "note": "Checked against Gutenberg #2944, essay 'Self-Reliance', paragraph beginning 'Insist on yourself'."
+    },
+    {
+      "id": "emerson-self-reliance-2",
+      "text": "Nothing is at last sacred but the integrity of your own mind.",
+      "author": "Ralph Waldo Emerson",
+      "work": "Essays: First Series (1841)",
+      "source_url": "https://www.gutenberg.org/cache/epub/2944/pg2944-images.html",
+      "note": "Checked against Gutenberg #2944, essay 'Self-Reliance', paragraph beginning 'Whoso would be a man'."
+    },
+    {
+      "id": "emerson-circles-1",
+      "text": "Our life is an apprenticeship to the truth that around every circle another can be drawn; that there is no end in nature, but every end is a beginning",
+      "author": "Ralph Waldo Emerson",
+      "work": "Essays: First Series (1841)",
+      "source_url": "https://www.gutenberg.org/cache/epub/2944/pg2944-images.html",
+      "note": "Checked against Gutenberg #2944, essay 'Circles', paragraph beginning 'Another analogy'."
+    },
+    {
+      "id": "aurelius-long-thoughts-1",
+      "text": "Such as are thy habitual thoughts, such also will be the character of thy mind; for the soul is dyed by the thoughts.",
+      "author": "Marcus Aurelius",
+      "work": "Thoughts of Marcus Aurelius Antoninus, trans. George Long (1862)",
+      "source_url": "https://www.gutenberg.org/cache/epub/15877/pg15877-images.html",
+      "note": "Checked against Gutenberg #15877, Book V, section 16."
+    },
+    {
+      "id": "aurelius-long-thoughts-2",
+      "text": "Look within. Within is the fountain of good, and it will ever bubble up, if thou wilt ever dig.",
+      "author": "Marcus Aurelius",
+      "work": "Thoughts of Marcus Aurelius Antoninus, trans. George Long (1862)",
+      "source_url": "https://www.gutenberg.org/cache/epub/15877/pg15877-images.html",
+      "note": "Checked against Gutenberg #15877, Book VII, section 59."
+    },
+    {
+      "id": "aurelius-long-thoughts-3",
+      "text": "Look within. Let neither the peculiar quality of anything nor its value escape thee.",
+      "author": "Marcus Aurelius",
+      "work": "Thoughts of Marcus Aurelius Antoninus, trans. George Long (1862)",
+      "source_url": "https://www.gutenberg.org/cache/epub/15877/pg15877-images.html",
+      "note": "Checked against Gutenberg #15877, Book VI, section 3."
+    },
+    {
+      "id": "montaigne-cotton-experience-1",
+      "text": "I study myself more than any other subject; 'tis my metaphysic, my physic",
+      "author": "Michel de Montaigne",
+      "work": "Essays, trans. Charles Cotton (1685)",
+      "source_url": "https://www.gutenberg.org/cache/epub/3600/pg3600-images.html",
+      "note": "Checked against Gutenberg #3600, essay 'Of Experience', paragraph beginning 'We seek other conditions'."
+    },
+    {
+      "id": "montaigne-cotton-cripples-1",
+      "text": "I have never seen greater monster or miracle in the world than myself",
+      "author": "Michel de Montaigne",
+      "work": "Essays, trans. Charles Cotton (1685)",
+      "source_url": "https://www.gutenberg.org/cache/epub/3600/pg3600-images.html",
+      "note": "Checked against Gutenberg #3600, essay 'Of Cripples', paragraph beginning 'To this very hour'."
+    },
+    {
+      "id": "montaigne-cotton-books-1",
+      "text": "I speak truth, not so much as I would, but as much as I dare",
+      "author": "Michel de Montaigne",
+      "work": "Essays, trans. Charles Cotton (1685)",
+      "source_url": "https://www.gutenberg.org/cache/epub/3600/pg3600-images.html",
+      "note": "Checked against Gutenberg #3600, essay 'Of Repentance', paragraph beginning 'I speak truth'."
+    },
+    {
+      "id": "franklin-autobiography-1",
+      "text": "Lose no time; be always employ'd in something useful; cut off all unnecessary actions.",
+      "author": "Benjamin Franklin",
+      "work": "The Autobiography of Benjamin Franklin",
+      "source_url": "https://www.gutenberg.org/cache/epub/148/pg148-images.html",
+      "note": "Checked against Gutenberg #148, passage listing the thirteen virtues, item 6 (Industry)."
+    },
+    {
+      "id": "franklin-autobiography-2",
+      "text": "Speak not but what may benefit others or yourself; avoid trifling conversation.",
+      "author": "Benjamin Franklin",
+      "work": "The Autobiography of Benjamin Franklin",
+      "source_url": "https://www.gutenberg.org/cache/epub/148/pg148-images.html",
+      "note": "Checked against Gutenberg #148, passage listing the thirteen virtues, item 2 (Silence)."
+    },
+    {
+      "id": "franklin-autobiography-3",
+      "text": "Let all your things have their places; let each part of your business have its time.",
+      "author": "Benjamin Franklin",
+      "work": "The Autobiography of Benjamin Franklin",
+      "source_url": "https://www.gutenberg.org/cache/epub/148/pg148-images.html",
+      "note": "Checked against Gutenberg #148, passage listing the thirteen virtues, item 3 (Order)."
+    },
+    {
+      "id": "dickinson-frigate-1",
+      "text": "There is no frigate like a book / To take us lands away, / Nor any coursers like a page / Of prancing poetry.",
+      "author": "Emily Dickinson",
+      "work": "Poems, Series One (1890)",
+      "source_url": "https://www.gutenberg.org/cache/epub/12242/pg12242-images.html",
+      "note": "Checked against Gutenberg #12242, poem 'A Book' (verse lines joined with ' / ')."
+    },
+    {
+      "id": "dickinson-brain-1",
+      "text": "The brain is wider than the sky, / For, put them side by side, / The one the other will include / With ease, and you beside.",
+      "author": "Emily Dickinson",
+      "work": "Poems, Series One (1890)",
+      "source_url": "https://www.gutenberg.org/cache/epub/12242/pg12242-images.html",
+      "note": "Checked against Gutenberg #12242, poem 'The Brain', first stanza (verse lines joined with ' / ')."
+    },
+    {
+      "id": "dickinson-word-1",
+      "text": "A word is dead / When it is said, / Some say. / I say it just / Begins to live / That day.",
+      "author": "Emily Dickinson",
+      "work": "Poems, Series One (1890)",
+      "source_url": "https://www.gutenberg.org/cache/epub/12242/pg12242-images.html",
+      "note": "Checked against Gutenberg #12242, poem 'A Word' (verse lines joined with ' / ')."
+    },
+    {
+      "id": "whitman-song-of-myself-1",
+      "text": "I loafe and invite my soul, / I lean and loafe at my ease observing a spear of summer grass.",
+      "author": "Walt Whitman",
+      "work": "Leaves of Grass",
+      "source_url": "https://www.gutenberg.org/cache/epub/1322/pg1322-images.html",
+      "note": "Checked against Gutenberg #1322, 'Song of Myself' section 1 (verse lines joined with ' / ')."
+    },
+    {
+      "id": "whitman-song-of-myself-2",
+      "text": "To me every hour of the light and dark is a miracle, / Every cubic inch of space is a miracle",
+      "author": "Walt Whitman",
+      "work": "Leaves of Grass",
+      "source_url": "https://www.gutenberg.org/cache/epub/1322/pg1322-images.html",
+      "note": "Checked against Gutenberg #1322, 'Song of Myself' section 4 (verse lines joined with ' / ')."
+    },
+    {
+      "id": "whitman-song-of-myself-3",
+      "text": "Stop this day and night with me and you shall possess the origin of all poems",
+      "author": "Walt Whitman",
+      "work": "Leaves of Grass",
+      "source_url": "https://www.gutenberg.org/cache/epub/1322/pg1322-images.html",
+      "note": "Checked against Gutenberg #1322, 'Song of Myself' section 2."
+    },
+    {
+      "id": "bacon-studies-1",
+      "text": "Reading maketh a full man; conference a ready man; and writing an exact man.",
+      "author": "Francis Bacon",
+      "work": "Essays or Counsels, Civil and Moral (1625)",
+      "source_url": "https://www.gutenberg.org/cache/epub/575/pg575-images.html",
+      "note": "Checked against Gutenberg #575, essay 'Of Studies'."
+    },
+    {
+      "id": "bacon-studies-2",
+      "text": "Some books are to be tasted, others to be swallowed, and some few to be chewed and digested",
+      "author": "Francis Bacon",
+      "work": "Essays or Counsels, Civil and Moral (1625)",
+      "source_url": "https://www.gutenberg.org/cache/epub/575/pg575-images.html",
+      "note": "Checked against Gutenberg #575, essay 'Of Studies'."
+    },
+    {
+      "id": "bacon-studies-3",
+      "text": "Histories make men wise; poets witty; the mathematics subtile; natural philosophy deep; moral grave; logic and rhetoric able to contend.",
+      "author": "Francis Bacon",
+      "work": "Essays or Counsels, Civil and Moral (1625)",
+      "source_url": "https://www.gutenberg.org/cache/epub/575/pg575-images.html",
+      "note": "Checked against Gutenberg #575, essay 'Of Studies'."
+    },
+    {
+      "id": "ruskin-sesame-1",
+      "text": "Do you know, if you read this, that you cannot read that--that what you lose to-day you cannot gain to-morrow?",
+      "author": "John Ruskin",
+      "work": "Sesame and Lilies (1865)",
+      "source_url": "https://www.gutenberg.org/cache/epub/1293/pg1293-images.html",
+      "note": "Checked against Gutenberg #1293, Lecture I, 'Of Kings' Treasuries'."
+    },
+    {
+      "id": "ruskin-sesame-2",
+      "text": "you must get into the habit of looking intensely at words, and assuring yourself of their meaning, syllable by syllable--nay, letter by letter.",
+      "author": "John Ruskin",
+      "work": "Sesame and Lilies (1865)",
+      "source_url": "https://www.gutenberg.org/cache/epub/1293/pg1293-images.html",
+      "note": "Checked against Gutenberg #1293, Lecture I, 'Of Kings' Treasuries', paragraph beginning 'And, therefore, first of all'."
+    },
+    {
+      "id": "ruskin-sesame-3",
+      "text": "You have heard as much before;--yet have you measured and mapped out this short life and its possibilities?",
+      "author": "John Ruskin",
+      "work": "Sesame and Lilies (1865)",
+      "source_url": "https://www.gutenberg.org/cache/epub/1293/pg1293-images.html",
+      "note": "Checked against Gutenberg #1293, Lecture I, 'Of Kings' Treasuries', same passage as ruskin-sesame-1."
+    },
+    {
+      "id": "shakespeare-merchant-1",
+      "text": "How far that little candle throws his beams! So shines a good deed in a naughty world.",
+      "author": "William Shakespeare",
+      "work": "Complete Works",
+      "source_url": "https://www.gutenberg.org/cache/epub/100/pg100-images.html",
+      "note": "Checked against Gutenberg #100, The Merchant of Venice, 5.1, Portia."
+    },
+    {
+      "id": "shakespeare-sonnet-30",
+      "text": "When to the sessions of sweet silent thought, I summon up remembrance of things past",
+      "author": "William Shakespeare",
+      "work": "Complete Works",
+      "source_url": "https://www.gutenberg.org/cache/epub/100/pg100-images.html",
+      "note": "Checked against Gutenberg #100, Sonnet 30."
+    },
+    {
+      "id": "shakespeare-tempest-1",
+      "text": "We are such stuff As dreams are made on, and our little life Is rounded with a sleep.",
+      "author": "William Shakespeare",
+      "work": "Complete Works",
+      "source_url": "https://www.gutenberg.org/cache/epub/100/pg100-images.html",
+      "note": "Checked against Gutenberg #100, The Tempest, 4.1, Prospero (line breaks flattened)."
+    },
+    {
+      "id": "carlyle-sartor-1",
+      "text": "Silence is the element in which great things fashion themselves together; that at length they may emerge, full-formed and majestic, into the daylight of Life",
+      "author": "Thomas Carlyle",
+      "work": "Sartor Resartus (1836)",
+      "source_url": "https://www.gutenberg.org/cache/epub/1051/pg1051-images.html",
+      "note": "Checked against Gutenberg #1051, Book III, ch. 3 'Symbols', passage beginning 'Silence is the element'."
+    },
+    {
+      "id": "carlyle-sartor-2",
+      "text": "Bees will not work except in darkness; Thought will not work except in Silence",
+      "author": "Thomas Carlyle",
+      "work": "Sartor Resartus (1836)",
+      "source_url": "https://www.gutenberg.org/cache/epub/1051/pg1051-images.html",
+      "note": "Checked against Gutenberg #1051, Book III, ch. 3 'Symbols', same passage."
+    }
+  ]
+}
