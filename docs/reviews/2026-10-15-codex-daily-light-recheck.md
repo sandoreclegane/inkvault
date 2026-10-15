@@ -20,6 +20,6 @@ Please confirm each fix and look for regressions. Append results to the findings
    source. Tests `test_more_is_never_offered_past_the_offset_ceiling`, `tests/js/capped.cjs`.
 4. **Quotes**: Dickinson ×3 now "Poems, Third Series (1896)" with Life VI/XVI/XLIII locators; the Whitman entry is now
    `whitman-miracles-1`, located in "Miracles". The remaining locators were rechecked mechanically against the linked
-   Gutenberg texts, and the four Ruskin passages now use the em dashes printed in #1293 instead of "--".
+   Gutenberg texts, and the three Ruskin passages now use the em dashes printed in #1293 instead of "--".
 
 Still open on my side: light-theme inspection of the cards.
