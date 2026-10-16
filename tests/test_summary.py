@@ -122,29 +122,43 @@ def test_desktop_audit_merging(home):
 
 
 def test_removal_recovery_no_negatives(home):
+    """A pending removal finished during the build, and the index shrinks (a conversation is gone from the vault):
+    totals come from the new index, and "with new" is a count of unseen ids, never a difference."""
     from inkvault import export, forget, paths, summary
     two_sessions()
     sync_and_build()
     before = summary.conversation_ids()
+    assert len(before) == 2
     db = export.open_vault()
+    for i, (profile, host) in enumerate([("p", "gone.example"), ("p", "gone.example"), ("p", "keep.example")]):
+        db.execute("INSERT INTO browser_visits (id, profile, visit_id, redirected, transition, created, url, address) "
+                   "VALUES (?,?,?,0,0,?,?,?)",
+                   (f"v{i}", profile, i, "2026-10-05T00:00:00Z", f"https://{host}/", host))
     db.execute("INSERT INTO browser_removals (what, value, days, created) VALUES ('site','gone.example','[]','x')")
+    db.execute("DELETE FROM session_lines WHERE file LIKE '%sess-2%'")  # the index shrinks by a whole conversation
     db.commit()
     db.close()
-    assert forget.pending() == 1
+    assert summary.visit_total(["p"]) == 3 and forget.pending() == 1
+    write(claude_file("sess-1"), turn("user", "u2", "one more", ts="2026-10-05T15:00:00Z"), mode="a")
     results = sync_and_build()
-    assert forget.pending() == 0
+    assert forget.pending() == 0 and summary.visit_total(["p"]) == 1  # the removed visits are gone
     after = summary.conversation_ids()
-    got = lines(before, results)["claude_code"]
     s = sqlite3.connect(paths.search_db())
     total = s.execute("SELECT COUNT(DISTINCT conversation_id) FROM messages WHERE source='claude_code'").fetchone()[0]
     s.close()
-    assert got.conversations == total == len(after) and got.with_new >= 0
+    assert total == 1 == len(after) and ("claude_code", "claude_code:sess-2") not in after
+    got = lines(before, results)["claude_code"]
+    assert (got.conversations, got.with_new) == (1, 1)  # sess-1 resumed once; nothing subtracted, nothing from before
+    unchanged = summary.session_lines(after, after, results)
+    assert [(l.conversations, l.with_new) for l in unchanged] == [(1, 0)]
 
 
 def test_only_found_sources_get_lines(home):
     from inkvault import sources, summary
     results = [sources.SourceResult("codex", "Codex", False, 0, 0)]
     assert summary.session_lines({}, {("codex", "c1"): frozenset({"m"})}, results) == []
+    found = [sources.SourceResult("codex", "Codex", True, 0, 0)]
+    assert summary.session_lines({}, {}, found) == [summary.SessionLine("codex", "Codex", 0, 0)]
 
 
 def test_visit_total_counts_chosen_profiles(home):
