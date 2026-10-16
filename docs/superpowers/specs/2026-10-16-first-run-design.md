@@ -1,7 +1,7 @@
 # First-run sync — design
 
-Status: revision 2, 2026-10-16, after Codex design review
-(`docs/reviews/2026-10-16-codex-first-run-design-findings.md`; how each finding was handled is at the end).
+Status: revision 3, 2026-10-16, after Codex design review and recheck
+(`docs/reviews/2026-10-16-codex-first-run-design-findings.md`, `...-recheck-findings.md`; dispositions at the end).
 Base: public main `63b7139` (v0.3.2 + README #16). Branch `first-run`. Target release: 0.3.3.
 
 ## Why
@@ -46,8 +46,8 @@ Which browser profiles are yours?
 Numbers separated by spaces, all, or none: 1 2
 
 Saving…
-  ✓ Claude Code         812 sessions   14 updated this run
-  ✓ Codex               428 sessions    3 updated this run
+  ✓ Claude Code         812 conversations   14 with new messages
+  ✓ Codex               428 conversations    3 with new messages
   ✓ Browser history  52,310 visits   +960 new (2 profiles)
   ⠹ Building search…  ━━━━━━━━━━━━━━━━━━━━╺━━━━━━━  71%
   ✓ Search              up to date
@@ -80,9 +80,14 @@ The **plain rendering** uses the same words with ASCII-safe glyphs (see Encoding
 A sync is fully successful only when every source that was found and every chosen browser profile was read with no
 unreadable files, and search was built. `sources.sync` today returns `True` even when some files were unreadable
 (Codex P1); it changes to return a structured result per source (found, saved-session total, sessions updated this
-run, lines added, unreadable count). Callers that test its truthiness (`cli.sync_sessions`, `nightly.step_sync`) are
-updated deliberately so their current behaviour is preserved except that unreadable files now count as **partial**
-in `cmd_sync` (and so exit 1, as browser partials already do). Partial runs still print the summary, mark the
+run, lines added, unreadable count). Its only production callers are `cli.sync_sessions` and `nightly.step_sync`
+(confirmed by Codex recheck). `nightly.step_sync` explicitly returns the legacy boolean (found / not found, `True`
+for found-but-unreadable) so nightly outcomes and output are unchanged; no structured value is passed through by
+truthiness. `cli.sync_sessions` maps unreadable files to **partial** (rescue keeps ignoring its return). The
+`tests/test_sources.py` assertion `sources.sync() is False` is updated to the new contract. In `cmd_sync`, a
+session **partial** is eligible to build search (today only `ok` is), so committed sessions are always searchable;
+the run still exits 1, as browser partials already do. Found-but-failed outright stays distinct from not found.
+The existing `locked` behaviour (continuing if the lock file itself can't be created) is unchanged. Partial runs still print the summary, mark the
 affected line with `!` and the existing reason, do **not** auto-open, and end with "Open it with: inkvault
 dashboard".
 
@@ -112,7 +117,7 @@ ordinary print, prompt, error or return, including on exceptions. Redraw at most
 
 **Chunking must not change search.** Chunk boundaries are multiples of the current `batch_size` (1024). Validation:
 - stub tests for row order, ids/kinds alignment across chunk boundaries, empty kinds, and progress totals;
-- an opt-in integration test (skipped when the model isn't cached; no download in CI) that encodes synthetic texts
+- an opt-in integration test (skipped when the model isn't cached; no download in CI). It is a build gate: if it cannot be run before release, ship without chunking and report progress per kind that encodes synthetic texts
   crossing the 1024 and chunk boundaries through the old single-call path and the chunked path with the real
   model, and requires identical float16 vectors, ids and kinds;
 - a one-off offline benchmark on ~120k synthetic records, old vs chunked, recorded in the build notes. If chunking
@@ -123,8 +128,20 @@ ordinary print, prompt, error or return, including on exceptions. Redraw at most
 One line per source **found on this computer**, from committed vault data, read **while still holding the sync
 lock** (after any pending removal and the imports), and printed after search is built:
 - **AI sessions**, one line per source in `sources.SOURCES` that was found (today Claude Code, Claude desktop,
-  Codex): total **sessions** saved for that source, and **sessions updated this run** (sessions that gained lines).
-  Raw line counts are not shown.
+  Codex): total **conversations** and **conversations with new messages this run**. Both use the **search index's
+  own identity**, so they follow exactly the grouping, merge and de-dup rules indexing already applies (Claude
+  desktop session + audit merging, echo suppression, audit-only conversations):
+  - conversation identity = `(source, conversation_id)` and message identity = `messages.id` in `search.db`;
+  - before `index.build`, read the set of message ids per `(source, conversation_id)` from the existing search
+    index (empty if none) in one read snapshot; after the build, read it again from the new index;
+  - total = distinct conversations after; "with new messages" = conversations that have at least one message id
+    not present before (a brand-new conversation counts; a rewritten or re-read file whose messages are unchanged
+    does not; replacement-only edits are not reported). Never a subtraction, so never negative.
+  The builder must confirm `messages.id` is stable across rebuilds for unchanged input (a test pins this: build
+  twice on the same synthetic vault, zero conversations with new messages). If it isn't, fall back to labelled
+  raw units ("lines saved this run") rather than call anything "new conversations". Raw line counts and file
+  counts are otherwise not shown. Tests: rewritten file, repeated resume, audit-only, one audit file touching
+  several conversations, echo suppression.
 - **Browser history**: total **visits** saved for the chosen profiles, and **new visits this run** (the sum of
   `history.store`'s committed per-profile inserts, which `history.sync` now returns alongside its outcome), with
   the chosen profile count. Pages are not shown.
@@ -208,3 +225,14 @@ exact ASCII message set, within the constraints above.
 5. **P2 ASCII fallback**: accepted; whole-message-set rendering against the real encoding; never raises.
 6. **P2 progress state**: accepted; explicit reporter, no globals, threads joined in `finally`, sequential test.
 - **Lock note**: accepted; open after release, unlike rescue; `OSError` fallback.
+
+## Recheck disposition (Codex, 2026-10-16)
+
+- **A. P2 updated-session identity**: accepted; conversations and "with new messages" come from the search
+  index's own message/conversation identity, compared before and after the build; fallback to labelled raw units
+  if ids aren't stable.
+- **B. P2 partial sessions must rebuild search**: accepted; session partial is build-eligible, still exit 1 and no
+  auto-open.
+- **Callers**: `nightly.step_sync` returns the legacy boolean explicitly; test assertion updated.
+- **Chunking**: the real-model parity check is a build gate; if it can't be run, ship without chunking and report
+  progress per kind instead.
