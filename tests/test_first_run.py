@@ -143,10 +143,11 @@ def test_auto_open_matrix(world, monkeypatch, case):
     shown = text(out)
     assert world.opened == []
     assert code == (0 if case in ("stdin_redirected", "no_open") else 1)
-    assert "Open it with: inkvault dashboard" in shown
+    assert ("Open it with: inkvault dashboard" in shown) == (case != "nothing")
     assert "Next time" not in shown
     if case == "nothing":
         assert "Nothing to sync" in shown
+        assert "inkvault dashboard" not in shown
     if case in ("session_partial", "browser_partial"):
         assert re.search(r"^ +! ", shown, re.M)
 
@@ -278,3 +279,25 @@ def test_non_tty_session_partial_exits_1_with_unchanged_output(world, monkeypatc
                    "Browsers: no profile chosen (no supported browser found)\n"
                    "indexed: 0 events, 0 summaries, 3 messages, 0 snippets, 0 pages\nmeaning search: 3 records in 0s\n")
     assert paths.search_db().exists()
+
+
+def test_ctrl_c_at_browser_question(world, monkeypatch):
+    from inkvault import paths
+    h = chrome(world.home, monkeypatch, "Default")["Default"]
+    chromium_visit(h, 1, "https://example.com/0", T1)
+    out = terminal(monkeypatch, world)
+
+    class Interrupting(io.StringIO):
+        def isatty(self):
+            return True
+
+        def readline(self, *a):
+            raise KeyboardInterrupt
+    monkeypatch.setattr(sys, "stdin", Interrupting())
+    from inkvault import cli
+    code = cli.main(["sync"])
+    shown = text(out)
+    assert code == 130
+    assert "Stopped; nothing was synced." in shown
+    assert "Traceback" not in shown
+    assert not paths.vault_db().exists()

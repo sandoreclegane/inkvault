@@ -59,7 +59,7 @@ def vault_rows(sql):
 def test_sync_keeps_conversation_lines_only(home):
     from inkvault import sources
     write(os.path.join(claude_dir(), "sess-1.jsonl"), *SESSION)
-    assert sources.sync()
+    assert sources.any_found(sources.sync())
     kept = [json.loads(r)["uuid"] for (r,) in vault_rows("SELECT raw FROM session_lines ORDER BY offset")]
     assert kept == ["u1", "a1", "u3", "u4", "a2", "a3"]  # no queue, attachment or tool result
     assert "sk-123" not in "".join(r for (r,) in vault_rows("SELECT raw FROM session_lines"))
@@ -130,7 +130,7 @@ def test_bad_lines_never_stop_a_sync(home):
     path = os.path.join(claude_dir(), "sess-1.jsonl")
     with open(path, "w", encoding="utf-8") as f:
         f.write("not json\n[1, 2]\n" + json.dumps(SESSION[1]) + "\n")
-    assert sources.sync()
+    assert sources.any_found(sources.sync())
     assert vault_rows("SELECT COUNT(*) FROM session_lines") == [(1,)]
 
 
@@ -640,7 +640,7 @@ def meta_with_tools():
 def test_a_schema_type_list_survives_and_attachments_still_go(home):
     from inkvault import sources
     codex_file(meta_with_tools(), compaction_with_image("SCHEMAPIXELS"), *CODEX_NEW[1:])
-    assert sources.sync()
+    assert sources.any_found(sources.sync())
     stored = [json.loads(r) for (r,) in vault_rows("SELECT raw FROM session_lines ORDER BY offset")]
     assert stored[0]["payload"]["dynamic_tools"][0]["inputSchema"] == SCHEMA
     assert "SCHEMAPIXELS" not in json.dumps(stored)
@@ -656,7 +656,7 @@ def test_a_format_2_vault_with_a_schema_type_list_upgrades(home):
     db.execute("INSERT INTO meta VALUES ('session_lines_format', '2')")
     db.commit()
     db.close()
-    assert sources.sync()
+    assert sources.any_found(sources.sync())
     stored = [json.loads(r) for (r,) in vault_rows(
         "SELECT raw FROM session_lines WHERE file='rollout-gone.jsonl' ORDER BY offset")]
     assert stored[0]["payload"]["dynamic_tools"][0]["inputSchema"] == SCHEMA

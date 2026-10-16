@@ -284,7 +284,12 @@ def terminal_sync(args, term):
     say(term, f"{term.gold(term.mark)} {term.bold('InkVault')}  {term.dim(HELLO_TAGLINE)}")
     say(term, term.dim(HELLO_LINE))
     term.write("")
-    profiles, answers = ask_browsers(term)
+    try:
+        profiles, answers = ask_browsers(term)
+    except KeyboardInterrupt:
+        term.write("")
+        say(term, "Stopped; nothing was synced.")
+        return 130
     with locked("sync", "nothing was synced.") as ok:
         if not ok:
             return 1
@@ -292,8 +297,8 @@ def terminal_sync(args, term):
         try:
             forget.apply_pending()
         except Exception as e:  # noqa: BLE001
-            print(f"Couldn't finish a removal that was interrupted ({type(e).__name__}: {e}); nothing was synced, and "
-                  "search stays off until it's finished.")
+            say(term, f"Couldn't finish a removal that was interrupted ({type(e).__name__}: {e}); nothing was synced, "
+                      "and search stays off until it's finished.")
             return 1
         if answers:
             browsers.record_answers(profiles, answers)
@@ -304,10 +309,8 @@ def terminal_sync(args, term):
             web_result = sync_browsers_result()
         web = "failed" if web_result is None else web_result.outcome
         if sessions == "none" and web == "nothing" and not recovering:
-            print("Nothing to sync: no Claude Code or Codex sessions on this computer, and no browser profile chosen "
-                  "(`inkvault browsers`).")
-            term.write("")
-            say(term, OPEN_WITH)
+            say(term, "Nothing to sync: no Claude Code or Codex sessions on this computer, and no browser profile "
+                      "chosen (`inkvault browsers`).")
             return 1
         say(term, term.bold(SAVING))
         built, search_error = False, None
