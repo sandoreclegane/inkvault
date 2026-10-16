@@ -10,6 +10,7 @@ import numpy as np
 from . import paths
 
 MODEL = "minishlab/potion-retrieval-32M"
+CHUNK = 4096  # rows per encode call (a multiple of the 1024 batch): progress ticks between calls
 MAX_CHARS = 4000  # static models average token vectors; past this, extra text mostly adds noise
 
 QUERIES = {
@@ -22,16 +23,19 @@ QUERIES = {
 }
 
 
-def load_model():
+def load_model(progress=None):
     from model2vec import StaticModel
     local = paths.model_dir()
     if not local.exists():
-        print("downloading the search model (once, ~130 MB)…", flush=True)
+        if progress is None:
+            print("downloading the search model (once, ~130 MB)…", flush=True)
+        else:
+            progress.stage("Downloading the search model (once, ~130 MB)")
         StaticModel.from_pretrained(MODEL).save_pretrained(str(local))
     return StaticModel.from_pretrained(str(local))
 
 
-def build():
+def build(progress=None):
     start = time.time()
     db = paths.connect_ro(paths.search_db())
     try:
@@ -42,19 +46,33 @@ def build():
     found = {kind: rows for kind, rows in found.items() if rows}
     if not found:
         paths.vectors().unlink(missing_ok=True)  # e.g. a removal took the last records: their vectors go too
-        print("nothing to embed yet")
+        if progress is None:
+            print("nothing to embed yet")
         return
-    model = load_model()
+    if progress is None:
+        model = load_model()
+    else:
+        model = load_model(progress)
+        progress.stage("meaning search")
+    total = sum(len(rows) for rows in found.values())
+    done = 0
     kinds, ids, vecs = [], [], []
     for kind, rows in found.items():
         # No worker processes: they crash under pythonw (how the nightly job runs on Windows), and for a
         # static model one process is as fast anyway (~15 s for 120k records).
-        v = model.encode([t for _, t in rows], batch_size=1024, show_progress_bar=False, use_multiprocessing=False)
-        v /= np.linalg.norm(v, axis=1, keepdims=True) + 1e-9
-        vecs.append(v.astype(np.float16))
+        texts = [t for _, t in rows]
+        for start in range(0, len(texts), CHUNK):
+            v = model.encode(texts[start:start + CHUNK], batch_size=1024, show_progress_bar=False,
+                             use_multiprocessing=False)
+            v /= np.linalg.norm(v, axis=1, keepdims=True) + 1e-9
+            vecs.append(v.astype(np.float16))
+            done += len(v)
+            if progress is not None:
+                progress.update(done, total)
         kinds += [kind] * len(rows)
         ids += [i for i, _ in rows]
     tmp = paths.vectors().with_name("vectors.tmp.npz")
     np.savez(tmp, kinds=np.array(kinds), ids=np.array(ids), vecs=np.vstack(vecs))
     tmp.replace(paths.vectors())
-    print(f"meaning search: {len(ids):,} records in {time.time() - start:.0f}s", flush=True)
+    if progress is None:
+        print(f"meaning search: {len(ids):,} records in {time.time() - start:.0f}s", flush=True)

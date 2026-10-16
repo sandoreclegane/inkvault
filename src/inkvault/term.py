@@ -5,6 +5,7 @@ Cosmetics never raise: anything that goes wrong here degrades to plain ASCII.
 import atexit
 import os
 import sys
+import threading
 
 RESET = "\x1b[0m"
 CODES = {
@@ -122,3 +123,90 @@ class Term:
             self.stream.flush()
         except Exception:
             pass
+
+
+class Progress:
+    """Live progress for the search build: a spinner or bar on a terminal, plain lines elsewhere.
+
+    Live drawing needs a real terminal (`new_output`); otherwise `stage` prints one line and `update`
+    prints nothing, with no carriage returns or escapes. Leaving the `with` block always stops the
+    spinner thread and clears the live line, including on KeyboardInterrupt.
+    """
+
+    INTERVAL = 0.1  # at most 10 redraws a second
+    WIDTH = 24
+
+    def __init__(self, term: Term):
+        self.term = term
+        self._live = term.new_output
+        self._lock = threading.Lock()
+        self._label = ""
+        self._done = 0
+        self._total = 0
+        self._tick = 0
+        self._drawn = False
+        self._stop = threading.Event()
+        self._thread = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._halt()
+        return False
+
+    def stage(self, label: str) -> None:
+        if not self._live:
+            self.term.write(f"Building search: {label}...")
+            return
+        with self._lock:
+            self._label, self._done, self._total = label, 0, 0
+        self._start()
+
+    def update(self, done: int, total: int) -> None:
+        if not self._live:
+            return
+        with self._lock:
+            self._done, self._total = done, total
+
+    def finish(self, label: str, ok: bool = True) -> None:
+        self._halt()
+        glyph = self.term.teal(self.term.ok) if ok else self.term.amber(self.term.warn)
+        self.term.write(f"  {glyph} {label}")
+
+    def _start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="Progress", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._draw()
+            self._stop.wait(self.INTERVAL)
+
+    def _draw(self) -> None:
+        t = self.term
+        with self._lock:
+            label, done, total = self._label, self._done, self._total
+            frame = t.frames[self._tick % len(t.frames)]
+            self._tick += 1
+            if total > 0:
+                full = min(self.WIDTH, int(self.WIDTH * done / total))
+                bar = t.gold(t.bar_full * full) + t.bar_empty * (self.WIDTH - full)
+                line = f"  {bar} {label} {min(100, 100 * done // total)}%"
+            else:
+                line = f"  {t.gold(frame)} {label}"
+            t.write("\r" + line + ("\x1b[K" if t.styled else " " * 4), end="")
+            self._drawn = True
+
+    def _halt(self) -> None:
+        self._stop.set()
+        th, self._thread = self._thread, None
+        if th is not None:
+            th.join()
+        with self._lock:
+            if self._drawn:
+                self.term.write("\r\x1b[K" if self.term.styled else "\r" + " " * (self.WIDTH + 60) + "\r", end="")
+                self._drawn = False
