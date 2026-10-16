@@ -27,8 +27,10 @@ Copy your supported local sessions and chosen browser history into a vault:
 uvx --from git+https://github.com/sandoreclegane/inkvault inkvault sync
 ```
 
-In a terminal, InkVault asks which browser profiles are yours before reading their history.
-It downloads the search model on first use (about 130 MB). Then open the Atlas:
+In a terminal, InkVault greets you, asks which browser profiles are yours before reading their history, shows
+progress while it builds search, and ends with a short summary. It downloads the search model on first use
+(about 130 MB). When everything saved, the Memory Atlas opens by itself. Add `--no-open` to skip that. For later
+visits, `inkvault dashboard` opens the Atlas again:
 
 ```bash
 uvx --from git+https://github.com/sandoreclegane/inkvault inkvault dashboard

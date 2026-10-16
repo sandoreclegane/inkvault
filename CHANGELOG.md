@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.3 — First run
+
+- **A friendlier first `sync`.** In a terminal, `inkvault sync` now greets you, shows progress while it builds
+  search, and ends with a short summary of what it saved (one row per source, then search). When piped or run from
+  a schedule, the output is the same plain text as before.
+- **The Atlas opens by itself.** After a fully successful sync in a terminal, the Memory Atlas opens in your
+  browser. `--no-open` skips it, and `inkvault dashboard` still opens it any time.
+- **Behaviour change:** unreadable session files now make `sync` exit 1, in a terminal or not. Before, they were
+  reported but the exit code stayed 0.
+- Nightly, rescue, index and MCP output are unchanged. MCP tools answer exactly as before.
+
 ## 0.3.2 — Atlas Daily Light
 
 - **A little light.** The Atlas opens with a short daily quotation from a curated collection of 32 public-domain
