@@ -262,7 +262,7 @@ def plain_sync():
         if recovering and built:
             dashboard.build()
             print("Finished a removal that had been interrupted.")
-    return 0 if built and sessions != "failed" and web in ("ok", "nothing") else 1
+    return 0 if built and sessions in ("ok", "none") and web in ("ok", "nothing") else 1
 
 
 def chosen_profile_keys():
@@ -345,11 +345,11 @@ def terminal_sync(args, term):
         row(not bad, line.name, body)
     if sessions == "failed":
         row(False, "Sessions", "couldn't be read")
-        for note in step_notes(sessions_out):
+        for note in step_notes(sessions_out) or ["see `inkvault status`"]:
             say(term, term.dim(f"      {note}"))
     if web_result is None:
         row(False, "Browser history", "couldn't be read")
-        for note in step_notes(web_out):
+        for note in step_notes(web_out) or ["see `inkvault status`"]:
             say(term, term.dim(f"      {note}"))
     elif web != "nothing":
         added = term.teal("+" + format(web_result.new_visits, ",") + " new")

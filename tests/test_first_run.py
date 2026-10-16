@@ -263,3 +263,18 @@ def test_browser_question_is_styled_and_parsed_as_before(world, monkeypatch):
     assert shown.index("InkVault keeps a private copy") < shown.index("Which browser profiles are yours?")
     assert "Please type numbers from the list" in shown
     assert re.search(r"Browser history +1 visit +\+1 new", shown)
+
+
+def test_non_tty_session_partial_exits_1_with_unchanged_output(world, monkeypatch, capsys):
+    from inkvault import paths
+    one_session()
+    bad = os.path.join(claude_dir(), "sess-bad.jsonl")
+    write(bad, turn("user", "x1", "unreadable words"))
+    fail_reading(monkeypatch, bad)
+    assert run_sync() == 1
+    out = re.sub(r"in \d+s", "in 0s", capsys.readouterr().out)
+    assert out == ("Claude desktop: not found\nCodex: not found\n"
+                   "Claude Code: 2 sessions, 6 new lines, 1 unreadable\n"
+                   "Browsers: no profile chosen (no supported browser found)\n"
+                   "indexed: 0 events, 0 summaries, 3 messages, 0 snippets, 0 pages\nmeaning search: 3 records in 0s\n")
+    assert paths.search_db().exists()
