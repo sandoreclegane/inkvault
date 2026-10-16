@@ -714,3 +714,14 @@ def test_kernel_lock_uses_the_host_os_when_command_platform_is_emulated(home, mo
     with nightly.lock():
         assert try_in_subprocess(home) == "BUSY"
     assert try_in_subprocess(home) == "TOOK"
+
+
+def test_step_sync_legacy_bool(home, monkeypatch):
+    from inkvault import nightly, sources
+    R = sources.SourceResult
+    monkeypatch.setattr(sources, "sync", lambda: [R("claude_code", "Claude Code", True, 2, 0)])
+    assert nightly.step_sync() is True
+    assert nightly.run_step(nightly.step_sync, nightly.LogStream()) == "ok"
+    monkeypatch.setattr(sources, "sync", lambda: [R("claude_code", "Claude Code", False, 0, 0)])
+    assert nightly.step_sync() is False
+    assert nightly.run_step(nightly.step_sync, nightly.LogStream()) == "skipped"

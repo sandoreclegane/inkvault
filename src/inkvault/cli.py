@@ -138,14 +138,18 @@ def partial_rescue(args):
 
 
 def sync_sessions():
-    """Claude Code and Codex sessions: "ok", "none" (none on this computer) or "failed". A failure is reported and
-    never stops a rescue or the browser sync."""
+    """Claude Code and Codex sessions: (status, per-source results). Status is "ok", "partial" (some session file
+    couldn't be read), "none" (none on this computer) or "failed". A failure is reported and never stops a rescue
+    or the browser sync."""
     from . import sources
     try:
-        return "ok" if sources.sync() else "none"
+        results = sources.sync()
     except Exception as e:  # noqa: BLE001
         print(f"Couldn't sync Claude Code / Codex sessions: {type(e).__name__}: {e}")
-        return "failed"
+        return "failed", []
+    if not sources.any_found(results):
+        return "none", results
+    return ("partial" if any(r.unreadable for r in results if r.found) else "ok"), results
 
 
 def sync_browsers():
@@ -185,14 +189,14 @@ def cmd_sync(_args):
             return 1
         if answers:
             browsers.record_answers(profiles, answers)
-        sessions = sync_sessions()
+        sessions = sync_sessions()[0]
         web = sync_browsers()
         if sessions == "none" and web == "nothing" and not recovering:
             print("Nothing to sync: no Claude Code or Codex sessions on this computer, and no browser profile chosen "
                   "(`inkvault browsers`).")
             return 1
         # Still holding the lock: a removal can't start between reading the vault and publishing search.
-        built = index.build() if recovering or sessions == "ok" or web in ("ok", "partial") else False
+        built = index.build() if recovering or sessions in ("ok", "partial") or web in ("ok", "partial") else False
         if recovering and built:
             dashboard.build()
             print("Finished a removal that had been interrupted.")

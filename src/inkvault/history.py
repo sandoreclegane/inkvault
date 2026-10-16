@@ -44,6 +44,7 @@ class SyncResult(NamedTuple):
     chosen: int         # profiles chosen
     failed: list        # keys of the chosen profiles that couldn't be read
     waiting: int        # profiles waiting for the user to choose
+    new_visits: int = 0  # visits newly stored, from the profiles that committed
 
 
 def now():
@@ -198,6 +199,7 @@ def sync():
         return SyncResult("nothing", 0, [], len(waiting))
     db = export.open_vault()
     failed = []
+    added = 0
     try:
         observed = now()
         for p in chosen:
@@ -209,6 +211,7 @@ def sync():
                 new = store(db, p.key, visits, choices["skip_sites"])
                 record(db, p.key, last_success=observed, last_error=None, visits_in_file=len(visits))
                 db.commit()
+                added += new
                 print(f"{label}: {len(visits):,} visits in the file, {new:,} new", flush=True)
             except (OSError, sqlite3.Error) as e:
                 db.rollback()
@@ -222,7 +225,7 @@ def sync():
     finally:
         db.close()
     outcome = "ok" if not failed else "failed" if len(failed) == len(chosen) else "partial"
-    return SyncResult(outcome, len(chosen), failed, len(waiting))
+    return SyncResult(outcome, len(chosen), failed, len(waiting), added)
 
 
 # --- From the vault into search (used by index.py) ---

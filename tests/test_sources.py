@@ -121,7 +121,7 @@ def test_subagent_transcripts_are_not_read(home):
 
 def test_no_sources_makes_no_vault(home):
     from inkvault import paths, sources
-    assert sources.sync() is False
+    assert not sources.any_found(sources.sync())
     assert not (home / "vault" / "vault.db").exists() or paths.vault_db().stat().st_size == 0
 
 
@@ -662,3 +662,49 @@ def test_a_format_2_vault_with_a_schema_type_list_upgrades(home):
     assert stored[0]["payload"]["dynamic_tools"][0]["inputSchema"] == SCHEMA
     assert "OLDSCHEMAPIXELS" not in json.dumps(stored)
     assert vault_rows("SELECT value FROM meta WHERE key='session_lines_format'") == [(sources.FORMAT,)]
+
+
+def two_sessions():
+    a, b = os.path.join(claude_dir(), "sess-a.jsonl"), os.path.join(claude_dir(), "sess-b.jsonl")
+    write(a, *SESSION)
+    write(b, *SESSION)
+    return a, b
+
+
+def unreadable(monkeypatch, *bad):
+    from inkvault import sources
+    real = sources.read_file
+
+    def read_file(db, source, path, keep, name):
+        if str(path) in bad:
+            raise OSError("locked")
+        return real(db, source, path, keep, name)
+    monkeypatch.setattr(sources, "read_file", read_file)
+
+
+def test_unreadable_is_partial(home, monkeypatch):
+    from inkvault import cli
+    a, b = two_sessions()
+    unreadable(monkeypatch, a)
+    status, results = cli.sync_sessions()
+    assert status == "partial"
+    assert [(r.found, r.unreadable) for r in results if r.source == "claude_code"] == [(True, 1)]
+    assert vault_rows("SELECT COUNT(*) FROM session_lines") == [(6,)]
+
+
+def test_all_unreadable_is_partial_not_none(home, monkeypatch):
+    from inkvault import cli
+    a, b = two_sessions()
+    unreadable(monkeypatch, a, b)
+    status, results = cli.sync_sessions()
+    assert status == "partial"
+    assert vault_rows("SELECT COUNT(*) FROM session_lines") == [(0,)]
+
+
+def test_sync_results_list_every_source(home):
+    from inkvault import sources
+    write(os.path.join(claude_dir(), "sess-1.jsonl"), *SESSION)
+    results = sources.sync()
+    assert [r.source for r in results] == list(sources.SOURCES)
+    cc = next(r for r in results if r.source == "claude_code")
+    assert (cc.found, cc.unreadable, cc.lines_added, cc.name) == (True, 0, 6, sources.NAMES["claude_code"])

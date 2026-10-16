@@ -350,7 +350,7 @@ def step_export():
 
 def step_sync():
     from . import sources
-    return sources.sync()
+    return sources.any_found(sources.sync())
 
 
 def step_browsers():
