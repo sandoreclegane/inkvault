@@ -30,13 +30,15 @@ def load_model(progress=None):
         if progress is None:
             print("downloading the search model (once, ~130 MB)…", flush=True)
         else:
-            progress.stage("Downloading the search model (once, ~130 MB)")
+            progress.stage("Downloading the search model (once, ~130 MB)", animate=False)
         StaticModel.from_pretrained(MODEL).save_pretrained(str(local))
     return StaticModel.from_pretrained(str(local))
 
 
 def build(progress=None):
     start = time.time()
+    if progress is not None:
+        progress.stage("meaning search")
     db = paths.connect_ro(paths.search_db())
     try:
         found = {kind: [(i, t[:MAX_CHARS]) for i, t in db.execute(sql) if t and t.strip()]
@@ -52,8 +54,10 @@ def build(progress=None):
     if progress is None:
         model = load_model()
     else:
+        downloading = not paths.model_dir().exists()
         model = load_model(progress)
-        progress.stage("meaning search")
+        if downloading:
+            progress.stage("meaning search")
     total = sum(len(rows) for rows in found.values())
     done = 0
     kinds, ids, vecs = [], [], []
@@ -61,8 +65,8 @@ def build(progress=None):
         # No worker processes: they crash under pythonw (how the nightly job runs on Windows), and for a
         # static model one process is as fast anyway (~15 s for 120k records).
         texts = [t for _, t in rows]
-        for start in range(0, len(texts), CHUNK):
-            v = model.encode(texts[start:start + CHUNK], batch_size=1024, show_progress_bar=False,
+        for lo in range(0, len(texts), CHUNK):
+            v = model.encode(texts[lo:lo + CHUNK], batch_size=1024, show_progress_bar=False,
                              use_multiprocessing=False)
             v /= np.linalg.norm(v, axis=1, keepdims=True) + 1e-9
             vecs.append(v.astype(np.float16))

@@ -138,7 +138,7 @@ class Progress:
 
     def __init__(self, term: Term):
         self.term = term
-        self._live = term.new_output
+        self._live = term.styled  # unstyled or piped: stage lines only, no redraws
         self._lock = threading.Lock()
         self._label = ""
         self._done = 0
@@ -155,8 +155,10 @@ class Progress:
         self._halt()
         return False
 
-    def stage(self, label: str) -> None:
-        if not self._live:
+    def stage(self, label: str, animate: bool = True) -> None:
+        """animate=False prints a plain line once (e.g. while another library writes to the terminal)."""
+        if not self._live or not animate:
+            self._halt()
             self.term.write(f"Building search: {label}...")
             return
         with self._lock:

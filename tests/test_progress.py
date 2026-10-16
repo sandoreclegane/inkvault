@@ -92,3 +92,60 @@ def test_none_progress_output_unchanged(tmp_path, monkeypatch, capsys):
     v.close()
     index.build()
     assert re.sub(r" in \d+s", " in Ns", capsys.readouterr().out) == BASELINE
+
+
+def test_unstyled_tty_is_plain(monkeypatch):
+    monkeypatch.setattr(term, "enable_vt", lambda: True)
+    s = stream(True)
+    t = Term.detect(s, stream(True), {"NO_COLOR": "1"})
+    assert t.new_output and not t.styled
+    with Progress(t) as p:
+        p.stage("meaning search")
+        p.update(1, 2)
+        time.sleep(0.25)
+    out = written(s)
+    assert out == "Building search: meaning search...\n"
+    assert "\r" not in out and "" not in out
+
+
+def test_download_stage_is_a_plain_line(monkeypatch):
+    t, s = mk(True, monkeypatch)
+    with Progress(t) as p:
+        p.stage("meaning search")
+        time.sleep(0.25)
+        p.stage("Downloading", animate=False)
+        mark = len(written(s))
+        time.sleep(0.3)  # a library writing to stderr here would not be overdrawn
+        assert len(written(s)) == mark
+    assert "Building search: Downloading...\n" in written(s)
+
+
+def test_index_build_with_progress(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    from inkvault import embed, export, index
+    seen = []
+    monkeypatch.setattr(embed, "build", lambda progress=None: seen.append(progress))
+    export.open_vault().close()
+
+    class P:
+        def stage(self, label): seen.append(label)
+
+    p = P()
+    index.build(p)
+    assert seen == ["keyword index", p]
+    assert capsys.readouterr().out == ""
+
+
+def test_meaning_time_is_elapsed_not_epoch(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("INKVAULT_HOME", str(tmp_path))
+    from inkvault import embed, export, index
+    monkeypatch.setattr(embed, "load_model", lambda: type("M", (), {
+        "encode": lambda self, texts, **_: np.ones((len(texts), 4), dtype=np.float32)})())
+    v = export.open_vault()
+    v.execute("INSERT INTO screen_stretches VALUES ('screen:a','2026-10-12T09:00:00.000000Z',"
+              "'2026-10-12T09:30:00.000000Z','D.exe','t')")
+    v.execute("INSERT INTO screen_text VALUES ('screentext:1','screen:a','2026-10-12T09:01:00.000000Z','x y','h')")
+    v.commit(); v.close()
+    index.build()
+    m = re.search(r"in (\d+)s", capsys.readouterr().out)
+    assert int(m.group(1)) < 60
