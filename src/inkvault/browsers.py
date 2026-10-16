@@ -188,13 +188,19 @@ def describe(profile, choices=None):
     return f"{NAMES[profile.browser]}: {profile.name}{who}  {profile.key}{mark}"
 
 
-def ask(profiles, read=input, choices=None):
-    """Ask which of these profiles are the user's. Returns {key: True/False}, or None if nothing was answered."""
+def ask(profiles, read=input, choices=None, term=None):
+    """Ask which of these profiles are the user's. Returns {key: True/False}, or None if nothing was answered.
+    With a Term the list and the prompt are styled; the answers accepted are the same."""
     for i, p in enumerate(profiles, 1):
-        print(f"  {i}. {describe(p, choices)}")
+        if term is None:
+            print(f"  {i}. {describe(p, choices)}")
+        else:
+            term.write(f"  {term.gold(str(i))}  {describe(p, choices)}")
+    prompt = ("Which of these are yours? Numbers separated by spaces, `all`, or `none`: " if term is None
+              else "Numbers separated by spaces, all, or none: ")
     while True:
         try:
-            answer = read("Which of these are yours? Numbers separated by spaces, `all`, or `none`: ").strip().lower()
+            answer = read(prompt).strip().lower()
         except EOFError:
             return None
         if answer in ("all", "none"):
@@ -205,18 +211,22 @@ def ask(profiles, read=input, choices=None):
             picked = set()
         if picked and all(1 <= n <= len(profiles) for n in picked):
             return {p.key: i in picked for i, p in enumerate(profiles, 1)}
-        print("Please type numbers from the list, `all`, or `none`.")
+        message = "Please type numbers from the list, `all`, or `none`."
+        print(message) if term is None else term.write(message)
 
 
 def interactive():
     return bool(sys.stdin and sys.stdin.isatty())
 
 
-def ask_about_new(profiles, choices, read=input):
+def ask_about_new(profiles, choices, read=input, term=None):
     """Ask about profiles not chosen yet (or chosen, but changed since). Returns the answers, or {} if there was
     nothing to ask or no answer; the caller records them under the lock (record_answers)."""
     waiting = [p for p in profiles if state(p, choices)[0] == "new"]
     if not waiting:
         return {}
-    print("InkVault found browser profiles it hasn't asked you about yet:")
-    return ask(waiting, read) or {}
+    if term is None:
+        print("InkVault found browser profiles it hasn't asked you about yet:")
+    else:
+        term.write(term.bold("Which browser profiles are yours?"))
+    return ask(waiting, read, term=term) or {}
