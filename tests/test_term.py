@@ -11,7 +11,7 @@ def stream(encoding="utf-8", tty=True):
         def isatty(self):
             return tty
 
-    return S(io.BytesIO(), encoding=encoding, errors="strict")
+    return S(io.BytesIO(), encoding=encoding, errors="strict", newline="")
 
 
 # Every non-ASCII glyph the styled output uses.
@@ -69,8 +69,14 @@ def test_full_message_set_survives_narrow_encoding(monkeypatch, encoding):
     t = term.Term.detect(out, stream(), {})
     assert t.ascii is True
     for m in MESSAGES:
+        before = len(out.buffer.getvalue())
         t.write(m)
-    out.flush()
+        out.flush()
+        written = out.buffer.getvalue()[before:]
+        assert written == (m + "\n").encode(encoding, "replace")
+        assert b"\x1b" not in written
+        if any(ord(c) > 127 for c in m) and encoding == "ascii":
+            assert b"?" in written  # replaced, not dropped
 
 
 def test_utf8_keeps_glyphs(monkeypatch):
@@ -96,13 +102,21 @@ def test_missing_encoding_is_ascii(monkeypatch):
         def isatty(self):
             return True
 
+        def __init__(self):
+            self.got = []
+
         def write(self, s):
-            pass
+            s.encode("ascii")  # raises like a narrow stream would
+            self.got.append(s)
 
         def flush(self):
             pass
 
-    assert term.Term.detect(NoEnc(), stream(), {}).ascii is True
+    out = NoEnc()
+    t = term.Term.detect(out, stream(), {})
+    assert t.ascii is True
+    t.write("a ◆ b")
+    assert out.got == ["a ? b\n"]
 
 
 def test_write_never_raises():
