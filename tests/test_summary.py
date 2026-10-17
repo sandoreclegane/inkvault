@@ -171,3 +171,10 @@ def test_visit_total_counts_chosen_profiles(home):
     db.commit()
     db.close()
     assert summary.visit_total(["a"]) == 2 and summary.visit_total(["a", "b"]) == 3 and summary.visit_total([]) == 0
+
+
+def test_corrupt_search_db_reads_as_empty(home):
+    from inkvault import paths, summary
+    paths.search_db().parent.mkdir(parents=True, exist_ok=True)
+    paths.search_db().write_bytes(b"this is not a database" * 100)
+    assert summary.conversation_ids() == {}

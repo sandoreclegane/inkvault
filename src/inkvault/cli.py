@@ -331,6 +331,7 @@ def terminal_sync(args, term):
                     if recovering and built:
                         dashboard.build()
             except Exception as e:  # noqa: BLE001
+                built = False  # a failed dashboard build after a recovery rebuild is not a success either
                 search_error = f"{type(e).__name__}: {e}"
             else:
                 if not built:

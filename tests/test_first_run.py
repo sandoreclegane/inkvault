@@ -358,3 +358,35 @@ def test_first_run_publish_failure_no_crash(world, monkeypatch):
     assert "summary unavailable" in shown
     assert "with new messages" not in shown
     assert world.opened == []
+
+
+# --- review fixes (PR #17) --------------------------------------------------------------------------------------
+
+def test_dashboard_failure_during_recovery_is_not_success(world, monkeypatch):
+    from inkvault import dashboard, paths
+    one_session()
+    terminal(monkeypatch, world)
+    assert run_sync() == 0
+    paths.rebuild_marker().parent.mkdir(parents=True, exist_ok=True)
+    paths.rebuild_marker().touch()  # a removal that stopped part-way: this run must finish it
+
+    def broken():
+        raise RuntimeError("atlas data")
+    monkeypatch.setattr(dashboard, "build", broken)
+    out = terminal(monkeypatch, world)
+    assert run_sync() == 1
+    shown = text(out)
+    assert re.search(r"^ +! Search +.*atlas data", shown, re.M)
+    assert world.opened == [1]  # only the first, healthy run opened the Atlas
+
+
+def test_corrupt_search_index_is_replaced(world, monkeypatch):
+    from inkvault import paths
+    one_session()
+    paths.search_db().parent.mkdir(parents=True, exist_ok=True)
+    paths.search_db().write_bytes(b"this is not a database" * 100)
+    out = terminal(monkeypatch, world)
+    assert run_sync() == 0
+    shown = text(out)
+    assert "Traceback" not in shown
+    assert re.search(r"Claude Code +1 conversation +1 with new messages", shown)

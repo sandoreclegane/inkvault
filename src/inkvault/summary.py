@@ -23,14 +23,17 @@ def conversation_ids():
     path = paths.search_db()
     if not path.exists():
         return {}
-    db = paths.connect_ro(path)
+    try:
+        db = paths.connect_ro(path)
+    except sqlite3.DatabaseError:
+        return {}
     try:
         db.execute("BEGIN")
         found = defaultdict(set)
         for source, conv, id_ in db.execute("SELECT source, conversation_id, id FROM messages"):
             found[(source, conv)].add(id_)
         return {k: frozenset(v) for k, v in found.items()}
-    except sqlite3.OperationalError:  # an index with no messages table is no index
+    except sqlite3.DatabaseError:  # no messages table, or not a database at all: the rebuild replaces it
         return {}
     finally:
         db.close()
