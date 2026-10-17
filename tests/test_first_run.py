@@ -301,3 +301,60 @@ def test_ctrl_c_at_browser_question(world, monkeypatch):
     assert "Stopped; nothing was synced." in shown
     assert "Traceback" not in shown
     assert not paths.vault_db().exists()
+
+
+# --- no stale summary when search isn't rebuilt ---------------------------------------------------------------
+
+def _fail_before_publish(monkeypatch):
+    from inkvault import index
+
+    def boom(src, dst):
+        raise OSError("disk full")
+    monkeypatch.setattr(index.os, "replace", boom)
+
+
+def _second_session():
+    write(os.path.join(claude_dir(), "sess-2.jsonl"), turn("user", "n1", "brand new words"))
+
+
+def test_stale_summary_not_shown_when_publish_fails(world, monkeypatch):
+    one_session()
+    terminal(monkeypatch, world)
+    assert run_sync("--no-open") == 0
+    _second_session()
+    _fail_before_publish(monkeypatch)
+    out = terminal(monkeypatch, world)
+    assert run_sync() == 1
+    shown = text(out)
+    assert re.search(r"! Claude Code +saved . summary unavailable \(search wasn't rebuilt\)", shown)
+    assert "with new messages" not in shown
+    assert world.opened == []
+
+
+def test_counts_shown_when_only_meaning_step_fails(world, monkeypatch):
+    from inkvault import embed
+    one_session()
+    terminal(monkeypatch, world)
+    assert run_sync("--no-open") == 0
+    _second_session()
+
+    def boom(progress=None):
+        raise RuntimeError("model unavailable")
+    monkeypatch.setattr(embed, "load_model", boom)
+    out = terminal(monkeypatch, world)
+    assert run_sync() == 1
+    shown = text(out)
+    assert "summary unavailable" not in shown
+    assert re.search(r"Claude Code +\d+ conversations? +1 with new messages", shown)
+    assert world.opened == []
+
+
+def test_first_run_publish_failure_no_crash(world, monkeypatch):
+    one_session()
+    _fail_before_publish(monkeypatch)
+    out = terminal(monkeypatch, world)
+    assert run_sync() == 1
+    shown = text(out)
+    assert "summary unavailable" in shown
+    assert "with new messages" not in shown
+    assert world.opened == []

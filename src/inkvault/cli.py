@@ -192,12 +192,13 @@ OPEN_FAILED = "Couldn't open the Atlas; open it with: inkvault dashboard"
 OPEN_WITH = "Open it with: inkvault dashboard"
 NEXT_TIME = "Next time: inkvault sync · skip the browser: --no-open"
 RECOVERED = "Finished a removal that had been interrupted."
+SUMMARY_UNAVAILABLE = "saved · summary unavailable (search wasn't rebuilt)"
 FIRST_RUN_MESSAGES = (
     "◆ InkVault  " + HELLO_TAGLINE, HELLO_LINE, "Which browser profiles are yours?",
     "Numbers separated by spaces, all, or none: ", SAVING, "Browser history", "Search", "up to date",
     "conversations", "with new messages", "visits", "new", "profiles", "files couldn't be read", READY, OPENING,
     OPEN_FAILED, OPEN_WITH, NEXT_TIME, RECOVERED, "Building search: keyword index…",
-    "Building search: meaning search…", "✓ ! · … — ━ ╺ ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏",
+    "Building search: meaning search…", SUMMARY_UNAVAILABLE, "✓ ! · … — ━ ╺ ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏",
 )
 
 
@@ -276,6 +277,14 @@ def step_notes(buffer):
     return [l.strip() for l in buffer.getvalue().splitlines() if l.strip()]
 
 
+def search_stamp(paths):
+    """When search.db was last replaced (None if there is none), to tell whether a run published a new index."""
+    try:
+        return paths.search_db().stat().st_mtime_ns
+    except OSError:
+        return None
+
+
 def terminal_sync(args, term):
     """`sync` in a terminal: a hello, progress while search is built, a summary, and the Atlas opening."""
     from . import browsers, dashboard, forget, index, paths, summary
@@ -314,6 +323,7 @@ def terminal_sync(args, term):
             return 1
         say(term, term.bold(SAVING))
         built, search_error = False, None
+        stamp_before = search_stamp(paths)
         if recovering or sessions in ("ok", "partial") or web in ("ok", "partial"):
             try:
                 with Progress(term) as progress, captured() as search_out:
@@ -328,8 +338,12 @@ def terminal_sync(args, term):
                     search_error = said[-1] if said else "search wasn't built"
         else:
             search_error = "not built: nothing was saved"
-        after = summary.conversation_ids()
-        session_lines = summary.session_lines(before, after, results)
+        # Counts come from the search index: only trust them if this run published a new one.
+        published = search_stamp(paths) not in (None, stamp_before)
+        if published:
+            session_lines = summary.session_lines(before, summary.conversation_ids(), results)
+        else:
+            session_lines = [summary.SessionLine(r.source, r.name, 0, 0) for r in results if r.found]
         keys = chosen_profile_keys() if web_result and web_result.chosen else []
         total_visits = summary.visit_total(keys)
     # The lock is released: everything below only reads what was captured above.
@@ -342,6 +356,9 @@ def terminal_sync(args, term):
 
     for line in session_lines:
         bad = unreadable.get(line.source, 0)
+        if not published:
+            row(False, line.name, SUMMARY_UNAVAILABLE.replace("·", term.dot))
+            continue
         body = f"{term.bold(plural(line.conversations, 'conversation'))}   {term.teal(str(line.with_new))} with new messages"
         if bad:
             body += term.amber(f"   {plural(bad, 'file')} couldn't be read")
