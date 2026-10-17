@@ -4,7 +4,8 @@
 
 - **A friendlier first `sync`.** In a terminal, `inkvault sync` now greets you, shows progress while it builds
   search, and ends with a short summary of what it saved (one row per source, then search). When piped or run from
-  a schedule, the output is the same plain text as before.
+  a schedule, the output is the same plain text as before. If search couldn't be rebuilt, the summary says so
+  instead of showing old counts.
 - **The Atlas opens by itself.** After a fully successful sync in a terminal, the Memory Atlas opens in your
   browser. `--no-open` skips it, and `inkvault dashboard` still opens it any time.
 - **Behaviour change:** unreadable session files now make `sync` exit 1, in a terminal or not. Before, they were
