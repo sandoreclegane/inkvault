@@ -723,3 +723,15 @@ def test_rescue_without_piecesos_points_to_sync(home, capsys):
     from inkvault import cli
     assert cli.main(["rescue", "--no-open", "--no-digest"]) == 1
     assert "`inkvault sync` copies them without PiecesOS" in capsys.readouterr().out
+
+
+def test_new_visits_counts_commits(home, monkeypatch):
+    from inkvault import history
+    h = chrome(home, monkeypatch, "Default")["Default"]
+    chromium_visit(h, 1, "https://example.com/a", T1)
+    chromium_visit(h, 2, "https://example.com/a", T2)  # repeated visit of the same page
+    chromium_visit(h, 3, "chrome://settings", T1)  # never stored
+    choose("chrome/Default")
+    r = history.sync()
+    assert r.new_visits == len(stored("SELECT 1 FROM browser_visits")) == 2
+    assert history.sync().new_visits == 0

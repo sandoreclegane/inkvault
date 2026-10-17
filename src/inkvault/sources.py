@@ -17,6 +17,7 @@ import os
 import re
 import sqlite3
 from collections import Counter, defaultdict
+from typing import NamedTuple
 from pathlib import Path
 
 from . import export
@@ -219,17 +220,32 @@ def read_file(db, source, path, keep, name):
     return stored
 
 
+class SourceResult(NamedTuple):
+    source: str
+    name: str           # display name
+    found: bool
+    unreadable: int     # files that couldn't be read
+    lines_added: int
+
+
+def any_found(results):
+    return any(r.found for r in results)
+
+
 def sync():
-    """Copy what's new from each source into the vault. Returns False if no source is on this computer."""
+    """Copy what's new from each source into the vault. Returns one SourceResult per source; none is found if no
+    source is on this computer."""
     found = {}
+    results = {}
     for source, (files, keep, key) in SOURCES.items():
         paths = files()
+        results[source] = SourceResult(source, NAMES[source], False, 0, 0)
         if paths is None:
             print(f"{NAMES[source]}: not found")
         else:
             found[source] = paths, keep, key
     if not found:
-        return False  # and no empty vault is made
+        return list(results.values())  # and no empty vault is made
     db = export.open_vault()
     try:
         upgrade(db)
@@ -245,12 +261,13 @@ def sync():
             unreadable = f", {failed} unreadable" if failed else ""
             print(f"{NAMES[source]}: {file_counts(key(p) for p in paths)}, {new} new lines{unreadable}",
                   flush=True)
+            results[source] = SourceResult(source, NAMES[source], True, failed, new)
         db.execute("INSERT OR REPLACE INTO meta VALUES ('last_sync', ?)",
                    (datetime.datetime.now().astimezone().isoformat(timespec="seconds"),))
         db.commit()
     finally:
         db.close()
-    return True
+    return list(results.values())
 
 
 # --- Reading the stored lines back as chat messages (used by index.py) ---
