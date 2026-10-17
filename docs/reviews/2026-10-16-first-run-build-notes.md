@@ -15,15 +15,18 @@
 - Full suite: 833 passed, 4 skipped. `uvx ruff check --select F src tests`: All checks passed.
 - `git diff --check`: clean. `uv build`: inkvault-0.3.3 sdist and wheel built.
 
-## Manual smoke (pending)
+## Manual smoke (2026-10-16)
 
-Not run by the build agent (no interactive console). Run by hand with a throwaway `--home`, never the live vault.
-Results are blank until checked.
+Run by the user on this PC (Windows 11) against a throwaway `--home` (model copied in, browser question answered
+`none`), deleted afterwards. The live vault was not used.
 
 | Console | Check | Result |
 |---|---|---|
-| Windows Terminal | hello, colour, spinner, rows, Atlas opens, `--no-open` skips | |
-| PowerShell 5.1 | same; glyphs and colour render | |
-| Legacy conhost (`conhost.exe powershell`) | ASCII fallback if glyphs/VT unavailable | |
-| `NO_COLOR=1` | no colour codes; layout unchanged | |
-| Piped (`sync \| more`) | plain legacy output, no hello, no auto-open | |
+| Windows Terminal (Command Prompt tab) | hello, colour, bar, rows, Atlas opens | Pass: gold header, ✓ rows with counts, no stray glyphs, Atlas opened |
+| Windows PowerShell 5.1 | same; glyphs and colour render | Pass |
+| Legacy conhost (`conhost.exe`, cmd) | glyphs/VT or ASCII fallback | Pass: clean, Atlas opened |
+| `NO_COLOR=1` in PowerShell 5.1 | no colour, stage lines once, layout unchanged | Pass |
+| Piped / non-TTY (stdin and stdout redirected) | plain legacy output, no hello, no auto-open | Pass: legacy lines, 0 ESC, 0 CR, exit 0; also with `NO_COLOR` |
+
+`--no-open` was not exercised by hand; it is covered by `tests/test_first_run.py`. In cmd,
+`set UV_LINK_MODE=copy && ...` keeps the trailing space; use `set "UV_LINK_MODE=copy" && ...`.
