@@ -23,13 +23,15 @@ def snippet_row(a):
     return a["id"], (a.get("created") or {}).get("value"), a.get("name") or "", lang, text
 
 
-def build():
+def build(progress=None):
     from . import forget  # imported here: forget.py calls index.build
     if not paths.vault_db().exists():
         print("Nothing to index yet: run `inkvault export` first.")
         return False
     # A removal stopped part-way is finished before anything is read, so its visits can't be indexed again.
     forget.apply_pending()
+    if progress is not None:
+        progress.stage("keyword index")
     with ExitStack() as stack:  # each connection is registered the moment it opens, so any later failure closes it
         raw = paths.connect_ro(paths.vault_db())
         stack.callback(raw.close)
@@ -124,10 +126,14 @@ def build():
         """)
         db.commit()
         counts = {t: db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("events", "summaries", "messages", "snippets", "pages")}
-        print("indexed: " + ", ".join(f"{n:,} {t}" for t, n in counts.items()), flush=True)
+        if progress is None:
+            print("indexed: " + ", ".join(f"{n:,} {t}" for t, n in counts.items()), flush=True)
     os.replace(tmp, paths.search_db())
 
-    embed.build()
+    if progress is None:
+        embed.build()
+    else:
+        embed.build(progress)
     marker = paths.rebuild_marker()
     if marker.exists() and not forget.pending():
         # Search is fresh and no removal is pending. The dashboard on disk was built from the old index, so it goes

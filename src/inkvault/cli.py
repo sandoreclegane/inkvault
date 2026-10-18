@@ -14,6 +14,7 @@
 """
 import argparse
 import contextlib
+import io
 import json
 import os
 import sqlite3
@@ -138,37 +139,103 @@ def partial_rescue(args):
 
 
 def sync_sessions():
-    """Claude Code and Codex sessions: "ok", "none" (none on this computer) or "failed". A failure is reported and
-    never stops a rescue or the browser sync."""
+    """Claude Code and Codex sessions: (status, per-source results). Status is "ok", "partial" (some session file
+    couldn't be read), "none" (none on this computer) or "failed". A failure is reported and never stops a rescue
+    or the browser sync."""
     from . import sources
     try:
-        return "ok" if sources.sync() else "none"
+        results = sources.sync()
     except Exception as e:  # noqa: BLE001
         print(f"Couldn't sync Claude Code / Codex sessions: {type(e).__name__}: {e}")
-        return "failed"
+        return "failed", []
+    if not sources.any_found(results):
+        return "none", results
+    return ("partial" if any(r.unreadable for r in results if r.found) else "ok"), results
+
+
+def sync_browsers_result():
+    """Browser history: history.sync()'s full SyncResult, or None if it failed outright (reported, and never stops
+    anything else)."""
+    from . import history
+    try:
+        return history.sync()
+    except Exception as e:  # noqa: BLE001
+        print(f"Couldn't sync browser history: {type(e).__name__}: {e}")
+        return None
 
 
 def sync_browsers():
-    """Browser history: history.sync()'s outcome, or "failed". A failure is reported and never stops anything else."""
-    from . import history
-    try:
-        return history.sync().outcome
-    except Exception as e:  # noqa: BLE001
-        print(f"Couldn't sync browser history: {type(e).__name__}: {e}")
-        return "failed"
+    """Browser history: history.sync()'s outcome, or "failed"."""
+    result = sync_browsers_result()
+    return "failed" if result is None else result.outcome
 
 
-def ask_browsers():
+def ask_browsers(term=None):
     """In a terminal, ask about profiles not chosen yet: (profiles, answers). Before any lock is taken, because it
     waits for a person; the caller records the answers once it holds the lock."""
     from . import browsers
     if not browsers.interactive():
         return [], {}
     profiles = browsers.find_profiles()
-    return profiles, browsers.ask_about_new(profiles, browsers.load_choices())
+    return profiles, browsers.ask_about_new(profiles, browsers.load_choices(), term=term)
 
 
-def cmd_sync(_args):
+# Every fixed string the first-run output can emit (the counts between them are built from numbers). A test writes
+# each through strict ascii and cp1252 streams.
+HELLO_TAGLINE = "your memory, on this computer · nothing is uploaded"
+HELLO_LINE = ("InkVault keeps a private copy of your AI sessions and chosen browser history on this computer. "
+              "Nothing is uploaded.")
+SAVING = "Saving…"
+READY = "Your vault is ready."
+OPENING = "Your vault is ready. Opening the Memory Atlas…"
+OPEN_FAILED = "Couldn't open the Atlas; open it with: inkvault dashboard"
+OPEN_WITH = "Open it with: inkvault dashboard"
+NEXT_TIME = "Next time: inkvault sync · skip the browser: --no-open"
+RECOVERED = "Finished a removal that had been interrupted."
+SUMMARY_UNAVAILABLE = "saved · summary unavailable (search wasn't rebuilt)"
+FIRST_RUN_MESSAGES = (
+    "◆ InkVault  " + HELLO_TAGLINE, HELLO_LINE, "Which browser profiles are yours?",
+    "Numbers separated by spaces, all, or none: ", SAVING, "Browser history", "Search", "up to date",
+    "conversations", "with new messages", "visits", "new", "profiles", "files couldn't be read", READY, OPENING,
+    OPEN_FAILED, OPEN_WITH, NEXT_TIME, RECOVERED, "Building search: keyword index…",
+    "Building search: meaning search…", SUMMARY_UNAVAILABLE, "✓ ! · … — ━ ╺ ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏",
+)
+
+
+def say(term, text):
+    """Write one line of the new output; on an ASCII-only console the few non-ASCII characters become ASCII."""
+    if term.ascii:
+        text = text.replace("…", term.ell).replace("·", term.dot).replace("—", "-").replace("◆", term.mark)
+        text = "".join(c if ord(c) < 128 else "?" for c in text)
+    term.write(text)
+
+
+@contextlib.contextmanager
+def captured():
+    """Hold back what a step prints. If the step raises, what it had printed is shown before the error goes on."""
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            yield buffer
+    except BaseException:
+        sys.stdout.write(buffer.getvalue())
+        raise
+
+
+def plural(n, one, many=None):
+    return f"{n:,} {one if n == 1 else many or one + 's'}"
+
+
+def cmd_sync(args):
+    from .term import Term
+    term = Term.detect()
+    if not term.new_output:
+        return plain_sync()
+    return terminal_sync(args, term)
+
+
+def plain_sync():
+    """`sync` when output isn't a terminal (a script, a pipe, a log): exactly what it has always printed."""
     from . import browsers, dashboard, forget, index, paths
     profiles, answers = ask_browsers()
     with locked("sync", "nothing was synced.") as ok:
@@ -185,18 +252,156 @@ def cmd_sync(_args):
             return 1
         if answers:
             browsers.record_answers(profiles, answers)
-        sessions = sync_sessions()
+        sessions = sync_sessions()[0]
         web = sync_browsers()
         if sessions == "none" and web == "nothing" and not recovering:
             print("Nothing to sync: no Claude Code or Codex sessions on this computer, and no browser profile chosen "
                   "(`inkvault browsers`).")
             return 1
         # Still holding the lock: a removal can't start between reading the vault and publishing search.
-        built = index.build() if recovering or sessions == "ok" or web in ("ok", "partial") else False
+        built = index.build() if recovering or sessions in ("ok", "partial") or web in ("ok", "partial") else False
         if recovering and built:
             dashboard.build()
             print("Finished a removal that had been interrupted.")
-    return 0 if built and sessions != "failed" and web in ("ok", "nothing") else 1
+    return 0 if built and sessions in ("ok", "none") and web in ("ok", "nothing") else 1
+
+
+def chosen_profile_keys():
+    from . import browsers
+    choices = browsers.load_choices()
+    return [p.key for p in browsers.find_profiles() if browsers.state(p, choices)[0] == "yes"]
+
+
+def step_notes(buffer):
+    """What a step printed, as lines (for a step that failed outright)."""
+    return [l.strip() for l in buffer.getvalue().splitlines() if l.strip()]
+
+
+def search_stamp(paths):
+    """When search.db was last replaced (None if there is none), to tell whether a run published a new index."""
+    try:
+        return paths.search_db().stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def terminal_sync(args, term):
+    """`sync` in a terminal: a hello, progress while search is built, a summary, and the Atlas opening."""
+    from . import browsers, dashboard, forget, index, paths, summary
+    from .history import waiting_line
+    from .term import Progress
+    say(term, f"{term.gold(term.mark)} {term.bold('InkVault')}  {term.dim(HELLO_TAGLINE)}")
+    say(term, term.dim(HELLO_LINE))
+    term.write("")
+    try:
+        profiles, answers = ask_browsers(term)
+    except KeyboardInterrupt:
+        term.write("")
+        say(term, "Stopped; nothing was synced.")
+        return 130
+    with locked("sync", "nothing was synced.") as ok:
+        if not ok:
+            return 1
+        recovering = forget.pending() > 0 or paths.rebuild_marker().exists()
+        try:
+            forget.apply_pending()
+        except Exception as e:  # noqa: BLE001
+            say(term, f"Couldn't finish a removal that was interrupted ({type(e).__name__}: {e}); nothing was synced, "
+                      "and search stays off until it's finished.")
+            return 1
+        if answers:
+            browsers.record_answers(profiles, answers)
+        before = summary.conversation_ids()
+        with captured() as sessions_out:
+            sessions, results = sync_sessions()
+        with captured() as web_out:
+            web_result = sync_browsers_result()
+        web = "failed" if web_result is None else web_result.outcome
+        if sessions == "none" and web == "nothing" and not recovering:
+            say(term, "Nothing to sync: no Claude Code or Codex sessions on this computer, and no browser profile "
+                      "chosen (`inkvault browsers`).")
+            return 1
+        say(term, term.bold(SAVING))
+        built, search_error = False, None
+        stamp_before = search_stamp(paths)
+        if recovering or sessions in ("ok", "partial") or web in ("ok", "partial"):
+            try:
+                with Progress(term) as progress, captured() as search_out:
+                    built = index.build(progress)
+                    if recovering and built:
+                        dashboard.build()
+            except Exception as e:  # noqa: BLE001
+                built = False  # a failed dashboard build after a recovery rebuild is not a success either
+                search_error = f"{type(e).__name__}: {e}"
+            else:
+                if not built:
+                    said = step_notes(search_out)
+                    search_error = said[-1] if said else "search wasn't built"
+        else:
+            search_error = "not built: nothing was saved"
+        # Counts come from the search index: only trust them if this run published a new one.
+        published = search_stamp(paths) not in (None, stamp_before)
+        if published:
+            session_lines = summary.session_lines(before, summary.conversation_ids(), results)
+        else:
+            session_lines = [summary.SessionLine(r.source, r.name, 0, 0) for r in results if r.found]
+        keys = chosen_profile_keys() if web_result and web_result.chosen else []
+        total_visits = summary.visit_total(keys)
+    # The lock is released: everything below only reads what was captured above.
+    width = max([len(l.name) for l in session_lines] + [len("Browser history"), len("Search")])
+    unreadable = {r.source: r.unreadable for r in results}
+
+    def row(good, name, body):
+        glyph = term.teal(term.ok) if good else term.amber(term.warn)
+        say(term, f"  {glyph} {name:<{width}}  {body}")
+
+    for line in session_lines:
+        bad = unreadable.get(line.source, 0)
+        if not published:
+            row(False, line.name, SUMMARY_UNAVAILABLE.replace("·", term.dot))
+            continue
+        body = f"{term.bold(plural(line.conversations, 'conversation'))}   {term.teal(str(line.with_new))} with new messages"
+        if bad:
+            body += term.amber(f"   {plural(bad, 'file')} couldn't be read")
+        row(not bad, line.name, body)
+    if sessions == "failed":
+        row(False, "Sessions", "couldn't be read")
+        for note in step_notes(sessions_out) or ["see `inkvault status`"]:
+            say(term, term.dim(f"      {note}"))
+    if web_result is None:
+        row(False, "Browser history", "couldn't be read")
+        for note in step_notes(web_out) or ["see `inkvault status`"]:
+            say(term, term.dim(f"      {note}"))
+    elif web != "nothing":
+        added = term.teal("+" + format(web_result.new_visits, ",") + " new")
+        body = f"{term.bold(plural(total_visits, 'visit'))}   {added} ({plural(web_result.chosen, 'profile')})"
+        if web_result.failed:
+            body += term.amber(f"   couldn't read: {', '.join(web_result.failed)}")
+        row(web == "ok", "Browser history", body)
+    if web_result is not None and web_result.waiting:
+        say(term, term.dim(f"      {waiting_line(web_result.waiting)}"))
+    if search_error:
+        row(False, "Search", search_error)
+    else:
+        row(True, "Search", "up to date")
+    if recovering and built:
+        say(term, RECOVERED)
+    success = built and sessions in ("ok", "none") and web in ("ok", "nothing")
+    term.write("")
+    if success and term.interactive and not getattr(args, "no_open", False):
+        from . import atlasserve
+        say(term, term.teal(READY) + OPENING[len(READY):])
+        try:
+            atlasserve.start_detached()
+        except Exception:  # noqa: BLE001  (a cosmetic launch problem never changes the exit code)
+            say(term, OPEN_FAILED)
+        else:
+            say(term, term.dim(NEXT_TIME))
+    else:
+        if success:
+            say(term, term.teal(READY))
+        say(term, OPEN_WITH)
+    return 0 if success else 1
 
 
 def confirm(question):
@@ -482,7 +687,8 @@ def main(argv=None):
     r.add_argument("--no-open", action="store_true", help="don't open the dashboard when done")
     r.add_argument("--model", default=None, help="Ollama model for digests (default qwen3.5:4b)")
     sub.add_parser("export", help="copy everything out of PiecesOS into the vault")
-    sub.add_parser("sync", help="copy new Claude Code and Codex sessions and browser history into the vault, then rebuild search")
+    sy = sub.add_parser("sync", help="copy new Claude Code and Codex sessions and browser history into the vault, then rebuild search")
+    sy.add_argument("--no-open", action="store_true", help="don't open the Memory Atlas when done")
     br = sub.add_parser("browsers", help="choose which browser profiles are yours, and sites never to keep")
     one = br.add_mutually_exclusive_group()
     one.add_argument("--yes", metavar="KEY", help='copy this profile\'s history (a key from the list, e.g. "chrome/Default")')

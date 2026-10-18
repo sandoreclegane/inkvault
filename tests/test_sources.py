@@ -59,7 +59,7 @@ def vault_rows(sql):
 def test_sync_keeps_conversation_lines_only(home):
     from inkvault import sources
     write(os.path.join(claude_dir(), "sess-1.jsonl"), *SESSION)
-    assert sources.sync()
+    assert sources.any_found(sources.sync())
     kept = [json.loads(r)["uuid"] for (r,) in vault_rows("SELECT raw FROM session_lines ORDER BY offset")]
     assert kept == ["u1", "a1", "u3", "u4", "a2", "a3"]  # no queue, attachment or tool result
     assert "sk-123" not in "".join(r for (r,) in vault_rows("SELECT raw FROM session_lines"))
@@ -121,7 +121,7 @@ def test_subagent_transcripts_are_not_read(home):
 
 def test_no_sources_makes_no_vault(home):
     from inkvault import paths, sources
-    assert sources.sync() is False
+    assert not sources.any_found(sources.sync())
     assert not (home / "vault" / "vault.db").exists() or paths.vault_db().stat().st_size == 0
 
 
@@ -130,7 +130,7 @@ def test_bad_lines_never_stop_a_sync(home):
     path = os.path.join(claude_dir(), "sess-1.jsonl")
     with open(path, "w", encoding="utf-8") as f:
         f.write("not json\n[1, 2]\n" + json.dumps(SESSION[1]) + "\n")
-    assert sources.sync()
+    assert sources.any_found(sources.sync())
     assert vault_rows("SELECT COUNT(*) FROM session_lines") == [(1,)]
 
 
@@ -640,7 +640,7 @@ def meta_with_tools():
 def test_a_schema_type_list_survives_and_attachments_still_go(home):
     from inkvault import sources
     codex_file(meta_with_tools(), compaction_with_image("SCHEMAPIXELS"), *CODEX_NEW[1:])
-    assert sources.sync()
+    assert sources.any_found(sources.sync())
     stored = [json.loads(r) for (r,) in vault_rows("SELECT raw FROM session_lines ORDER BY offset")]
     assert stored[0]["payload"]["dynamic_tools"][0]["inputSchema"] == SCHEMA
     assert "SCHEMAPIXELS" not in json.dumps(stored)
@@ -656,9 +656,55 @@ def test_a_format_2_vault_with_a_schema_type_list_upgrades(home):
     db.execute("INSERT INTO meta VALUES ('session_lines_format', '2')")
     db.commit()
     db.close()
-    assert sources.sync()
+    assert sources.any_found(sources.sync())
     stored = [json.loads(r) for (r,) in vault_rows(
         "SELECT raw FROM session_lines WHERE file='rollout-gone.jsonl' ORDER BY offset")]
     assert stored[0]["payload"]["dynamic_tools"][0]["inputSchema"] == SCHEMA
     assert "OLDSCHEMAPIXELS" not in json.dumps(stored)
     assert vault_rows("SELECT value FROM meta WHERE key='session_lines_format'") == [(sources.FORMAT,)]
+
+
+def two_sessions():
+    a, b = os.path.join(claude_dir(), "sess-a.jsonl"), os.path.join(claude_dir(), "sess-b.jsonl")
+    write(a, *SESSION)
+    write(b, *SESSION)
+    return a, b
+
+
+def unreadable(monkeypatch, *bad):
+    from inkvault import sources
+    real = sources.read_file
+
+    def read_file(db, source, path, keep, name):
+        if str(path) in bad:
+            raise OSError("locked")
+        return real(db, source, path, keep, name)
+    monkeypatch.setattr(sources, "read_file", read_file)
+
+
+def test_unreadable_is_partial(home, monkeypatch):
+    from inkvault import cli
+    a, b = two_sessions()
+    unreadable(monkeypatch, a)
+    status, results = cli.sync_sessions()
+    assert status == "partial"
+    assert [(r.found, r.unreadable) for r in results if r.source == "claude_code"] == [(True, 1)]
+    assert vault_rows("SELECT COUNT(*) FROM session_lines") == [(6,)]
+
+
+def test_all_unreadable_is_partial_not_none(home, monkeypatch):
+    from inkvault import cli
+    a, b = two_sessions()
+    unreadable(monkeypatch, a, b)
+    status, results = cli.sync_sessions()
+    assert status == "partial"
+    assert vault_rows("SELECT COUNT(*) FROM session_lines") == [(0,)]
+
+
+def test_sync_results_list_every_source(home):
+    from inkvault import sources
+    write(os.path.join(claude_dir(), "sess-1.jsonl"), *SESSION)
+    results = sources.sync()
+    assert [r.source for r in results] == list(sources.SOURCES)
+    cc = next(r for r in results if r.source == "claude_code")
+    assert (cc.found, cc.unreadable, cc.lines_added, cc.name) == (True, 0, 6, sources.NAMES["claude_code"])
