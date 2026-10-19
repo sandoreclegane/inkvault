@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.4 — On PyPI
+
+- **Install from PyPI.** `uvx inkvault` or `pip install inkvault` now works; releases publish automatically through
+  PyPI trusted publishing.
+- **Listed for the MCP Registry** as `io.github.sandoreclegane/inkvault` (`server.json`).
+- The source package now holds only the package, tests and docs it needs, and the README logo shows on PyPI.
+- Two timing-sensitive tests no longer flake on slow Windows CI runners.
+- No change to sync, search, the Atlas or MCP output.
+
 ## 0.3.3 — First run
 
 - **A friendlier first `sync`.** In a terminal, `inkvault sync` now greets you, shows progress while it builds
