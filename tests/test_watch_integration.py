@@ -86,8 +86,11 @@ def test_many_window_changes_under_contention(rig):
         assert len(w.queue) <= w.queue.max_stretches and w.busy_gaps > 0           # the actual cap (R8)
     finally:
         blocker.rollback(); blocker.close()
-    for _ in range(10):
+    # The real worker drains the backlog at the runner's pace, so wait on the queue, not a fixed tick count.
+    end = time.monotonic() + 15.0
+    while len(w.queue) > 1 and time.monotonic() < end:
         step(w, clock)
+        time.sleep(0.02)
     assert len(w.queue) <= 1
     ids = [r[0] for r in conn.execute("SELECT id FROM screen_stretches ORDER BY started")]
     assert len(ids) >= 49 and len(set(ids)) == len(ids)

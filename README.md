@@ -1,7 +1,8 @@
+<!-- mcp-name: io.github.sandoreclegane/inkvault -->
 # InkVault
 
 <p align="center">
-  <img src="docs/assets/inkvault-logo-horizontal.png" alt="InkVault logo" width="560">
+  <img src="https://raw.githubusercontent.com/sandoreclegane/inkvault/main/docs/assets/inkvault-logo-horizontal.png" alt="InkVault logo" width="560">
 </p>
 
 **Local-first, user-owned persistent memory for your AI conversations, browsing, and work.**

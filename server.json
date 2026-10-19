@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.sandoreclegane/inkvault",
+  "description": "Local-first AI memory: search your Claude Code, Codex, Claude desktop, Pieces and browser history.",
+  "repository": {
+    "url": "https://github.com/sandoreclegane/inkvault",
+    "source": "github"
+  },
+  "version": "0.3.4",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "inkvault",
+      "version": "0.3.4",
+      "runtimeHint": "uvx",
+      "transport": { "type": "stdio" },
+      "packageArguments": [{ "type": "positional", "value": "serve" }]
+    }
+  ]
+}

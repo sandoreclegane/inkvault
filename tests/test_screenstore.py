@@ -118,7 +118,7 @@ def test_flush_stops_at_busy_and_at_its_budget(store):
         assert r.busy and r.written == 0 and len(q) == 30
     finally:
         blocker.rollback(); blocker.close()
-    assert q.flush(conn, max_writes=20).written == 20 and len(q) == 10           # P11: write budget
+    assert q.flush(conn, max_writes=20, clock=lambda: 0.0).written == 20 and len(q) == 10           # P11: write budget
     ticks = iter([0.0, 0.0, 0.3, 0.3, 0.3])
     assert q.flush(conn, clock=lambda: next(ticks)).written == 1                 # P11: time budget
 
